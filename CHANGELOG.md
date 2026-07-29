@@ -2,8 +2,21 @@
 
 ## Unreleased — 2026-07-29
 
+### Changed
+
+- Realigned the project and AgenTeam roles from a CVPR-first active-routing
+  thesis to the ISBI 2027 permanently sparse support-anchor Gaussian
+  representation thesis, with active routing deferred until after static
+  representation gates.
+- Replaced the reconstruction implementation order with human-gated T0 through
+  T5 tranches and marked T0 complete, T0.5/T1 next, and T2+ unauthorized in the
+  current run.
+- Removed root README links to deleted legacy knowledge and architecture files.
+
 ### Added
 
+- ISBI strategy precedence, full-mechanism novelty-collision analysis,
+  permanently sparse training protocol, and T0.5/T1 interface design delta.
 - PyTorch CPU-first technology stack (`Python >=3.10`, NumPy interoperability,
   `torch`, and a `pytest` test extra) for the T0 reference operator.
 - Verified macOS arm64/Python 3.10 CPU dependency lock for the T0 reference

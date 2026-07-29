@@ -20,7 +20,7 @@ The downstream reconstruction flow remains locked:
 compact encoder evidence
 → physical support anchors
 → shared tiny local field
-→ SDF/level-set constrained structural Gaussians
+→ StructuralField/level-set-constrained structural Gaussians
   + volumetric appearance Gaussians
 → anchor/Gaussian propagation and active updates
 → latent patient-specific 3D Gaussian state
@@ -362,7 +362,8 @@ Mitigation:
 - separate structural and appearance maps;
 - reliability-weighted alignment;
 - do not align appearance features;
-- evaluate lesion-sensitive reconstruction on the audit set.
+- evaluate lesion-sensitive reconstruction on the isolated T1
+  lesion-validation cohort; keep the sealed T5 final-audit cohort separate.
 
 ### Risk C — Sparse targets do not constrain every hidden region
 
@@ -397,24 +398,21 @@ Mitigation:
 
 ---
 
-## 9. Recommended implementation order after approval
+## 9. Human-gated implementation order
 
 ```text
-P1. sparse-only manifest loader and leakage tests
-P2. analytic differential channel bank
-P3. micro-CNN encoder with Z_str / Z_app outputs
-P4. structural warm-up losses and anti-collapse diagnostics
-P5. minimal physical-plane target prediction test
-P6. Phase-2 anchor bootstrap
-P7. tiny local field and field blending
-P8. structural and volumetric Gaussian initialization
-P9. physical-plane renderer
-P10. static sparse reconstruction baseline
-P11. analytic uncertainty and single-wave routing
-P12. balanced multi-wave routing
-P13. adaptive topology and propagation refinement
-P14. final volume export and isolated audit evaluation
+T0   — legal physical operator, completed
+T0.5 — legal episodic training corrections
+T1   — teacher-free encoder + fixed-topology Gaussian baseline
+T2   — support-anchor bootstrap + tiny local structural field
+T3   — anchored Gaussian propagation
+T4   — active trajectory
+T5   — final full-volume export and isolated audit evaluation
 ```
+
+Each transition is human-gated. The current approved implementation tranche
+ends at T1. T2, T3, T4, and T5 must not be implemented or scaffolded before a
+separate human approval.
 
 ---
 
@@ -427,4 +425,7 @@ P14. final volume export and isolated audit evaluation
 | Phase 3 | Conditionally ready | Start with analytic routing; learned utility needs declared supervision source |
 | Phase 4 | Design-ready | Audit data must remain isolated from reconstruction state |
 
-The recommended next action is not full-system coding. It is a Phase-1 prototype that proves the teacher-free encoder can preserve useful structural evidence and improve sparse target-plane reconstruction without complete-volume access.
+The next action after Human Gate 1 is T0.5. T1 may start only after the complete
+T0.5-L gate passes. The current tranche then tests whether the teacher-free
+encoder improves permanently sparse target-plane reconstruction under a matched
+fixed-topology Gaussian baseline; it does not authorize T2+.

@@ -3,67 +3,74 @@ isolation: worktree
 
 roles:
   researcher:
-    description: "CVPR novelty and primary-source literature lead"
-    participates_in: [research, strategy, design]
+    description: "ISBI/MICCAI full-mechanism novelty and primary-source literature lead"
+    participates_in: [research, strategy]
     can_write: true
     write_scope: ["docs/research/**"]
 
   pm:
-    description: "Scientific program lead for thesis, gates, and stop rules"
-    participates_in: [strategy, design]
+    description: "ISBI representation-thesis, gates, and stop-rules lead"
+    participates_in: [strategy, t1_decision]
     can_write: true
     write_scope: ["docs/strategies/**"]
 
   architect:
     description: "Medical geometry, differentiable rendering, and tensor-contract lead"
-    participates_in: [design, plan]
+    participates_in: [design, t1a_implement]
     can_write: true
     write_scope: ["docs/designs/**"]
 
   dev:
-    description: "PyTorch computer-vision research implementation lead"
-    participates_in: [plan, implement]
+    description: "PyTorch medical-imaging research implementation lead"
+    participates_in: [t05_implement, t1a_implement, t1_learned]
     can_write: true
     write_scope:
       - "src/**"
       - "lib/**"
       - "scripts/**"
-      - "configs/**"
+      - ".github/workflows/**"
       - "pyproject.toml"
       - "CHANGELOG.md"
       - "docs/plans/**"
 
   qa:
     description: "Scientific numeric, leakage, autograd, and regression verification lead"
-    participates_in: [plan, test, experiment]
+    participates_in: [t05_implement, t1a_implement, t1_learned, t1_experiment]
     can_write: true
     write_scope:
       - "tests/**"
       - "**/*.test.*"
 
   reviewer:
-    description: "Independent adversarial CVPR red-team reviewer"
-    participates_in: [review]
+    description: "Independent adversarial top medical-imaging venue reviewer"
+    participates_in: [t05_review, t1a_review, t1_smoke_review, t1_decision]
     can_write: false
 
   medical_data_steward:
-    description: "Medical data legality, acquisition realism, and audit-isolation lead"
-    participates_in: [research, design, test, review]
+    description: "Permanently sparse manifest, registration, and audit-isolation lead"
+    participates_in: [research, design, t05_review, t1_smoke_review, t1_decision]
     can_write: true
     write_scope: ["docs/protocols/**"]
 
   experiment_lead:
     description: "Matched baselines, ablations, statistics, and external-evaluation lead"
-    participates_in: [strategy, experiment]
+    participates_in: [strategy, t1_learned, t1_experiment]
     can_write: true
     write_scope:
       - "experiments/**"
+      - "configs/t1/**"
       - "configs/experiments/**"
       - "docs/experiments/**"
 
   reproducibility_auditor:
     description: "Independent provenance, environment, compute, and artifact auditor"
-    participates_in: [design, experiment, review]
+    participates_in:
+      - design
+      - t05_review
+      - t1a_review
+      - t1_smoke_review
+      - t1_experiment
+      - t1_decision
     can_write: true
     write_scope: ["docs/reproducibility/**"]
 
@@ -82,56 +89,111 @@ pipeline:
 
     - name: strategy
       roles: [pm, researcher, experiment_lead]
-      gate: human
+      gate: auto
 
     - name: design
       roles: [architect, medical_data_steward, reproducibility_auditor]
       gate: human
-      verify: "test -f docs/designs/*.md"
+      verify: "test -f docs/designs/2026-07-29-t05-t1-isbi-design-delta.md"
 
-    - name: plan
-      roles: [dev, architect, qa]
+    - name: t05_implement
+      roles: [dev, qa]
+      gate: auto
+      max_retries: 2
+      criteria:
+        max_files_changed: 20
+        scope_paths:
+          - "src/**"
+          - "tests/**"
+          - ".github/workflows/**"
+          - "CHANGELOG.md"
+        requires_tests: true
+      verify: "python3 -m pytest -q"
+
+    - name: t05_review
+      roles: [reviewer, medical_data_steward, reproducibility_auditor]
       gate: human
-      verify: "test -f docs/plans/*.md"
+      rework_to: t05_implement
+      verify: "python3 -m pytest -q"
 
-    - name: implement
-      roles: [dev]
+    - name: t1a_implement
+      roles: [dev, qa, architect]
+      gate: auto
+      max_retries: 2
+      criteria:
+        max_files_changed: 24
+        scope_paths:
+          - "src/smagm/features/**"
+          - "src/smagm/baselines/**"
+          - "tests/**"
+          - "CHANGELOG.md"
+        requires_tests: true
+      verify: "python3 -m pytest -q"
+
+    - name: t1a_review
+      roles: [reviewer, reproducibility_auditor]
+      gate: human
+      rework_to: t1a_implement
+      verify: "python3 -m pytest -q"
+
+    - name: t1_learned
+      roles: [dev, qa, experiment_lead]
       gate: auto
       max_retries: 2
       criteria:
         max_files_changed: 30
         scope_paths:
-          - "src/**"
-          - "lib/**"
-          - "scripts/**"
-          - "configs/**"
-          - "pyproject.toml"
+          - "src/smagm/features/**"
+          - "src/smagm/losses/**"
+          - "src/smagm/training/**"
+          - "scripts/train_t1.py"
+          - "tests/**"
+          - "configs/t1/**"
+          - "experiments/**"
+          - "docs/experiments/**"
           - "CHANGELOG.md"
-          - "docs/plans/**"
         requires_tests: true
-
-    - name: test
-      roles: [qa, medical_data_steward]
-      gate: auto
-      max_retries: 1
-      rework_to: implement
       verify: "python3 -m pytest -q"
 
-    - name: experiment
-      roles: [experiment_lead, qa, reproducibility_auditor]
+    - name: t1_smoke_review
+      roles: [reviewer, medical_data_steward, reproducibility_auditor]
       gate: human
+      rework_to: t1_learned
+      verify: "python3 -m pytest -q"
 
-    - name: review
-      roles: [reviewer, reproducibility_auditor, medical_data_steward]
+    - name: t1_experiment
+      roles: [experiment_lead, qa, reproducibility_auditor]
+      gate: auto
+
+    - name: t1_decision
+      roles: [reviewer, pm, medical_data_steward, reproducibility_auditor]
       gate: human
+      rework_to: t1_experiment
 
   profiles:
     discovery:
       stages: [research, strategy, design]
       hints: [novelty, literature, architecture, paper scope]
-    kernel:
-      stages: [design, plan, implement, test, review]
-      hints: [geometry, renderer, contract, module, implementation]
+    t05:
+      stages: [t05_implement, t05_review]
+      hints: [episode assignment, prediction receipt, amplitude gauge, legality]
+    t1a:
+      stages: [t1a_implement, t1a_review]
+      hints: [analytic features, feature alignment, fixed support, safe Gaussian]
+    t1:
+      stages: [t1_learned, t1_smoke_review, t1_experiment, t1_decision]
+      hints: [teacher-free encoder, matched baselines, lesion fidelity]
     paper:
-      stages: [research, strategy, design, plan, implement, test, experiment, review]
-      hints: [benchmark, ablation, external evaluation, submission]
+      stages:
+        - research
+        - strategy
+        - design
+        - t05_implement
+        - t05_review
+        - t1a_implement
+        - t1a_review
+        - t1_learned
+        - t1_smoke_review
+        - t1_experiment
+        - t1_decision
+      hints: [ISBI, reconstruction, ablation, external evaluation, submission]
