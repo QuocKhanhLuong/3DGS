@@ -15,6 +15,20 @@
 
 ### Added
 
+- T0.5 legal episodic-training contracts: role-free immutable sparse
+  availability manifests, canonical immutable episode assignments, and a
+  receipt-gated `EpisodeLedger` whose pure renderer remains outside ledger
+  state.  Prediction receipts are minted only by `PredictionRegistrar` from a
+  detached audit copy of an actual `RenderResult`.
+- Exact-`Decimal` deployment acquisition schedules and ledgers, separate from
+  zero-cost offline episode role assignment, with bootstrap and subsequent
+  observation charging by immutable modality/plane cost key.
+- Per-conversion differentiable
+  `MEAN_CENTERED_LOG_AMPLITUDE_PER_PATIENT_STATE` raw-Gaussian factory
+  provenance; direct validated `GaussianBatch` construction remains a T0
+  compatibility path.
+- Ubuntu CPU GitHub Actions checks for pytest, compileall, and clean-diff
+  validation.
 - ISBI strategy precedence, full-mechanism novelty-collision analysis,
   permanently sparse training protocol, and T0.5/T1 interface design delta.
 - PyTorch CPU-first technology stack (`Python >=3.10`, NumPy interoperability,

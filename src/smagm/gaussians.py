@@ -3,9 +3,87 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
+import hashlib
+import json
 import math
 
 import torch
+
+
+class AmplitudeGaugePolicy(str, Enum):
+    """Named support-amplitude policy for Phase-1 runtime conversion."""
+
+    LEGACY_RAW = "LEGACY_RAW"
+    MEAN_CENTERED_LOG_AMPLITUDE_PER_PATIENT_STATE = "MEAN_CENTERED_LOG_AMPLITUDE_PER_PATIENT_STATE"
+
+
+@dataclass(frozen=True)
+class GaugeFixedLogAmplitude:
+    """Differentiable gauge-fixed tensor and immutable provenance."""
+
+    values: torch.Tensor
+    policy: AmplitudeGaugePolicy
+    config_hash: str
+
+
+def _gauge_config_hash(policy: AmplitudeGaugePolicy) -> str:
+    payload = json.dumps({"policy": policy.value, "version": 1}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def fix_log_amplitude_gauge(
+    raw_log_amplitude: torch.Tensor,
+    patient_state_index: torch.Tensor | None = None,
+    *,
+    policy: AmplitudeGaugePolicy = AmplitudeGaugePolicy.MEAN_CENTERED_LOG_AMPLITUDE_PER_PATIENT_STATE,
+) -> GaugeFixedLogAmplitude:
+    """Pure, differentiable per-patient mean centering for every conversion.
+
+    The caller owns *one* invocation per raw-to-runtime conversion.  This
+    utility has no renderer state and retains gradients to raw amplitudes.
+    """
+    if not isinstance(raw_log_amplitude, torch.Tensor) or raw_log_amplitude.ndim != 2 or raw_log_amplitude.shape[1] != 1:
+        raise ValueError("raw_log_amplitude must have shape [N, 1]")
+    if raw_log_amplitude.dtype not in (torch.float32, torch.float64):
+        raise TypeError("raw_log_amplitude must use float32 or float64")
+    if raw_log_amplitude.shape[0] == 0 or not bool(torch.isfinite(raw_log_amplitude).all()):
+        raise ValueError("raw_log_amplitude must be non-empty and finite")
+    policy = AmplitudeGaugePolicy(policy)
+    if policy is not AmplitudeGaugePolicy.MEAN_CENTERED_LOG_AMPLITUDE_PER_PATIENT_STATE:
+        raise ValueError("new Phase-1 runtime conversion requires mean-centered log amplitude policy")
+    if patient_state_index is None:
+        group = torch.zeros(raw_log_amplitude.shape[0], dtype=torch.long, device=raw_log_amplitude.device)
+    else:
+        if not isinstance(patient_state_index, torch.Tensor) or patient_state_index.shape != (raw_log_amplitude.shape[0],):
+            raise ValueError("patient_state_index must have shape [N]")
+        if patient_state_index.device != raw_log_amplitude.device or patient_state_index.dtype not in (torch.int32, torch.int64):
+            raise ValueError("patient_state_index must be integer and share raw_log_amplitude device")
+        if bool((patient_state_index < 0).any()):
+            raise ValueError("patient_state_index must be non-negative")
+        group = patient_state_index.to(dtype=torch.long)
+    # ``unique`` partitions only metadata; each mean remains a differentiable
+    # tensor expression over the raw values of that patient state.
+    centered = torch.empty_like(raw_log_amplitude)
+    for state in torch.unique(group, sorted=True):
+        selected = group == state
+        centered[selected] = raw_log_amplitude[selected] - raw_log_amplitude[selected].mean(dim=0, keepdim=True)
+    return GaugeFixedLogAmplitude(centered, policy, _gauge_config_hash(policy))
+
+
+@dataclass(frozen=True)
+class RawGaussianParameters:
+    """Raw validated inputs whose conversion always fixes the amplitude gauge."""
+
+    centers_ras_mm: torch.Tensor
+    covariance_factor: torch.Tensor
+    raw_log_support_amplitude: torch.Tensor
+    appearance: torch.Tensor
+    appearance_valid: torch.Tensor
+    patient_state_index: torch.Tensor | None = None
+    covariance_epsilon: float = 1e-8
+    primitive_kind: tuple[str, ...] | None = None
+    primitive_id: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -26,6 +104,8 @@ class GaussianBatch:
     covariance_epsilon: float = 1e-8
     primitive_kind: tuple[str, ...] | None = None
     primitive_id: tuple[str, ...] | None = None
+    gauge_policy: AmplitudeGaugePolicy = AmplitudeGaugePolicy.LEGACY_RAW
+    gauge_config_hash: str | None = None
 
     def __post_init__(self) -> None:
         self.validate()
@@ -95,6 +175,13 @@ class GaussianBatch:
             raise ValueError("covariance_epsilon must be positive, finite, and dtype-representable")
         self._validate_ids("primitive_kind", self.primitive_kind, count)
         self._validate_ids("primitive_id", self.primitive_id, count)
+        policy = AmplitudeGaugePolicy(self.gauge_policy)
+        if policy is AmplitudeGaugePolicy.LEGACY_RAW:
+            if self.gauge_config_hash is not None:
+                raise ValueError("legacy GaussianBatch cannot claim Phase-1 gauge provenance")
+        elif self.gauge_config_hash != _gauge_config_hash(policy):
+            raise ValueError("Phase-1 GaussianBatch requires matching gauge provenance")
+        object.__setattr__(self, "gauge_policy", policy)
         if self.primitive_kind is not None:
             object.__setattr__(self, "primitive_kind", tuple(self.primitive_kind))
         if self.primitive_id is not None:
@@ -116,3 +203,26 @@ class GaussianBatch:
     def covariance(self) -> torch.Tensor:
         identity = torch.eye(3, dtype=self.centers_ras_mm.dtype, device=self.centers_ras_mm.device)
         return self.covariance_factor @ self.covariance_factor.transpose(-1, -2) + self.covariance_epsilon * identity
+
+    @classmethod
+    def from_raw(cls, raw: RawGaussianParameters) -> "GaussianBatch":
+        return gaussian_batch_from_raw(raw)
+
+
+def gaussian_batch_from_raw(raw: RawGaussianParameters) -> GaussianBatch:
+    """Canonical Phase-1 raw-parameter conversion with exactly one gauge fix."""
+    if not isinstance(raw, RawGaussianParameters):
+        raise TypeError("raw must be RawGaussianParameters")
+    fixed = fix_log_amplitude_gauge(raw.raw_log_support_amplitude, raw.patient_state_index)
+    return GaussianBatch(
+        centers_ras_mm=raw.centers_ras_mm,
+        covariance_factor=raw.covariance_factor,
+        log_support_amplitude=fixed.values,
+        appearance=raw.appearance,
+        appearance_valid=raw.appearance_valid,
+        covariance_epsilon=raw.covariance_epsilon,
+        primitive_kind=raw.primitive_kind,
+        primitive_id=raw.primitive_id,
+        gauge_policy=fixed.policy,
+        gauge_config_hash=fixed.config_hash,
+    )

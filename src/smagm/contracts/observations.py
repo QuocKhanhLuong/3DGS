@@ -2,9 +2,11 @@
 
 from .observation import (
     AccessLevel,
+    AvailabilityObservationMeta,
     LedgerEvent,
     ObservationLedger,
     ObservationMeta,
+    SparseAvailabilityManifest,
     OpenedFileAudit,
     SparseManifest,
     validate_patient_split_manifests,
@@ -12,10 +14,12 @@ from .observation import (
 
 __all__ = [
     "AccessLevel",
+    "AvailabilityObservationMeta",
     "LedgerEvent",
     "ObservationLedger",
     "ObservationMeta",
     "OpenedFileAudit",
     "SparseManifest",
+    "SparseAvailabilityManifest",
     "validate_patient_split_manifests",
 ]
