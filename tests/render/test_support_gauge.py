@@ -109,6 +109,38 @@ def test_legacy_direct_batch_remains_compatible_without_runtime_gauge() -> None:
     assert render_plane(batch, _plane()).intensity.shape == (3, 3)
 
 
+def test_legacy_raw_shift_positive_control_changes_support_classification() -> None:
+    def legacy(log_amplitude: float) -> GaussianBatch:
+        return GaussianBatch(
+            centers_ras_mm=torch.zeros((1, 3), dtype=torch.float64),
+            covariance_factor=torch.eye(3, dtype=torch.float64).unsqueeze(0),
+            log_support_amplitude=torch.tensor([[log_amplitude]], dtype=torch.float64),
+            appearance=torch.ones((1, 1), dtype=torch.float64),
+            appearance_valid=torch.ones((1, 1), dtype=torch.bool),
+        )
+
+    plane = PhysicalPlane((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (1.0, 1.0), 1.0, (1, 1), (0.0, 0.0, 1.0))
+    config = RenderConfig(support_epsilon=1e-8)
+    low = render_plane(legacy(-30.0), plane, config=config)
+    high = render_plane(legacy(5.0), plane, config=config)
+    assert low.unsupported_mask.item() is True
+    assert high.unsupported_mask.item() is False
+
+
+def test_hand_built_mean_centered_batch_cannot_forge_raw_conversion_provenance() -> None:
+    converted = gaussian_batch_from_raw(_raw(torch.float64))
+    with pytest.raises((PermissionError, TypeError, ValueError), match="provenance|factory|raw"):
+        GaussianBatch(
+            centers_ras_mm=converted.centers_ras_mm,
+            covariance_factor=converted.covariance_factor,
+            log_support_amplitude=converted.log_support_amplitude,
+            appearance=converted.appearance,
+            appearance_valid=converted.appearance_valid,
+            gauge_policy=AmplitudeGaugePolicy.MEAN_CENTERED_LOG_AMPLITUDE_PER_PATIENT_STATE,
+            gauge_config_hash=converted.gauge_config_hash,
+        )
+
+
 def test_digest_canonicalizes_quiet_nan_payloads_and_binds_all_output_fields() -> None:
     # Different IEEE quiet-NaN payloads must not make two identical unsupported
     # predictions hash differently.  Mask/support/PSF remain schema-bound.

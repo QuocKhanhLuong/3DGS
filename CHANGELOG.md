@@ -20,6 +20,13 @@
   receipt-gated `EpisodeLedger` whose pure renderer remains outside ledger
   state.  Prediction receipts are minted only by `PredictionRegistrar` from a
   detached audit copy of an actual `RenderResult`.
+- Tightened T0.5 receipt provenance: only `EpisodeController` may invoke the
+  pure renderer for a committed target, using a factory-frozen gauge-provenanced
+  live Gaussian state that is rehashed before rendering; training ledgers now
+  reject sealed audit cohorts.
+- Added factory-only patient split registries for the four declared cohort
+  labels and persistent prediction receipt records with Gaussian-state and
+  renderer-output-schema provenance.
 - Exact-`Decimal` deployment acquisition schedules and ledgers, separate from
   zero-cost offline episode role assignment, with bootstrap and subsequent
   observation charging by immutable modality/plane cost key.

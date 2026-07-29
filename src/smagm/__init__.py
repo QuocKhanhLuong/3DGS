@@ -8,7 +8,10 @@ from .contracts.coordinates import (
 )
 from .contracts.observation import (
     AccessLevel,
+    ALLOWED_COHORT_SPLITS,
+    TRAINING_LEDGER_SPLITS,
     AvailabilityObservationMeta,
+    PatientSplitRegistry,
     ObservationLedger,
     ObservationMeta,
     SparseAvailabilityManifest,
@@ -39,6 +42,7 @@ from .renderer import RenderConfig, RenderResult, SlabProfile, render_plane
 
 __all__ = [
     "AccessLevel",
+    "ALLOWED_COHORT_SPLITS",
     "AcquisitionCostEntry",
     "AcquisitionCostSchedule",
     "AmplitudeGaugePolicy",
@@ -53,6 +57,7 @@ __all__ = [
     "ObservationLedger",
     "ObservationMeta",
     "PhysicalPlane",
+    "PatientSplitRegistry",
     "PredictionReceiptCapability",
     "PredictionRegistrar",
     "RawGaussianParameters",
@@ -65,6 +70,7 @@ __all__ = [
     "SparseAvailabilityManifest",
     "TargetGrid",
     "TargetCommitCapability",
+    "TRAINING_LEDGER_SPLITS",
     "fix_log_amplitude_gauge",
     "gaussian_batch_from_raw",
     "validate_patient_split_manifests",

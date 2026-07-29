@@ -242,6 +242,12 @@ class EpisodeLedger:
 target, but never its pixels, labels, content digest, normalization statistic,
 or cached features.
 
+`EpisodeLedger` is a development/training ledger. It requires a factory-created
+`PatientSplitRegistry` containing the exact sealed manifest before any provider
+is created. It accepts only `train` and `validation` cohorts and fails closed
+for `t1_lesion_validation` or `t5_final_audit`; those cohorts require their
+own isolated evaluator rather than this payload-opening API.
+
 The ledger owns a fresh opaque nonce. Commit and receipt capabilities bind that
 nonce and an unpredictable secret; their `repr` exposes no secret. Capabilities
 are in-process scientific-validity contracts, not an OS security sandbox.
@@ -260,9 +266,9 @@ The separate registration boundary defines:
 ```python
 @dataclass(frozen=True)
 class FrozenPatientState:
-    state_version: str
-    # Opaque, immutable tensor/state binding validated when frozen.
-    state_binding: FrozenStateBinding
+    # Created from ledger, a factory-gauged live GaussianBatch, and an upstream
+    # state hash. `state_version` is derived internally from episode/context
+    # audit, upstream hash, Gaussian digest, and gauge provenance.
 
 @dataclass(frozen=True)
 class PredictionRegistration:
@@ -275,21 +281,20 @@ class PredictionRegistrar:
         ledger: EpisodeLedger,
         commit_capability: TargetCommitCapability,
         frozen_state: FrozenPatientState,
-        target_plane: PhysicalPlane,
-        render_result: RenderResult,
-        renderer_version: str,
+        render_evidence: ControllerRenderEvidence,
     ) -> PredictionReceiptCapability: ...
 ```
 
-An `EpisodeController` obtains the manifest-bound target plane through the
-commit, calls pure `render_plane(...)`, retains that actual `RenderResult` for
-loss, and passes the same result object to `PredictionRegistrar`. The registrar
-requires `frozen_state.state_version` to equal the committed version,
-canonicalizes and digests a detached audit copy of the actual result, recomputes
-the target `plane_hash`, and derives the renderer implementation/config and
-output-schema versions from the registered renderer configuration. It then
-atomically records the registration with the ledger and returns the opaque
-single-use receipt capability.
+Only `EpisodeController` obtains the manifest-bound target plane through the
+commit and calls pure `render_plane(...)`. It retains the live `RenderResult`
+for loss, rehashes the factory-frozen live Gaussian batch immediately before
+rendering, and mints private in-process render evidence carrying the exact
+plane/config/state binding. `PredictionRegistrar` rejects a bare or
+caller-constructed `RenderResult`; it accepts only that controller evidence,
+canonicalizes and digests its detached audit copy, recomputes the target
+`plane_hash`, and derives renderer implementation/config versions from the
+controlled render configuration. It then atomically records the registration
+with the ledger and returns the opaque single-use receipt capability.
 
 The registrar-owned registration binds ledger, episode, assignment, target,
 state version, plane hash, renderer implementation/config version,
@@ -321,6 +326,8 @@ class PredictionReceiptRecord:
     state_version: str
     plane_hash: str
     renderer_version: str
+    renderer_output_schema_version: str
+    gaussian_state_digest: str
     prediction_digest: str
     commit_sequence: int
     receipt_sequence: int

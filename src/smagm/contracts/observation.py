@@ -22,6 +22,15 @@ from typing import Any, Iterable, Mapping
 from .coordinates import PhysicalPlane
 
 
+ALLOWED_COHORT_SPLITS = frozenset({
+    "train",
+    "validation",
+    "t1_lesion_validation",
+    "t5_final_audit",
+})
+TRAINING_LEDGER_SPLITS = frozenset({"train", "validation"})
+
+
 class AccessLevel(str, Enum):
     CONTEXT = "CONTEXT"
     TARGET = "TARGET"
@@ -171,6 +180,8 @@ class AvailabilityObservationMeta:
             for item in (self.observation_id, self.patient_id, self.split, self.modality_id)
         ):
             raise ValueError("observation_id, patient_id, split, and modality_id must be non-empty strings")
+        if self.split not in ALLOWED_COHORT_SPLITS:
+            raise ValueError(f"split must be one of {sorted(ALLOWED_COHORT_SPLITS)}")
         if not isinstance(self.plane, PhysicalPlane):
             raise TypeError("plane must be a PhysicalPlane")
         if self.plane.observation_id not in (None, self.observation_id):
@@ -244,13 +255,8 @@ class SparseAvailabilityManifest:
         return self.canonical_hash
 
     @property
-    def content_binding_hash(self) -> str:
-        """Sealed payload binding, distinct from the public availability hash.
-
-        The individual integrity digests remain private to the bound provider;
-        this aggregate only lets an episode reject a same-metadata manifest
-        whose sealed payloads differ.
-        """
+    def _content_binding_hash(self) -> str:
+        """Internal sealed binding; never part of public manifest metadata."""
         payload = {
             "entries": [
                 {"content_sha256": self._integrity_digests[observation_id], "observation_id": observation_id}
@@ -276,12 +282,90 @@ class SparseAvailabilityManifest:
         return self._integrity_digests[observation_id]
 
 
-def validate_patient_split_manifests(manifests: Iterable[SparseManifest]) -> str:
+_SPLIT_REGISTRY_TOKEN = object()
+
+
+@dataclass(frozen=True, init=False)
+class PatientSplitRegistry:
+    """Factory-only, order-invariant registry for permanently sparse manifests."""
+
+    registry_hash: str
+    _patient_splits: Mapping[str, str] = field(repr=False, compare=False)
+    _manifest_bindings: frozenset[tuple[str, str]] = field(repr=False, compare=False)
+
+    @classmethod
+    def create(cls, manifests: Iterable[SparseAvailabilityManifest]) -> "PatientSplitRegistry":
+        resolved = tuple(manifests)
+        if not resolved or any(not isinstance(manifest, SparseAvailabilityManifest) for manifest in resolved):
+            raise ValueError("PatientSplitRegistry requires one or more SparseAvailabilityManifest records")
+        patient_splits: dict[str, str] = {}
+        bindings: set[tuple[str, str]] = set()
+        for manifest in resolved:
+            bindings.add((manifest.manifest_hash, manifest._content_binding_hash))
+            for entry in manifest.entries:
+                previous = patient_splits.setdefault(entry.patient_id, entry.split)
+                if previous != entry.split:
+                    raise ValueError("a patient cannot appear in different splits across manifests")
+        if len(bindings) != len(resolved):
+            raise ValueError("split registry manifests must be unique exact sealed bindings")
+        public_payload = {
+            "manifest_hashes": sorted(manifest_hash for manifest_hash, _ in bindings),
+            "patient_splits": dict(sorted(patient_splits.items())),
+            "schema": "patient-split-registry-v1",
+        }
+        registry_hash = hashlib.sha256(json.dumps(public_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        return cls(_token=_SPLIT_REGISTRY_TOKEN, registry_hash=registry_hash, patient_splits=patient_splits, manifest_bindings=bindings)
+
+    def __init__(
+        self,
+        *,
+        _token: object | None = None,
+        registry_hash: str,
+        patient_splits: Mapping[str, str],
+        manifest_bindings: Iterable[tuple[str, str]],
+    ) -> None:
+        if _token is not _SPLIT_REGISTRY_TOKEN:
+            raise TypeError("PatientSplitRegistry must be created with PatientSplitRegistry.create(manifests)")
+        object.__setattr__(self, "registry_hash", _sha256(registry_hash))
+        object.__setattr__(self, "_patient_splits", MappingProxyType(dict(sorted(patient_splits.items()))))
+        object.__setattr__(self, "_manifest_bindings", frozenset(manifest_bindings))
+
+    def contains(self, manifest: SparseAvailabilityManifest) -> bool:
+        return isinstance(manifest, SparseAvailabilityManifest) and (
+            manifest.manifest_hash,
+            manifest._content_binding_hash,
+        ) in self._manifest_bindings
+
+    @property
+    def manifest_hashes(self) -> tuple[str, ...]:
+        """Registered public manifest IDs; sealed content bindings stay private."""
+        return tuple(sorted(manifest_hash for manifest_hash, _ in self._manifest_bindings))
+
+    @property
+    def patient_splits(self) -> Mapping[str, str]:
+        """Immutable patient-level public split map."""
+        return self._patient_splits
+
+    def split_for_patient(self, patient_id: str) -> str:
+        return self._patient_splits[patient_id]
+
+    def assert_development_manifest(self, manifest: SparseAvailabilityManifest) -> None:
+        """Fail closed before a training ledger can create a file provider."""
+        if not self.contains(manifest):
+            raise PermissionError("unregistered manifest is absent from the split registry")
+        if any(entry.split not in TRAINING_LEDGER_SPLITS for entry in manifest.entries):
+            raise PermissionError("development access rejects sealed audit or isolated evaluation cohort")
+
+
+def validate_patient_split_manifests(
+    manifests: Iterable[SparseManifest | SparseAvailabilityManifest],
+) -> str:
     """Validate patient grouping across manifests and hash the split map."""
 
     resolved = tuple(manifests)
-    if not resolved or any(not isinstance(manifest, SparseManifest) for manifest in resolved):
-        raise ValueError("manifests must contain at least one SparseManifest")
+    valid_types = (SparseManifest, SparseAvailabilityManifest)
+    if not resolved or any(not isinstance(manifest, valid_types) for manifest in resolved):
+        raise ValueError("manifests must contain at least one sparse manifest")
     patient_splits: dict[str, str] = {}
     for manifest in resolved:
         for entry in manifest.entries:

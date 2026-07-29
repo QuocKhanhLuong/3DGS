@@ -14,6 +14,9 @@ from .contracts.coordinates import PhysicalPlane
 from .gaussians import GaussianBatch
 
 
+RENDERER_OUTPUT_SCHEMA_VERSION = "render-result-v1"
+
+
 @dataclass(frozen=True)
 class SlabProfile:
     """Normalized through-plane quadrature positions in units of thickness."""
@@ -106,6 +109,11 @@ class RenderConfig:
         }
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
         return f"through-plane-profile-aware-gaussian-reference-renderer/v1:{digest}"
+
+    @property
+    def renderer_output_schema_version(self) -> str:
+        """Version of the detached `RenderResult` digest envelope."""
+        return RENDERER_OUTPUT_SCHEMA_VERSION
 
 
 @dataclass(frozen=True)

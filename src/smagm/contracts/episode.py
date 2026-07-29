@@ -9,7 +9,7 @@ single-use receipt unlocks the target payload.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation
+from decimal import Context, Decimal, InvalidOperation, localcontext
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
@@ -22,8 +22,14 @@ import numpy as np
 import torch
 
 from .coordinates import PhysicalPlane
-from .observation import AvailabilityObservationMeta, SparseAvailabilityManifest
-from ..renderer import RenderConfig, RenderResult, render_plane
+from .observation import (
+    TRAINING_LEDGER_SPLITS,
+    AvailabilityObservationMeta,
+    PatientSplitRegistry,
+    SparseAvailabilityManifest,
+)
+from ..gaussians import AmplitudeGaugePolicy, GaussianBatch
+from ..renderer import RENDERER_OUTPUT_SCHEMA_VERSION, RenderConfig, RenderResult, render_plane
 
 
 def _canonical_json(value: Mapping[str, Any]) -> str:
@@ -86,7 +92,7 @@ class EpisodeAssignment:
             patient_id=patient_id,
             context_ids=context,
             target_ids=target,
-            content_binding_hash=manifest.content_binding_hash,
+            content_binding_hash=manifest._content_binding_hash,
         )
 
     def __init__(
@@ -128,11 +134,6 @@ class EpisodeAssignment:
         if len(set(result)) != len(result):
             raise ValueError(f"{name} must not contain duplicate IDs")
         return tuple(sorted(result))
-
-    @property
-    def content_binding_hash(self) -> str:
-        """Private-manifest aggregate bound at creation, excluded from public hash."""
-        return self._content_binding_hash
 
     def to_canonical_dict(self) -> dict[str, Any]:
         return {
@@ -201,19 +202,130 @@ class _PredictionReceiptCapability:
 TargetCommitCapability = _TargetCommitCapability
 PredictionReceiptCapability = _PredictionReceiptCapability
 _REGISTRATION_TOKEN = object()
+_FROZEN_STATE_TOKEN = object()
+_RENDER_EVIDENCE_TOKEN = object()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class FrozenPatientState:
-    """Opaque state binding frozen before a target commit."""
+    """Factory-created binding to the exact live Phase-1 Gaussian state."""
 
     state_version: str
-    state_binding: str = ""
+    _gaussians: GaussianBatch = field(repr=False, compare=False)
+    _gaussian_digest: str = field(repr=False, compare=False)
+    _ledger_nonce: object = field(repr=False, compare=False)
+    _assignment_hash: str = field(repr=False, compare=False)
+    _context_audit_hash: str = field(repr=False, compare=False)
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "state_version", _sha256_hex(self.state_version, "state_version"))
-        if not isinstance(self.state_binding, str):
-            raise TypeError("state_binding must be a string")
+    @classmethod
+    def create(
+        cls,
+        *,
+        ledger: "EpisodeLedger",
+        gaussians: GaussianBatch,
+        upstream_state_hash: str,
+    ) -> "FrozenPatientState":
+        return cls(
+            _token=_FROZEN_STATE_TOKEN,
+            ledger=ledger,
+            gaussians=gaussians,
+            upstream_state_hash=upstream_state_hash,
+        )
+
+    def __init__(
+        self,
+        *,
+        _token: object | None = None,
+        ledger: "EpisodeLedger",
+        gaussians: GaussianBatch,
+        upstream_state_hash: str,
+    ) -> None:
+        if _token is not _FROZEN_STATE_TOKEN:
+            raise TypeError("FrozenPatientState must be created with FrozenPatientState.create(...)")
+        if not isinstance(ledger, EpisodeLedger) or not isinstance(gaussians, GaussianBatch):
+            raise TypeError("ledger and gaussians must use T0.5 contracts")
+        gaussians.validate()
+        if gaussians.gauge_policy is AmplitudeGaugePolicy.LEGACY_RAW:
+            raise ValueError("Phase-1 frozen patient state rejects LEGACY_RAW GaussianBatch provenance")
+        upstream_state_hash = _sha256_hex(upstream_state_hash, "upstream_state_hash")
+        context_audit_hash = ledger._capture_context_audit_hash()
+        gaussian_digest = gaussian_batch_digest(gaussians)
+        state_payload = {
+            "assignment_hash": ledger.assignment_hash,
+            "context_audit_hash": context_audit_hash,
+            "context_ids": list(ledger._assignment.context_ids),
+            "gaussian_digest": gaussian_digest,
+            "gauge_config_hash": gaussians.gauge_config_hash,
+            "gauge_policy": gaussians.gauge_policy.value,
+            "patient_id": ledger._assignment.patient_id,
+            "upstream_state_hash": upstream_state_hash,
+        }
+        object.__setattr__(self, "state_version", _hash(state_payload))
+        object.__setattr__(self, "_gaussians", gaussians)
+        object.__setattr__(self, "_gaussian_digest", gaussian_digest)
+        object.__setattr__(self, "_ledger_nonce", ledger._nonce)
+        object.__setattr__(self, "_assignment_hash", ledger.assignment_hash)
+        object.__setattr__(self, "_context_audit_hash", context_audit_hash)
+
+    @property
+    def gaussians(self) -> GaussianBatch:
+        """Live state retained for differentiable rendering; do not detach it."""
+        return self._gaussians
+
+    def verify_live_gaussians(self) -> str:
+        """Fail before render if a mutable live state diverged after freezing."""
+        self._gaussians.validate()
+        if self._gaussians.gauge_policy is AmplitudeGaugePolicy.LEGACY_RAW:
+            raise ValueError("Phase-1 frozen patient state rejects LEGACY_RAW GaussianBatch provenance")
+        current = gaussian_batch_digest(self._gaussians)
+        if current != self._gaussian_digest:
+            raise RuntimeError("live GaussianBatch changed after FrozenPatientState was created")
+        return current
+
+    def validate_for_commit(self, ledger: "EpisodeLedger", commit_capability: TargetCommitCapability) -> str:
+        if self._ledger_nonce is not ledger._nonce or self._assignment_hash != ledger.assignment_hash:
+            raise PermissionError("frozen state is not bound to this episode ledger")
+        ledger._validate_commit(commit_capability)
+        if commit_capability._state_version != self.state_version:
+            raise PermissionError("committed state version does not match frozen state")
+        if ledger._context_audit_hash() != self._context_audit_hash:
+            raise RuntimeError("context audit changed after FrozenPatientState was created")
+        return self.verify_live_gaussians()
+
+
+class _RenderEvidence:
+    """Controller-minted, in-process proof of one exact pure render call."""
+
+    __slots__ = (
+        "_token", "_ledger_nonce", "_commit_secret", "_state_version",
+        "_plane_hash", "_renderer_version", "_gaussian_digest", "result",
+        "_renderer_output_schema_version",
+    )
+
+    def __init__(
+        self,
+        *,
+        _token: object,
+        ledger_nonce: object,
+        commit_secret: str,
+        state_version: str,
+        plane_hash: str,
+        renderer_version: str,
+        renderer_output_schema_version: str,
+        gaussian_digest: str,
+        result: RenderResult,
+    ) -> None:
+        if _token is not _RENDER_EVIDENCE_TOKEN:
+            raise TypeError("render evidence is minted only by EpisodeController")
+        self._token = _token
+        self._ledger_nonce = ledger_nonce
+        self._commit_secret = commit_secret
+        self._state_version = state_version
+        self._plane_hash = plane_hash
+        self._renderer_version = renderer_version
+        self._renderer_output_schema_version = renderer_output_schema_version
+        self._gaussian_digest = gaussian_digest
+        self.result = result
 
 
 @dataclass(frozen=True)
@@ -225,6 +337,8 @@ class PredictionReceiptRecord:
     state_version: str
     plane_hash: str
     renderer_version: str
+    renderer_output_schema_version: str
+    gaussian_state_digest: str
     prediction_digest: str
     commit_sequence: int
     receipt_sequence: int
@@ -239,6 +353,8 @@ class PredictionReceiptRecord:
             "prediction_digest": self.prediction_digest,
             "receipt_sequence": self.receipt_sequence,
             "renderer_version": self.renderer_version,
+            "renderer_output_schema_version": self.renderer_output_schema_version,
+            "gaussian_state_digest": self.gaussian_state_digest,
             "state_version": self.state_version,
             "target_id": self.target_id,
         }
@@ -286,27 +402,42 @@ class EpisodeOpenedFileAudit:
 class EpisodeLedger:
     """No-budget ledger for a manifest-bound immutable training episode."""
 
-    def __init__(self, manifest: SparseAvailabilityManifest, assignment: EpisodeAssignment, root: str | Path) -> None:
-        if not isinstance(manifest, SparseAvailabilityManifest) or not isinstance(assignment, EpisodeAssignment):
-            raise TypeError("manifest and assignment must use T0.5 contracts")
-        if assignment.manifest_hash != manifest.manifest_hash or assignment.content_binding_hash != manifest.content_binding_hash:
+    def __init__(
+        self,
+        manifest: SparseAvailabilityManifest,
+        assignment: EpisodeAssignment,
+        root: str | Path,
+        *,
+        split_registry: PatientSplitRegistry,
+    ) -> None:
+        if not isinstance(manifest, SparseAvailabilityManifest) or not isinstance(assignment, EpisodeAssignment) or not isinstance(split_registry, PatientSplitRegistry):
+            raise TypeError("manifest, assignment, and split_registry must use T0.5 contracts")
+        split_registry.assert_development_manifest(manifest)
+        if assignment.manifest_hash != manifest.manifest_hash or assignment._content_binding_hash != manifest._content_binding_hash:
             raise ValueError("assignment is not bound to this exact sealed manifest")
         selected = assignment.context_ids + assignment.target_ids
         if not selected:
             raise ValueError("episode assignment must select at least one observation")
         for observation_id in selected:
-            if manifest.metadata(observation_id).patient_id != assignment.patient_id:
+            entry = manifest.metadata(observation_id)
+            if entry.patient_id != assignment.patient_id:
                 raise ValueError("assignment patient does not match manifest entry")
-        self._manifest, self._assignment = manifest, assignment
+            if entry.split not in TRAINING_LEDGER_SPLITS:
+                raise PermissionError(
+                    "development EpisodeLedger rejects sealed audit and isolated evaluation cohorts"
+                )
+        self._manifest, self._assignment, self._split_registry = manifest, assignment, split_registry
         self._provider = _AvailabilityFileProvider(root, manifest)
         self._nonce, self._lock = object(), threading.RLock()
         self._ledger_id = _hash({
             "assignment_hash": assignment.assignment_hash,
-            "content_binding_hash": manifest.content_binding_hash,
+            "sealed_manifest_binding": manifest._content_binding_hash,
             "manifest_hash": manifest.manifest_hash,
+            "split_registry_hash": split_registry.registry_hash,
         })
         self._commits: dict[str, tuple[str, str, int]] = {}
         self._receipts: dict[str, tuple[str, PredictionReceiptRecord]] = {}
+        self._prediction_records: list[PredictionReceiptRecord] = []
         self._revealed: set[str] = set()
         self._events: list[EpisodeEvent] = []
         self._audit: list[EpisodeOpenedFileAudit] = []
@@ -332,13 +463,20 @@ class EpisodeLedger:
         return tuple(self._audit)
 
     @property
+    def prediction_records(self) -> tuple[PredictionReceiptRecord, ...]:
+        """Immutable scientific receipt records, retained after target reveal."""
+        return tuple(self._prediction_records)
+
+    @property
     def audit_hash(self) -> str:
         return _hash({
             "assignment_hash": self.assignment_hash,
-            "content_binding_hash": self._manifest.content_binding_hash,
+            "sealed_manifest_binding": self._manifest._content_binding_hash,
             "events": [event.to_canonical_dict() for event in self._events],
             "manifest_hash": self.manifest_hash,
+            "split_registry_hash": self._split_registry.registry_hash,
             "opened_files": [row.to_canonical_dict() for row in self._audit],
+            "prediction_records": [record.to_canonical_dict() for record in self._prediction_records],
         })
 
     def metadata(self, observation_id: str) -> AvailabilityObservationMeta:
@@ -352,9 +490,10 @@ class EpisodeLedger:
         return self._manifest.metadata(target_id)
 
     def open_context(self, observation_id: str) -> bytes:
-        if observation_id not in self._assignment.context_ids:
-            raise PermissionError("only assigned context payloads may be opened before reveal")
-        return self._open(self._manifest.metadata(observation_id), "CONTEXT", "OPEN_CONTEXT")
+        with self._lock:
+            if observation_id not in self._assignment.context_ids:
+                raise PermissionError("only assigned context payloads may be opened before reveal")
+            return self._open(self._manifest.metadata(observation_id), "CONTEXT", "OPEN_CONTEXT")
 
     def commit_target(self, target_id: str, state_version: str) -> TargetCommitCapability:
         state_version = _sha256_hex(state_version, "state_version")
@@ -386,14 +525,26 @@ class EpisodeLedger:
                 or record.state_version != state_version
                 or record.plane_hash != expected_plane_hash
                 or record.commit_sequence != commit_sequence
+                or record.receipt_sequence != len(self._events)
                 or not record.renderer_version
+                or record.renderer_output_schema_version != RENDERER_OUTPUT_SCHEMA_VERSION
+                or not _sha256_hex(record.gaussian_state_digest, "gaussian_state_digest")
                 or not _sha256_hex(record.prediction_digest, "prediction_digest")
                 or commit_capability._target_id in self._receipts
             ):
                 raise PermissionError("prediction registration does not match committed target")
             receipt_secret = secrets.token_urlsafe(32)
             self._receipts[commit_capability._target_id] = (receipt_secret, record)
-            self._record_event("REGISTER_PREDICTION", commit_capability._target_id, {"prediction_digest": record.prediction_digest, "renderer_version": record.renderer_version, "state_version": state_version})
+            self._prediction_records.append(record)
+            record_hash = _hash(record.to_canonical_dict())
+            self._record_event("REGISTER_PREDICTION", commit_capability._target_id, {
+                "gaussian_state_digest": record.gaussian_state_digest,
+                "prediction_digest": record.prediction_digest,
+                "prediction_record_hash": record_hash,
+                "renderer_output_schema_version": record.renderer_output_schema_version,
+                "renderer_version": record.renderer_version,
+                "state_version": state_version,
+            })
             return PredictionReceiptCapability(self._nonce, commit_capability._target_id, receipt_secret)
 
     def reveal_target(self, target_id: str, receipt_capability: PredictionReceiptCapability) -> bytes:
@@ -417,6 +568,24 @@ class EpisodeLedger:
         existing = self._commits.get(capability._target_id)
         if existing is None or existing[0] != capability._secret or existing[1] != capability._state_version:
             raise PermissionError("invalid or consumed commit capability")
+
+    def _context_audit_hash(self) -> str:
+        context_events = [event.to_canonical_dict() for event in self._events if event.event == "OPEN_CONTEXT"]
+        context_rows = [row.to_canonical_dict() for row in self._audit if row.role == "CONTEXT"]
+        return _hash({
+            "assignment_hash": self.assignment_hash,
+            "context_events": context_events,
+            "context_opened_files": context_rows,
+            "manifest_hash": self.manifest_hash,
+        })
+
+    def _capture_context_audit_hash(self) -> str:
+        if self._commits or self._receipts or self._revealed or any(event.event != "OPEN_CONTEXT" for event in self._events):
+            raise RuntimeError("FrozenPatientState must capture context-only audit before target commit")
+        opened = [row.observation_id for row in self._audit if row.role == "CONTEXT"]
+        if tuple(sorted(set(opened))) != self._assignment.context_ids:
+            raise RuntimeError("all assigned context observations must be opened before freezing state")
+        return self._context_audit_hash()
 
     def _record_event(self, event: str, observation_id: str, details: Mapping[str, str]) -> int:
         sequence = len(self._events)
@@ -467,11 +636,33 @@ def prediction_digest_from_render_result(render_result: RenderResult, *, plane_h
     if not isinstance(render_result, RenderResult):
         raise TypeError("render_result must be an actual RenderResult")
     digest = hashlib.sha256()
-    digest.update(_canonical_json({"plane_hash": _sha256_hex(plane_hash, "plane_hash"), "renderer_version": renderer_version, "schema": "render-result-v1"}).encode("utf-8"))
+    digest.update(_canonical_json({"plane_hash": _sha256_hex(plane_hash, "plane_hash"), "renderer_version": renderer_version, "schema": RENDERER_OUTPUT_SCHEMA_VERSION}).encode("utf-8"))
     _tensor_digest_part(digest, "intensity", render_result.intensity)
     _tensor_digest_part(digest, "support_mass", render_result.support_mass)
     _tensor_digest_part(digest, "supported_psf_mass", render_result.supported_psf_mass)
     _tensor_digest_part(digest, "unsupported_mask", render_result.unsupported_mask, boolean=True)
+    return digest.hexdigest()
+
+
+def gaussian_batch_digest(gaussians: GaussianBatch) -> str:
+    """Detached audit digest for a live validated runtime state, never its graph."""
+    if not isinstance(gaussians, GaussianBatch):
+        raise TypeError("gaussians must be a GaussianBatch")
+    gaussians.validate()
+    digest = hashlib.sha256()
+    digest.update(_canonical_json({
+        "covariance_epsilon": repr(gaussians.covariance_epsilon),
+        "gauge_config_hash": gaussians.gauge_config_hash,
+        "gauge_policy": gaussians.gauge_policy.value,
+        "primitive_id": list(gaussians.primitive_id) if gaussians.primitive_id is not None else None,
+        "primitive_kind": list(gaussians.primitive_kind) if gaussians.primitive_kind is not None else None,
+        "schema": "gaussian-batch-v1",
+    }).encode("utf-8"))
+    _tensor_digest_part(digest, "centers_ras_mm", gaussians.centers_ras_mm)
+    _tensor_digest_part(digest, "covariance_factor", gaussians.covariance_factor)
+    _tensor_digest_part(digest, "log_support_amplitude", gaussians.log_support_amplitude)
+    _tensor_digest_part(digest, "appearance", gaussians.appearance)
+    _tensor_digest_part(digest, "appearance_valid", gaussians.appearance_valid, boolean=True)
     return digest.hexdigest()
 
 
@@ -484,27 +675,53 @@ class PredictionRegistrar:
         ledger: EpisodeLedger,
         commit_capability: TargetCommitCapability,
         frozen_state: FrozenPatientState,
-        render_result: RenderResult,
-        render_config: RenderConfig,
+        render_evidence: _RenderEvidence,
     ) -> PredictionReceiptCapability:
-        if not isinstance(ledger, EpisodeLedger) or not isinstance(frozen_state, FrozenPatientState) or not isinstance(render_config, RenderConfig):
-            raise TypeError("ledger, frozen_state, and render_config must use T0.5 contracts")
+        if not isinstance(ledger, EpisodeLedger) or not isinstance(frozen_state, FrozenPatientState):
+            raise TypeError("ledger and frozen_state must use T0.5 contracts")
         ledger._validate_commit(commit_capability)
-        if frozen_state.state_version != commit_capability._state_version:
-            raise PermissionError("frozen state version does not match committed state")
+        frozen_digest = frozen_state.validate_for_commit(ledger, commit_capability)
+        if not isinstance(render_evidence, _RenderEvidence) or render_evidence._token is not _RENDER_EVIDENCE_TOKEN:
+            raise PermissionError("PredictionRegistrar rejects bare or hand-built RenderResult evidence")
+        if (
+            render_evidence._ledger_nonce is not ledger._nonce
+            or render_evidence._commit_secret != commit_capability._secret
+            or render_evidence._state_version != frozen_state.state_version
+            or render_evidence._gaussian_digest != frozen_digest
+        ):
+            raise PermissionError("render evidence is not bound to this committed live state")
         target = ledger.expose_target_metadata(commit_capability._target_id)
         plane_hash = hashlib.sha256(target.plane.canonical_json().encode("utf-8")).hexdigest()
-        renderer_version = render_config.renderer_version
-        prediction_digest = prediction_digest_from_render_result(render_result, plane_hash=plane_hash, renderer_version=renderer_version)
+        if (
+            render_evidence._plane_hash != plane_hash
+            or not render_evidence._renderer_version
+            or not render_evidence._renderer_output_schema_version
+        ):
+            raise PermissionError("render evidence plane or controlled renderer configuration mismatches target")
+        renderer_version = render_evidence._renderer_version
+        prediction_digest = prediction_digest_from_render_result(render_evidence.result, plane_hash=plane_hash, renderer_version=renderer_version)
         # Registration sequence is the next ledger event, before atomic insertion.
         commit_sequence = ledger._commits[commit_capability._target_id][2]
-        record = PredictionReceiptRecord(ledger.ledger_id, ledger._assignment.episode_id, ledger.assignment_hash, commit_capability._target_id, frozen_state.state_version, plane_hash, renderer_version, prediction_digest, commit_sequence, len(ledger._events))
+        record = PredictionReceiptRecord(
+            ledger.ledger_id,
+            ledger._assignment.episode_id,
+            ledger.assignment_hash,
+            commit_capability._target_id,
+            frozen_state.state_version,
+            plane_hash,
+            renderer_version,
+            render_evidence._renderer_output_schema_version,
+            frozen_digest,
+            prediction_digest,
+            commit_sequence,
+            len(ledger._events),
+        )
         registration = PredictionRegistration(_token=_REGISTRATION_TOKEN, record=record, commit_secret=commit_capability._secret)
         return ledger.register_prediction_receipt(commit_capability, registration=registration)
 
 
 class EpisodeController:
-    """Convenience controller that calls pure rendering then separately registers it."""
+    """Only T0.5 path that calls pure rendering for a committed target."""
 
     def __init__(self, registrar: PredictionRegistrar | None = None) -> None:
         self._registrar = registrar or PredictionRegistrar()
@@ -515,14 +732,39 @@ class EpisodeController:
         ledger: EpisodeLedger,
         commit_capability: TargetCommitCapability,
         frozen_state: FrozenPatientState,
-        gaussians: Any,
         appearance_channel: int = 0,
         render_config: RenderConfig | None = None,
     ) -> tuple[RenderResult, PredictionReceiptCapability]:
         config = render_config or RenderConfig()
+        if not isinstance(config, RenderConfig):
+            raise TypeError("render_config must be a RenderConfig before controller rendering begins")
+        if not isinstance(ledger, EpisodeLedger) or not isinstance(frozen_state, FrozenPatientState):
+            raise TypeError("ledger and frozen_state must use T0.5 contracts")
+        # Validate capability and frozen-state ledger binding before exposing
+        # even target geometry, then before the pure render is entered.
+        gaussian_digest = frozen_state.validate_for_commit(ledger, commit_capability)
         plane = ledger.expose_target_metadata(commit_capability._target_id).plane
-        result = render_plane(gaussians, plane, appearance_channel=appearance_channel, config=config)
-        receipt = self._registrar.register_prediction_receipt(ledger=ledger, commit_capability=commit_capability, frozen_state=frozen_state, render_result=result, render_config=config)
+        # `render_plane` itself remains pure.  The controller records the
+        # resulting evidence only after the tensor operation returns.
+        result = render_plane(frozen_state.gaussians, plane, appearance_channel=appearance_channel, config=config)
+        plane_hash = hashlib.sha256(plane.canonical_json().encode("utf-8")).hexdigest()
+        evidence = _RenderEvidence(
+            _token=_RENDER_EVIDENCE_TOKEN,
+            ledger_nonce=ledger._nonce,
+            commit_secret=commit_capability._secret,
+            state_version=frozen_state.state_version,
+            plane_hash=plane_hash,
+            renderer_version=config.renderer_version,
+            renderer_output_schema_version=config.renderer_output_schema_version,
+            gaussian_digest=gaussian_digest,
+            result=result,
+        )
+        receipt = self._registrar.register_prediction_receipt(
+            ledger=ledger,
+            commit_capability=commit_capability,
+            frozen_state=frozen_state,
+            render_evidence=evidence,
+        )
         return result, receipt
 
 
@@ -539,8 +781,44 @@ def _canonical_decimal(value: str | Decimal) -> Decimal:
 
 
 def _decimal_string(value: Decimal) -> str:
-    value = value.normalize()
-    return "0" if value == 0 else format(value, "f")
+    """Canonical finite decimal spelling without consulting ambient context."""
+    if not value.is_finite():
+        raise ValueError("cost amount must be finite")
+    sign, digits_tuple, exponent = value.as_tuple()
+    digits = "".join(str(digit) for digit in digits_tuple) or "0"
+    if not any(digit != "0" for digit in digits):
+        return "0"
+    # Strip insignificant fractional trailing zeros by changing the exponent,
+    # rather than Decimal.normalize(), whose behaviour depends on context.
+    while exponent < 0 and digits.endswith("0"):
+        digits = digits[:-1]
+        exponent += 1
+    if exponent >= 0:
+        body = digits + ("0" * exponent)
+    else:
+        point = len(digits) + exponent
+        body = ("0." + ("0" * (-point)) + digits) if point <= 0 else (digits[:point] + "." + digits[point:])
+    return ("-" if sign else "") + body
+
+
+def _decimal_precision(*values: Decimal) -> int:
+    """Enough significant digits for exact add/subtract of all finite inputs."""
+    # The lowest represented place can be far below the largest adjusted
+    # exponent (for example ``1E+999 + 1``).  Cover that full span instead of
+    # relying on the process-global Decimal context.
+    highest = max(value.adjusted() for value in values)
+    lowest = min(value.as_tuple().exponent for value in values)
+    return max(1, highest - lowest + 2)
+
+
+def _decimal_add(left: Decimal, right: Decimal) -> Decimal:
+    with localcontext(Context(prec=_decimal_precision(left, right))):
+        return left + right
+
+
+def _decimal_subtract(left: Decimal, right: Decimal) -> Decimal:
+    with localcontext(Context(prec=_decimal_precision(left, right))):
+        return left - right
 
 
 @dataclass(frozen=True)
@@ -632,6 +910,7 @@ class DeploymentAcquisitionLedger:
         self._committed: set[str] = set()
         self._events: list[AcquisitionEvent] = []
         self._nonce = object()
+        self._lock = threading.RLock()
 
     @property
     def spent(self) -> Decimal:
@@ -639,7 +918,7 @@ class DeploymentAcquisitionLedger:
 
     @property
     def remaining_budget(self) -> Decimal:
-        return self._budget - self._spent
+        return _decimal_subtract(self._budget, self._spent)
 
     @property
     def event_records(self) -> tuple[AcquisitionEvent, ...]:
@@ -656,17 +935,18 @@ class DeploymentAcquisitionLedger:
         return self._commit(observation_id, "COMMIT_OBSERVATION")
 
     def _commit(self, observation_id: str, event: str) -> AcquisitionCapability:
-        if observation_id in self._committed:
-            raise RuntimeError("observation was already charged")
-        entry = self._manifest.metadata(observation_id)
-        if entry.acquisition_cost_key is None:
-            raise ValueError("availability entry has no deployment acquisition_cost_key")
-        amount = self._schedule.amount(entry.acquisition_cost_key)
-        after = self._spent + amount
-        if after > self._budget:
-            raise RuntimeError("acquisition commitment would exceed deployment budget")
-        before = self._spent
-        self._spent = after
-        self._committed.add(observation_id)
-        self._events.append(AcquisitionEvent(len(self._events), event, observation_id, entry.acquisition_cost_key, _decimal_string(amount), _decimal_string(before), _decimal_string(after), self._schedule.schedule_hash))
-        return AcquisitionCapability(observation_id, self._nonce, secrets.token_urlsafe(32))
+        with self._lock:
+            if observation_id in self._committed:
+                raise RuntimeError("observation was already charged")
+            entry = self._manifest.metadata(observation_id)
+            if entry.acquisition_cost_key is None:
+                raise ValueError("availability entry has no deployment acquisition_cost_key")
+            amount = self._schedule.amount(entry.acquisition_cost_key)
+            after = _decimal_add(self._spent, amount)
+            if after > self._budget:
+                raise RuntimeError("acquisition commitment would exceed deployment budget")
+            before = self._spent
+            self._spent = after
+            self._committed.add(observation_id)
+            self._events.append(AcquisitionEvent(len(self._events), event, observation_id, entry.acquisition_cost_key, _decimal_string(amount), _decimal_string(before), _decimal_string(after), self._schedule.schedule_hash))
+            return AcquisitionCapability(observation_id, self._nonce, secrets.token_urlsafe(32))

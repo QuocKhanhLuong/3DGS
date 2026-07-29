@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import hashlib
+import threading
 
 import pytest
 
 from smagm.contracts.coordinates import PhysicalPlane
 from smagm.contracts.episode import AcquisitionCostEntry, AcquisitionCostSchedule, DeploymentAcquisitionLedger, EpisodeAssignment, EpisodeLedger
-from smagm.contracts.observation import AvailabilityObservationMeta, SparseAvailabilityManifest
+from smagm.contracts.observation import AvailabilityObservationMeta, PatientSplitRegistry, SparseAvailabilityManifest
 
 
 def _entry(observation_id: str, key: str | None) -> AvailabilityObservationMeta:
@@ -41,7 +42,7 @@ def test_episode_roles_and_context_opens_consume_no_deployment_budget(tmp_path) 
         integrity_digests={entry.observation_id: hashlib.sha256(entry.observation_id.encode()).hexdigest() for entry in manifest.entries},
     )
     assignment = EpisodeAssignment.create(legal_manifest, episode_id="offline-training", patient_id="patient-a", context_ids=("bootstrap-t1",), target_ids=("later-t2",))
-    episode = EpisodeLedger(legal_manifest, assignment, tmp_path)
+    episode = EpisodeLedger(legal_manifest, assignment, tmp_path, split_registry=PatientSplitRegistry.create((legal_manifest,)))
     assert episode.open_context("bootstrap-t1") == b"bootstrap-t1"
     assert deployment.spent == Decimal("0")
     assert deployment.event_records == ()
@@ -94,3 +95,53 @@ def test_deployment_budget_requires_finite_decimal(budget) -> None:
     schedule = AcquisitionCostSchedule.create(schedule_id="s", amounts={"T1:axial": "0"})
     with pytest.raises((TypeError, ValueError)):
         DeploymentAcquisitionLedger(manifest=manifest, budget=budget, schedule=schedule)  # type: ignore[arg-type]
+
+
+def test_long_decimal_schedule_and_ledger_are_exact_under_low_ambient_precision() -> None:
+    manifest = _manifest()
+    first = "1.234567890123456789"
+    second = "0.000000000000000011"
+    expected = Decimal("1.234567890123456800")
+    with localcontext() as context:
+        context.prec = 6
+        schedule = AcquisitionCostSchedule.create(
+            schedule_id="long-decimal",
+            amounts={"T1:axial": first, "T2:coronal": second},
+        )
+        # Decimal construction, canonical hashing, commitment, and remaining
+        # budget must not inherit an arbitrary low ambient arithmetic context.
+        assert schedule.amount("T1:axial") == Decimal(first)
+        assert schedule.amount("T2:coronal") == Decimal(second)
+        ledger = DeploymentAcquisitionLedger(manifest=manifest, budget=expected, schedule=schedule)
+        ledger.commit_bootstrap("bootstrap-t1")
+        ledger.commit_observation("later-t2")
+        assert ledger.spent == expected
+        assert ledger.remaining_budget == Decimal("0")
+
+
+def test_concurrent_duplicate_deployment_commit_charges_exactly_once() -> None:
+    manifest = _manifest()
+    schedule = AcquisitionCostSchedule.create(schedule_id="s", amounts={"T1:axial": "1", "T2:coronal": "1"})
+    ledger = DeploymentAcquisitionLedger(manifest=manifest, budget=Decimal("2"), schedule=schedule)
+    barrier = threading.Barrier(3)
+    successes: list[object] = []
+    failures: list[BaseException] = []
+
+    def commit() -> None:
+        barrier.wait()
+        try:
+            successes.append(ledger.commit_bootstrap("bootstrap-t1"))
+        except BaseException as error:  # expected one duplicate failure
+            failures.append(error)
+
+    workers = [threading.Thread(target=commit) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    barrier.wait()
+    for worker in workers:
+        worker.join()
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert isinstance(failures[0], RuntimeError)
+    assert ledger.spent == Decimal("1")
+    assert [(event.sequence, event.observation_id) for event in ledger.event_records] == [(0, "bootstrap-t1")]

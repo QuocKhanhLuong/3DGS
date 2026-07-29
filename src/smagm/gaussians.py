@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass, field
 from enum import Enum
 import hashlib
 import json
 import math
 
 import torch
+
+
+_GAUGE_FACTORY_TOKEN = object()
 
 
 class AmplitudeGaugePolicy(str, Enum):
@@ -106,8 +109,11 @@ class GaussianBatch:
     primitive_id: tuple[str, ...] | None = None
     gauge_policy: AmplitudeGaugePolicy = AmplitudeGaugePolicy.LEGACY_RAW
     gauge_config_hash: str | None = None
+    _factory_token: InitVar[object | None] = None
+    _factory_created: bool = field(init=False, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _factory_token: object | None) -> None:
+        object.__setattr__(self, "_factory_created", _factory_token is _GAUGE_FACTORY_TOKEN)
         self.validate()
 
     def validate(self) -> None:
@@ -179,7 +185,7 @@ class GaussianBatch:
         if policy is AmplitudeGaugePolicy.LEGACY_RAW:
             if self.gauge_config_hash is not None:
                 raise ValueError("legacy GaussianBatch cannot claim Phase-1 gauge provenance")
-        elif self.gauge_config_hash != _gauge_config_hash(policy):
+        elif self.gauge_config_hash != _gauge_config_hash(policy) or not self._factory_created:
             raise ValueError("Phase-1 GaussianBatch requires matching gauge provenance")
         object.__setattr__(self, "gauge_policy", policy)
         if self.primitive_kind is not None:
@@ -225,4 +231,5 @@ def gaussian_batch_from_raw(raw: RawGaussianParameters) -> GaussianBatch:
         primitive_id=raw.primitive_id,
         gauge_policy=fixed.policy,
         gauge_config_hash=fixed.config_hash,
+        _factory_token=_GAUGE_FACTORY_TOKEN,
     )
