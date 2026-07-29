@@ -1,32 +1,39 @@
-# Full Flow — Direct Sparse Active 3D Reconstruction
+# Full Flow — Teacher-Free Sparse Active 3D Reconstruction
 
 ## 1. Scope
 
 This document defines the complete research flow for reconstructing registered multi-sequence MRI volumes from a small number of actively selected 2D slices.
 
-The core method does not use teacher distillation. The encoder, shared local tiny MLP, update rules, and trajectory components are trained directly through sparse reconstruction episodes.
+The main training path uses:
+
+- permanently sparse patient acquisitions;
+- no teacher distillation;
+- an analytic differential scaffold plus a high-resolution micro-CNN;
+- sparse acquired target planes for supervision;
+- the previously locked anchor, local-field, Gaussian, trajectory, and reconstruction modules.
+
+Complete volumes may exist only in a separate audit/evaluation split or privileged upper-bound ablation. They are not main-training targets.
 
 ---
 
 ## 2. Highest-level flow
 
 ```text
-PHASE 1 — DIRECT SPARSE EPISODIC TRAINING
-Training patient on disk
-→ sample sparse observed slices O
-→ sample hidden reconstruction targets H
-→ encode only O
-→ create/update patient representation from O
-→ render H
-→ compare with hidden target pixels/points
-→ backpropagate global model parameters
+PHASE 1 — TEACHER-FREE PERMANENTLY SPARSE TRAINING
+Fixed sparse training-patient manifest Ω_i^sparse
+→ split into context C_i and acquired sparse targets Q_i
+→ encode only C_i with analytic scaffold + micro-CNN
+→ create/update patient representation from C_i
+→ render Q_i
+→ reveal acquired target pixels
+→ optimize structural encoder and global reconstruction parameters
 
 PHASE 2 — INITIAL PATIENT BOOTSTRAP
 New patient candidate pool
 → metadata-only initial slice selection
 → commit and load K0 slices
 → encode each committed slice once
-→ cache compact evidence maps
+→ cache compact structural and appearance maps
 → lift structural candidates to physical 3D anchors
 → build local fields with shared tiny MLP
 → initialize structural and appearance Gaussian memory
@@ -60,7 +67,7 @@ These parameters are shared across patients and learned offline:
 
 ```text
 Theta_global
-├── evidence encoder parameters theta_E
+├── teacher-free evidence encoder parameters theta_E
 ├── shared local tiny-MLP parameters theta_F
 ├── optional evidence aggregation parameters theta_A
 ├── Gaussian update-rule parameters theta_U
@@ -94,16 +101,37 @@ Patient-specific state is updated during the active trajectory. It is not a new 
 
 ## 4. Observation legality
 
-The complete patient dataset is
+### 4.1 Main training cohort
+
+Training patient \(i\) exposes only a fixed sparse acquisition set:
 
 \[
-\Omega=\{(m,z)\},
+\Omega_i^{sparse}
+=
+\{(a_{i,j},I_{i,j})\}_{j=1}^{K_i}.
 \]
 
-but at time \(t\), only committed observations
+Only files listed in the sparse manifest may be opened by the main training loader.
+
+Within an episode:
 
 \[
-\mathcal O_t\subset\Omega
+\mathcal C_i\subset\Omega_i^{sparse},
+\qquad
+\mathcal Q_i\subset\Omega_i^{sparse}\setminus\mathcal C_i.
+\]
+
+- context pixels may create encoder features, anchors, fields, and Gaussians;
+- target coordinates may be known for rendering;
+- target pixels may be revealed only after state construction;
+- non-manifest slices remain inaccessible throughout training.
+
+### 4.2 Patient inference and active acquisition
+
+At inference round \(t\), only committed observations
+
+\[
+\mathcal O_t
 \]
 
 may contribute pixels or learned features to the patient representation.
@@ -114,83 +142,117 @@ For an unqueried candidate, the router may use only legal descriptors such as:
 - physical plane origin, normal, spacing, and thickness;
 - distance to current anchors or uncertain regions;
 - current representation-derived predictions on that plane;
-- population-level priors learned only from the training cohort.
+- population-level priors learned from the legal training cohort.
 
 It may not use unqueried image pixels, target volume intensities, or labels.
 
+### 4.3 Full-volume audit data
+
+Fully sampled volumes, when available, must be isolated from the main training loader. They may be used for:
+
+- final reconstruction evaluation;
+- leakage auditing;
+- oracle trajectory studies;
+- privileged-training upper bounds explicitly labeled as such.
+
 ---
 
-## 5. Direct sparse training flow
+## 5. Teacher-free sparse training flow
 
 For each training episode:
 
-### Step 1 — Select patient and budget
+### Step 1 — Select patient manifest
 
-Choose one training patient and an observation budget \(B\).
+Choose one training patient and load only the fixed sparse manifest \(\Omega_i^{sparse}\).
 
-### Step 2 — Sample observed input set
+### Step 2 — Split context and acquired sparse targets
 
-Sample or route a small legal observation set
-
-\[
-\mathcal O=\{(m_1,z_1),\ldots,(m_B,z_B)\}.
-\]
-
-Only these slices enter the evidence encoder.
-
-### Step 3 — Sample hidden supervision
-
-Choose a disjoint hidden target set
+Sample:
 
 \[
-\mathcal H\subset\Omega\setminus\mathcal O
+\mathcal C_i\subset\Omega_i^{sparse},
+\qquad
+\mathcal Q_i\subset\Omega_i^{sparse}\setminus\mathcal C_i.
 \]
 
-or sample physical 3D target points. Hidden targets are used only after the representation has been built from \(\mathcal O\).
+Different roles may be sampled across epochs, but only within the fixed sparse set.
 
-### Step 4 — Build patient state
+### Step 3 — Build teacher-free evidence maps
+
+For each context slice:
 
 ```text
-Observed slices O
-→ evidence encoder
-→ compact cached feature maps
+normalized intensity
++ fixed derivatives
++ gradient magnitude
++ Laplacian
++ multi-scale local contrast
++ modality condition
+→ shared high-resolution micro-CNN
+→ Z_str, Z_app, optional reliability C
+```
+
+Only context slices enter the encoder.
+
+### Step 4 — Build patient state through the locked downstream path
+
+```text
+context evidence cache
 → provisional anchors
 → anchor-local evidence aggregation
 → shared tiny local fields
-→ structural + volumetric Gaussian memory
+→ SDF/level-set structural Gaussians
+  + volumetric appearance Gaussians
+→ propagation and latent 3D Gaussian state
 ```
 
-### Step 5 — Render hidden targets
+### Step 5 — Render sparse acquired targets
 
-For every hidden plane or 3D point, render each required modality from the current representation.
+For each target plane \(q\in\mathcal Q_i\), render the required modality from the context-built representation.
 
-### Step 6 — Compute losses
+### Step 6 — Reveal target pixels and compute losses
 
-Recommended loss families:
+The total objective is organized as
 
 \[
-\mathcal L=
-\lambda_{pix}\mathcal L_{pixel}
-+\lambda_{str}\mathcal L_{structural}
-+\lambda_{freq}\mathcal L_{frequency}
-+\lambda_{field}\mathcal L_{field}
-+\lambda_{reg}\mathcal L_{regularization}
-+\lambda_{cal}\mathcal L_{calibration}.
+\begin{aligned}
+\mathcal L
+={}&
+\lambda_{pred}\mathcal L_{pred}
++
+\lambda_{eq}\mathcal L_{eq}
++
+\lambda_{inv}\mathcal L_{inv}\\
+&+
+\lambda_{xmod}\mathcal L_{xmod}
++
+\lambda_{anti}\mathcal L_{anti-collapse}\\
+&+
+\lambda_{local}\mathcal L_{local}
++
+\lambda_{field}\mathcal L_{field}
++
+\lambda_G\mathcal L_{Gaussian}
++
+\lambda_{cal}\mathcal L_{calibration}.
+\end{aligned}
 \]
 
-Possible terms:
-
-- robust L1 or Charbonnier intensity loss;
-- SSIM or local structural loss;
-- gradient and edge reconstruction loss;
-- low/high-frequency consistency;
-- Eikonal or local field smoothness regularization;
-- Gaussian compactness, overlap, and manifold penalties;
-- uncertainty calibration against observed reconstruction error.
+The predictive reconstruction loss is the final task objective. Structural auxiliary terms replace teacher supervision and stabilize the compact encoder.
 
 ### Step 7 — Backpropagate
 
-Update global model parameters. Do not optimize hidden target pixels into the patient state before rendering them.
+Update global model parameters. Target pixels must not enter the patient state before their predictions are generated.
+
+### Step 8 — Training schedule
+
+```text
+E0: teacher-free structural warm-up
+E1: joint sparse context-to-target reconstruction
+E2: end-to-end refinement with reduced auxiliary weights
+```
+
+Learned routing is not required during initial representation training. Fixed or analytic selection should first isolate encoder and representation quality.
 
 ---
 
@@ -207,8 +269,9 @@ For each selected slice:
 ```text
 commit observation
 → load pixels
-→ run evidence encoder once
-→ store compact feature map and reliability map
+→ construct analytic channels
+→ run teacher-free evidence encoder once
+→ store Z_str, Z_app, and reliability with physical metadata
 ```
 
 ### Step 3 — Generate provisional anchors
@@ -217,7 +280,7 @@ Detect sparse structural candidate locations on observed planes, convert their p
 
 ### Step 4 — Aggregate local evidence
 
-Each anchor samples all relevant cached planes and obtains a compact evidence vector that includes feature, modality, plane distance, orientation, and reliability information.
+Each anchor samples all relevant cached planes and obtains a compact evidence vector containing structural feature, appearance feature, modality, plane distance, orientation, and reliability information.
 
 ### Step 5 — Decode local fields
 
@@ -313,7 +376,7 @@ Repair only affected graph regions when possible, then select the next observati
 A successful stop should require persistence over multiple rounds. Candidate conditions include:
 
 - maximum predicted reconstruction gain below threshold;
-- hidden-like self-consistency residual below threshold on legal validation projections;
+- legal self-consistency residual below threshold;
 - relative field change below threshold;
 - anchor and Gaussian topology stable;
 - worst relevant uncertainty below threshold;
@@ -345,7 +408,7 @@ A small residual appearance decoder may be tested, but the default design keeps 
 
 ### Uncertainty
 
-Export uncertainty derived from evidence distance, modality missingness, Gaussian disagreement, residual history, and optional learned calibration.
+Export uncertainty derived from evidence distance, modality missingness, Gaussian disagreement, residual history, propagation depth, and optional learned calibration.
 
 ### Outputs
 
@@ -364,9 +427,12 @@ ReconstructionOutput
 
 ## 10. Core research hypotheses
 
-1. Sparse direct episodic training can learn a patient-specific reconstruction field without full-volume input in any episode.
-2. A shared low-capacity anchor-local decoder is sufficient when physical geometry and local evidence are organized correctly before decoding.
-3. SDF-constrained structural Gaussians reduce geometric freedom and improve stability under sparse observations.
-4. A separate volumetric appearance bank is necessary for faithful internal MRI reconstruction.
-5. Closed-loop active querying improves quality–budget curves relative to fixed uniform and uncertainty-only sampling.
-6. Adaptive anchors and multi-wave routing reduce the number of queried slices required to reach a target reconstruction quality.
+1. A compact structural encoder can be learned without teacher distillation by combining analytic differential cues, teacher-free structural constraints, and permanently sparse target-plane supervision.
+2. Complementary sparse observations across patients can train a shared reconstruction representation without complete-volume targets in the main path.
+3. A shared low-capacity anchor-local decoder is sufficient when physical geometry and local evidence are organized correctly before decoding.
+4. SDF/level-set constrained structural Gaussians reduce geometric freedom and improve stability under sparse observations.
+5. A separate volumetric appearance bank is necessary for faithful internal MRI reconstruction.
+6. Closed-loop active querying improves quality–budget curves relative to fixed uniform and uncertainty-only sampling.
+7. Adaptive anchors and multi-wave routing reduce the number of queried slices required to reach a target reconstruction quality.
+
+These hypotheses remain to be validated. In particular, no claim is made that arbitrary hidden pathology is uniquely recoverable from an insufficient observation set.
