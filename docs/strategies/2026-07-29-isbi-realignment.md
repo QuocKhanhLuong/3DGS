@@ -1,7 +1,7 @@
 # ISBI 2027 Strategy Realignment — Sparse Support-Anchor Gaussian Reconstruction
 
 Date: 2026-07-29
-Status: authoritative Stage-1 strategy correction; awaiting the human gate before T0.5 implementation
+Status: authoritative strategy; Human Gate 1 approved for Stage 2 T0.5 only
 Owner: PM / scientific-program lead
 Primary venue: ISBI 2027, with medical-imaging validity standards aligned to ISBI/MICCAI
 
@@ -115,16 +115,18 @@ The headline may not switch from static representation to routing without:
 
 ### 3.4 Next approved tranche
 
-T0.5 and T1 are the next **scientifically approved tranche**, in this order:
+T0.5 and T1 remain the next **scientifically approved sequence**, in this
+order:
 
 ```text
 T0.5 — legal episodic training corrections
 T1   — teacher-free encoder + fixed-topology Gaussian baseline
 ```
 
-This strategy approval does not bypass the Stage-1 human gate. No T0.5 code is
-authorized until that gate is explicitly approved, and T1 cannot start until
-T0.5 passes all blocking tests and its next human gate.
+Human Gate 1 is now approved for **Stage 2 T0.5 only**. T1-A remains
+unauthorized until T0.5-L passes on an exact-clean commit in GitHub Actions,
+the independent T0.5 review is complete, and Human Gate 2 is explicitly
+approved. T2 and later work remain prohibited.
 
 ## 4. Tranche boundaries
 
@@ -259,17 +261,28 @@ Feature-proxy improvements alone do not pass this gate.
 
 Pass only when the reconstruction improvement does not cause a meaningful
 lesion/ROI fidelity regression on the patient-disjoint T1 lesion-validation
-audit cohort. Before the evaluator is opened, freeze its sparse reconstruction
-input manifest, checkpoint, config, primary lesion/ROI and boundary estimands,
-paired non-inferiority margins, confidence-interval procedure, multiplicity
-policy, coverage metrics, and failure rules. Global image metrics,
-supported-only metrics, or visually selected examples cannot substitute for
-this gate.
+cohort. For each evaluation round, record an immutable snapshot of its sparse
+reconstruction input manifest, checkpoint, config, primary lesion/ROI and
+boundary estimands, paired non-inferiority margins, confidence-interval
+procedure, multiplicity policy, coverage metrics, and failure rules. Results
+may guide a subsequent, separately versioned development round. Global image
+metrics, supported-only metrics, or visually selected examples cannot
+substitute for this gate.
 
-This one-shot T1 gate cohort is not the sealed T5 final-audit cohort. Its dense
-targets and labels are evaluator-only and cannot drive training, normalization,
-support placement, hyperparameter tuning, early stopping, or checkpoint
-ranking. The T5 cohort remains unopened and cannot select or authorize T2.
+The T1 lesion-validation cohort is not the sealed T5 final-audit cohort. It may
+guide documented development decisions, including architecture, configuration,
+threshold, checkpoint-selection-rule, and analysis-plan revisions. It must
+nevertheless remain evaluator-isolated: its dense targets, labels, and pixels
+must never contribute gradients or enter training, training preprocessing,
+training normalization, training support placement, or training caches.
+Repeated access and every resulting development decision must be logged so
+T1-M is interpreted as development validation rather than a final unbiased
+audit.
+
+The patient-disjoint T5 final-audit cohort must remain sealed until the
+architecture, configs, thresholds, checkpoint-selection rules, and analysis
+plans are frozen. T5 data cannot guide T1 development, select checkpoints, or
+authorize T2.
 
 No work may proceed to T2 until the human explicitly accepts all applicable
 T0.5-L, T1-F, T1-R, and T1-M evidence.
@@ -305,7 +318,7 @@ point estimates alone.
 | Analytic scaffolding adds value | Paired E2b improvement over E1 attributable under matched architecture/opportunity | Derivative channels look interpretable | Remove the analytic-scaffold claim |
 | Support-anchor field adds representation value | Future matched incremental ablations against deterministic supports and an equally budgeted free/global alternative | Prior-art component lists or qualitative anchor plots | Do not retain the field as a contribution |
 | Anchor–Gaussian propagation adds value | Future matched improvement over fixed topology with equal compute and primitive opportunity | More primitives, more steps, or adaptive compute | Remove propagation from the main claim |
-| Reconstruction improves medically relevant fidelity | Patient-level T1 lesion-validation audit under a frozen sparse input manifest, paired margins/intervals, lesion/ROI, boundary, coverage, and failure metrics; sealed T5 final audit remains separate | PSNR/SSIM alone, supported-only metrics, repeated gate-set tuning, or opening the T5 final audit | Fail T1-M / later medical gate |
+| Reconstruction improves medically relevant fidelity | Patient-level, evaluator-isolated T1 lesion validation with logged development use, paired margins/intervals, lesion/ROI, boundary, coverage, and failure metrics; a separately sealed T5 final audit after architecture, configs, thresholds, checkpoint-selection rules, and analysis plans are frozen | PSNR/SSIM alone, supported-only metrics, unlogged validation-driven changes, validation pixels entering training, or opening the T5 final audit before the freeze | Fail T1-M / later medical gate |
 | The renderer models the current acquisition abstraction | Analytic/reference tests for geometry, finite through-plane profiles, masking, and autograd | Current reference implementation alone as scanner calibration evidence | Retain reference-only wording |
 | Uncertainty is calibrated | A declared target, calibration protocol, proper scoring or coverage analysis, and gauge-invariant estimator | Raw `support_mass` or encoder reliability map | Call it support/reliability diagnostic only |
 | The field is an SDF | Sign convention, Eikonal test, gradient-norm statistics, and distance calibration | A scalar local field or near-surface visualization | Use `StructuralField` |
@@ -343,13 +356,12 @@ experiment reports, and paper drafts must not claim:
 - a complete full-volume method, active acquisition method, or adaptive
   topology before its later tranche is implemented and approved.
 
-## 10. Program decision at Stage 1
+## 10. Current program authorization
 
-The PM approves the revised **ISBI representation thesis** and the bounded
-T0.5-then-T1 tranche as the program strategy. The recommendation at this stage
-is:
+The PM preserves the revised **ISBI representation thesis** and the bounded
+T0.5-then-T1 sequence as the program strategy. Human Gate 1 has approved:
 
-**PARTIAL — proceed to Human Gate 1, not to implementation.**
+**Stage 2 — implement and independently review T0.5 only.**
 
 Rationale:
 
@@ -359,6 +371,6 @@ Rationale:
 - buildability is not evidence of reconstruction or medical validity;
 - T0.5 legal contracts must pass before any T1 experiment can be trusted.
 
-This approval explicitly preserves the user's Human Gate. It does not authorize
-T0.5 source changes, T1 source changes, or any T2+ module in the current Stage-1
-run.
+This approval authorizes T0.5 source, test, CI, and directly supporting
+documentation changes only. It does not authorize T1-A source or scaffold
+changes, and it does not authorize any T2, T3, T4, or T5 module or placeholder.

@@ -1,7 +1,7 @@
 # T0.5/T1 ISBI Design Delta — Legal Episodes and Fixed Gaussian Attribution
 
 Date: 2026-07-29
-Status: Stage-1 architecture contract; implementation blocked by Human Gate 1
+Status: Human Gate 1 approved for Stage 2 (T0.5 only); T1-A remains blocked
 Owner: Architect / geometry and medical forward-model lead
 Inputs:
 
@@ -44,7 +44,7 @@ physical MRI forward operator`.
 | Manifest hash | Includes permanent access level | Availability hash contains no episodic role |
 | Target reveal | `commit_target()` immediately returns a reveal capability | Commit returns a commit capability; reveal requires a registered, matching, single-use prediction receipt |
 | Budget | Target role and target commitment are coupled to a float-facing budget | Offline episode roles cost zero; a separate deployment ledger uses canonical `Decimal` amounts |
-| Support classification | Local support threshold may change under a common log-amplitude shift | Phase-1 uses mean-centered per-patient log amplitude before rendering |
+| Support classification | Local support threshold may change under a common log-amplitude shift | Every raw-parameter-to-runtime-`GaussianBatch` conversion mean-centres log amplitude per patient state exactly once; rendering never normalizes it |
 | Encoder coordinates | No feature-grid geometry contract | Every output carries an explicit pixel-center `FeatureGridToPlaneTransform` |
 | Gaussian parameters | Public contract validates an already-positive Cholesky factor | T1 constructor maps raw tensors to a valid factor, bounded centers, and gauge-fixed amplitudes |
 | Target gradient | No episodic trainer exists | The held prediction tensor remains live for loss/backward; receipt hashing uses a detached audit copy only |
@@ -228,12 +228,7 @@ class EpisodeLedger:
         self,
         commit_capability: TargetCommitCapability,
         *,
-        render_evidence: RenderedPredictionCapability,
-        target_id: str,
-        state_version: str,
-        plane_hash: str,
-        renderer_version: str,
-        prediction_digest: str,
+        registration: PredictionRegistration,
     ) -> PredictionReceiptCapability: ...
     def reveal_target(
         self,
@@ -247,48 +242,77 @@ class EpisodeLedger:
 target, but never its pixels, labels, content digest, normalization statistic,
 or cached features.
 
+`EpisodeLedger` is a development/training ledger. It requires a factory-created
+`PatientSplitRegistry` containing the exact sealed manifest before any provider
+is created. It accepts only `train` and `validation` cohorts and fails closed
+for `t1_lesion_validation` or `t5_final_audit`; those cohorts require their
+own isolated evaluator rather than this payload-opening API.
+
 The ledger owns a fresh opaque nonce. Commit and receipt capabilities bind that
 nonce and an unpredictable secret; their `repr` exposes no secret. Capabilities
 are in-process scientific-validity contracts, not an OS security sandbox.
 
 ### 4.5 Prediction receipt
 
-A raw caller-provided digest is not evidence that rendering occurred. The
-reference path therefore defines:
+A raw caller-provided digest is not evidence that rendering occurred.
+`render_plane` therefore remains a pure, differentiable, side-effect-free
+tensor function. It accepts Gaussian state, target-plane geometry, and renderer
+configuration and returns a `RenderResult`. It has no reference to an
+`EpisodeLedger`, episode, commit, capability, registrar, event stream, or
+receipt, and it never hashes output or mutates ledger state.
+
+The separate registration boundary defines:
 
 ```python
 @dataclass(frozen=True)
 class FrozenPatientState:
-    state_version: str
-    # Opaque, immutable tensor/state binding validated when frozen.
-    state_binding: FrozenStateBinding
+    # Created from ledger, a factory-gauged live GaussianBatch, and an upstream
+    # state hash. `state_version` is derived internally from episode/context
+    # audit, upstream hash, Gaussian digest, and gauge provenance.
 
-class RenderedPredictionCapability:
-    """Opaque and constructible only by the committed-render adapter."""
+@dataclass(frozen=True)
+class PredictionRegistration:
+    """Opaque registrar-owned binding; not caller constructible."""
 
-def render_committed_target(
-    *,
-    commit_capability: TargetCommitCapability,
-    frozen_state: FrozenPatientState,
-    renderer: ThroughPlaneProfileAwareGaussianReferenceRenderer,
-) -> tuple[RenderResult, RenderedPredictionCapability]: ...
+class PredictionRegistrar:
+    def register_prediction_receipt(
+        self,
+        *,
+        ledger: EpisodeLedger,
+        commit_capability: TargetCommitCapability,
+        frozen_state: FrozenPatientState,
+        render_evidence: ControllerRenderEvidence,
+    ) -> PredictionReceiptCapability: ...
 ```
 
-`render_committed_target()` obtains the target plane only from the bound commit,
-requires `frozen_state.state_version` to equal the committed version, calls the
-registered reference renderer, and mints an opaque evidence capability from
-the returned tensors. The capability binds ledger, episode, assignment,
-target, state version, plane hash, renderer implementation/config version,
-output-schema version, and prediction digest. Its constructor is private to the
-adapter; a raw string, direct `RenderResult`, or caller-built lookalike is
-rejected.
+Only `EpisodeController` obtains the manifest-bound target plane through the
+commit and calls pure `render_plane(...)`. It retains the live `RenderResult`
+for loss, rehashes the factory-frozen live Gaussian batch immediately before
+rendering, and mints private in-process render evidence carrying the exact
+plane/config/state binding. `PredictionRegistrar` rejects a bare or
+caller-constructed `RenderResult`; it accepts only that controller evidence,
+canonicalizes and digests its detached audit copy, recomputes the target
+`plane_hash`, and derives renderer implementation/config versions from the
+controlled render configuration. It then atomically records the registration
+with the ledger and returns the opaque single-use receipt capability.
 
-`register_prediction_receipt()` consumes this renderer-minted capability and
-checks every explicit scalar argument against it. This preserves the externally
-auditable receipt fields while preventing an arbitrary well-formed digest or
-renderer-version string from satisfying the barrier. The capability is a
-scientific-validity mechanism inside the reference process, not a claim of
-protection against hostile code or operating-system compromise.
+The registrar-owned registration binds ledger, episode, assignment, target,
+state version, plane hash, renderer implementation/config version,
+output-schema version, and prediction digest. Neither the renderer nor
+`render_plane` owns ledger state, issues capabilities, constructs receipts, or
+knows that a receipt barrier exists. A raw string, a caller-selected digest, a
+caller-selected plane/version field, or a caller-built registration lookalike
+is rejected. This is a scientific-validity mechanism inside the reference
+process, not a claim of protection against hostile code or operating-system
+compromise.
+
+Internally, the registrar creates the opaque `PredictionRegistration` and
+passes it to `EpisodeLedger.register_prediction_receipt(...)` in the same
+critical section that appends the registration event. Application code cannot
+call that ledger method with scalar evidence fields, and only the registrar
+receives the resulting receipt capability. This preserves ledger ownership of
+episode ordering while making receipt minting a controller/registrar
+responsibility rather than a renderer side effect.
 
 The auditable receipt record binds:
 
@@ -302,6 +326,8 @@ class PredictionReceiptRecord:
     state_version: str
     plane_hash: str
     renderer_version: str
+    renderer_output_schema_version: str
+    gaussian_state_digest: str
     prediction_digest: str
     commit_sequence: int
     receipt_sequence: int
@@ -338,9 +364,9 @@ open assigned context only
 → freeze state_version
 → expose assigned target metadata
 → commit_target(target_id, state_version)
-→ render_committed_target(commit, frozen state)
-→ renderer adapter computes digest from a detached audit copy
-→ register_prediction_receipt(..., render_evidence)
+→ EpisodeController calls pure render_plane(frozen state, committed plane)
+→ PredictionRegistrar consumes the actual RenderResult
+→ registrar computes digest from a detached audit copy and mints the receipt
 → reveal_target(target_id, receipt_capability)
 → compute loss using the original live prediction tensor
 ```
@@ -348,12 +374,15 @@ open assigned context only
 Registration rejects:
 
 - a missing or invalid commit capability;
-- missing, forged, consumed, or caller-constructed render evidence;
+- a missing `RenderResult`, a non-registrar call path, or a
+  caller-constructed registration;
 - a commit from another ledger;
 - a target, episode, assignment, or state version different from the commit;
 - a plane hash different from bound target metadata;
-- any renderer version, output-schema version, or prediction digest different
-  from the renderer-minted evidence;
+- any renderer version or output-schema version different from the registered
+  renderer configuration;
+- any prediction digest not computed by the registrar from the actual
+  `RenderResult`;
 - a second receipt for the same commit.
 
 Reveal rejects:
@@ -443,15 +472,24 @@ T0.5 selects policy A:
 
 The transformation has exactly one ownership boundary:
 
-> **Gaussian-state construction owns gauge fixing; the renderer never applies
-> or reapplies an amplitude gauge.**
+> **Every conversion from raw Gaussian parameters to a runtime
+> `GaussianBatch` owns one gauge-fixing call. Each conversion applies it exactly
+> once; `render_plane` never applies or reapplies an amplitude gauge.**
 
 T0.5 introduces a pure, differentiable
 `fix_log_amplitude_gauge(raw_log_amplitude, patient_state_index, policy)`
-utility and a typed `GaugeFixedLogAmplitude` result. T0.5 tests this utility with
-the existing `GaussianBatch`/renderer path before the T1 safe constructor
-exists. In T1, `construct_fixed_gaussians()` becomes the only main-path caller
-of that utility and passes the resulting gauge-fixed log amplitudes to
+utility and a typed `GaugeFixedLogAmplitude` result. Every T0.5 factory,
+adapter, deserializer, clone/rebuild path, and future constructor that accepts
+raw Gaussian parameters and emits a runtime `GaussianBatch` must call this
+utility once during that conversion. Gauge-fixed values from a previous
+runtime batch are not a substitute for normalizing the raw inputs of a new
+conversion. Patient-state initialization alone is not a sufficient ownership
+boundary.
+
+T0.5 tests this invariant with the existing raw-to-`GaussianBatch` path before
+the T1 safe constructor exists. If T1 is later authorized,
+`construct_fixed_gaussians()` will obey the same per-conversion rule and pass
+the resulting gauge-fixed log amplitudes to
 `GaussianBatch.log_support_amplitude`. The renderer accepts already fixed log
 amplitudes plus their policy/config provenance, performs its existing single
 log-to-positive-amplitude conversion, rejects an unfixed Phase-1 state, and
@@ -485,10 +523,12 @@ future batching concatenates patients, a required `patient_state_index`
 per primitive defines separate segment means.
 
 `LEGACY_RAW` may exist only for T0 compatibility tests and cannot be selected
-by Phase-1/T1 configs. The state builder records the policy and config hash in
-the `GaussianBatch` provenance, state version, and artifact record. A blocking
-test asserts that the renderer neither changes a `GaugeFixedLogAmplitude` nor
-invokes the gauge utility a second time.
+by Phase-1/T1 configs. Each raw-to-runtime conversion records the policy and
+config hash in the resulting `GaussianBatch` provenance, state version, and
+artifact record. Blocking tests instrument every authorized conversion
+entrypoint and assert exactly one gauge call per conversion, including repeated
+conversions of the same raw state, while `render_plane` makes zero gauge calls
+and does not change `GaugeFixedLogAmplitude`.
 
 Even after gauge fixing:
 
@@ -778,10 +818,13 @@ class SampledSupportFeatures:
     valid_sample_mask: Tensor   # [N], bool
 ```
 
-E0 uses a named fixed, non-learned selection/normalization/zero-padding map from
-the analytic bank into the `16 + 8 + 1` contract. E1 and E2 emit those same
-dimensions directly. Invalid or padded samples are rejected before the bridge;
-they are not represented by zeros in a valid row.
+E0 uses a named selection/normalization/projection adapter from the analytic
+bank into the `16 + 8 + 1` contract. E1 and E2 emit those same dimensions
+directly. Invalid or padded samples are rejected before the bridge; they are
+not represented by zeros in a valid row. Whether the E0 adapter is fixed or
+learned, its parameter count, FLOPs, runtime, and memory are recorded; a fixed
+adapter reports zero trainable parameters but still reports its projection
+operations.
 
 One shared downstream architecture maps these features to raw Gaussian
 parameters:
@@ -806,15 +849,19 @@ concat(Z_str, Z_app, reliability)
 └── raw modality appearance
 ```
 
-It has no support-to-support communication and cannot change topology. E0, E1,
-and E2 use identical head architecture, hidden width, output dimensions,
-initialization seed, optimizer, steps, and update opportunity. Runs train
-separate head instances from the same initialization; weights are not copied
-from a privileged variant. E1 and E2 encoder widths are selected under the
-predeclared matched parameter/FLOP envelope. E0's intentionally absent learned
-encoder is reported transparently rather than hidden with unused parameters.
-Head and encoder parameter/FLOP/runtime counts are reported separately and in
-total.
+It has no support-to-support communication and cannot change topology. “Shared
+head” means E0, E1, and E2 use identical head architecture, parameter budget,
+hidden width, output dimensions and contract, initialization protocol,
+optimizer, steps, and update opportunity. Each experiment instantiates and
+trains its own independent weights; no weights are shared across runs, copied
+from another variant, or reused from a privileged model. The predeclared seed
+schedule implements the same initialization protocol for every variant.
+
+E1 and E2 encoder widths are selected under the predeclared matched
+parameter/FLOP envelope. E0's intentionally absent learned encoder is reported
+transparently rather than hidden with unused parameters. The E0 projection
+adapter and the common head are included in parameter, FLOP, runtime, and
+memory accounting. Adapter, head, encoder, and totals are reported separately.
 
 The required differentiable sequence is therefore:
 
@@ -959,7 +1006,7 @@ improved sparse target reconstruction.
 |---|---|---|
 | Architect | T0.5/T1 design | Contracts in this document; geometry, hashes, gauge, cache, and constructor semantics |
 | Medical Data Steward | T0.5/T1 | Manifest creation, patient split, registration confidence, missing modality, audit isolation, acquisition-cost schedule, leakage veto |
-| Dev | T0.5 | `src/smagm/contracts/episode.py`, observation/manifest migration, renderer-minted evidence, canonical gauge utility/provenance, exports |
+| Dev | T0.5 | `src/smagm/contracts/episode.py`, observation/manifest migration, pure renderer integration, registrar-minted receipt from the actual `RenderResult`, per-conversion gauge utility/provenance, exports |
 | QA | T0.5 | Assignment, receipt, wrong-capability, gauge, Decimal, leakage-positive, and compatibility tests |
 | Reproducibility Auditor | T0.5 | Exact clean commit, CI, manifest/assignment/config/event/artifact hashes |
 | Reviewer | T0.5 | Independent legality, physical geometry, receipt ordering, gauge, and overclaim review |
@@ -983,13 +1030,15 @@ Blocking suites must prove:
 3. role reassignment does not mutate manifest/hash or consume cost;
 4. commit alone cannot reveal;
 5. wrong target, episode, assignment, state, ledger, plane, arbitrary digest,
-   forged/missing renderer evidence, and reused receipt capabilities fail;
+   forged/missing registrar evidence, and reused receipt capabilities fail;
 6. event order is commit → prediction registration → reveal → payload open;
 7. offline training has no cost ledger;
 8. deployment bootstrap and later commitments use an immutable, internally
    hashed schedule and exact `Decimal` cost;
-9. common log-amplitude shifts cannot change supported classification, and the
-   gauge utility is applied exactly once before `GaussianBatch` construction;
+9. common log-amplitude shifts cannot change supported classification; every
+   raw-to-runtime `GaussianBatch` conversion applies the gauge utility exactly
+   once, repeated conversions apply it again, and `render_plane` applies it
+   zero times;
 10. non-manifest/audit/symlink/mutated payload and target-sentinel
     leakage-positive controls fail closed;
 11. exact clean-commit CI passes pytest, compileall, and diff checking.
@@ -1021,19 +1070,24 @@ preprocessing is included in compute. Proxy feature improvement alone fails.
 
 ### Gate T1-M
 
-On the patient-disjoint **T1 lesion-validation audit cohort**, any global gain
-must not violate a predeclared paired non-inferiority margin for the primary
-lesion/ROI and boundary-fidelity estimands. The cohort is evaluated once after
-the checkpoint, config, sparse input manifest, masks, estimands, margins,
-confidence interval, and multiplicity policy are frozen. Its dense pixels and
-labels remain evaluator-only and never enter training, normalization,
-registration fitting, support selection, early stopping, or checkpoint
-selection. Coverage and failures are reported.
+On the patient-disjoint **T1 lesion-validation cohort**, any global gain must
+not violate a predeclared paired non-inferiority margin for the primary
+lesion/ROI and boundary-fidelity estimands. This is a development-validation
+resource: its evaluator outputs may guide T1 architecture, configuration,
+threshold, checkpoint-selection-rule, and analysis-plan development when every
+access and resulting decision is recorded. Its dense pixels and labels remain
+evaluator-only and never enter gradient training, normalization fitting,
+registration fitting, support selection, or model inputs. Coverage and
+failures are reported, and results from this cohort are never described as a
+sealed final-audit estimate.
 
 This T1 gate cohort is not the sealed final-audit cohort reserved for T5. Each
 has disjoint patients, storage roots, credentials, loader/cache namespaces, and
-hashes. T1 reconstruction receives only its predeclared sparse input manifest;
-the isolated evaluator alone opens dense targets and lesion/ROI labels.
+hashes. The T5 final-audit cohort remains unopened until the architecture,
+configs, thresholds, checkpoint-selection rules, and analysis plans are all
+frozen and hash-recorded. T1 reconstruction receives only its predeclared
+sparse input manifest; the isolated lesion-validation evaluator alone opens
+dense targets and lesion/ROI labels.
 
 No T2 work begins until the human accepts all applicable gates.
 
@@ -1087,8 +1141,8 @@ required_outputs:
   - immutable availability and assignment contracts
   - receipt-gated episode ledger
   - separate exact-Decimal deployment accounting
-  - named gauge utility applied once at Gaussian-state construction
-  - renderer-minted prediction evidence
+  - named gauge utility applied exactly once on every raw-to-runtime GaussianBatch conversion
+  - registrar-minted receipt from the actual RenderResult; pure render_plane
   - leakage-positive blocking tests
 verification:
   - python -m pytest -q
@@ -1219,16 +1273,17 @@ exit:
   - no T2 authorization without a new human decision
 prohibited:
   - E3/E4 main-method wording
-  - tuning from the T1 lesion-validation evaluator
+  - unlogged or unplanned use of the T1 lesion-validation evaluator
   - opening the sealed T5 final-audit cohort
   - any T2+ implementation
 ```
 
-## 17. Stage-1 architecture recommendation
+## 17. Current architecture recommendation
 
-**PARTIAL — design-ready, implementation not authorized.**
+**PASS for Stage 2 T0.5 implementation only.**
 
 The interfaces above close the known permanent-role, immediate-reveal,
 amplitude-gauge, feature-coordinate, validated-factor, and autograd ambiguities.
-They do not establish reconstruction benefit or medical fidelity. Proceed only
-to Stage 2 after Human Gate 1, and stop again at every declared gate.
+They do not establish reconstruction benefit or medical fidelity. Human Gate 1
+authorizes only the T0.5 execution contract. T1-A and every T2+ module remain
+unauthorized until their explicit later gates.

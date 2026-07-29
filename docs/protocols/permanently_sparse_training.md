@@ -39,16 +39,20 @@ is launched:
 1. **Main permanently sparse cohort.** Only the acquired sparse observations in
    the availability manifest are present under the training data root. This is
    the only cohort that supports the main permanently sparse training claim.
-2. **T1 lesion-validation audit cohort.** Patient IDs are disjoint from main
+2. **T1 lesion-validation cohort.** Patient IDs are disjoint from main
    train/validation patients. Reconstruction receives only a predeclared,
-   hashed sparse input manifest. Full volumes and lesion/ROI labels exist only
-   behind an isolated evaluator opened once after checkpoint, config, metrics,
-   non-inferiority margins, confidence intervals, and multiplicity policy are
-   frozen. This cohort decides T1-M and is not the final paper audit.
+   hashed sparse input manifest. Full volumes and lesion/ROI labels remain
+   evaluator-only. Aggregate reconstruction and lesion/ROI results may guide
+   development decisions for architectures, configs, thresholds, and
+   checkpoint-selection rules, but neither sparse inputs nor evaluator-held
+   targets or labels may enter gradient training. This cohort decides T1-M and
+   is not the final paper audit.
 3. **Sealed T5 final-audit cohort.** Full volumes and lesion/ROI labels exist
    under a separate evaluation root and credentials for patient IDs absent from
-   every main and T1 lesion-validation manifest. It remains unopened until the
-   final T5 evaluation authorized in a future tranche.
+   every main and T1 lesion-validation manifest. Its sparse inputs, full
+   volumes, labels, and derived summaries remain unopened until architectures,
+   configs, thresholds, checkpoint-selection rules, and analysis plans are all
+   frozen and final T5 evaluation is authorized in a future tranche.
 4. **Privileged or simulated cohort.** A sparse set derived retrospectively from
    a fully sampled parent scan must be labeled simulated or privileged. The
    dense parent remains outside the main loader. Results from this cohort may be
@@ -144,11 +148,15 @@ The split registry must:
   without moving slices independently between splits.
 
 All learned preprocessing, normalization statistics, registration confidence
-calibration, thresholds, and hyperparameter decisions are fit on the training
-split only. Validation may select configurations. The T1 lesion-validation
-evaluator may issue one frozen pass/fail result for T1-M; it may not return
-training tensors or support iterative tuning. The sealed T5 final-audit cohort
-is opened only by the future final-audit evaluator.
+calibration, model weights, and gradient-derived state are fit on the training
+split only. Validation may select configurations. Aggregate results from the
+patient-disjoint T1 lesion-validation evaluator may guide architecture, config,
+threshold, and checkpoint-selection-rule decisions, including iterative
+development. Its sparse inputs remain constrained to their predeclared manifest,
+and its full volumes, target pixels, and lesion/ROI labels remain evaluator-only
+and never become training tensors. The distinct T5 final-audit cohort is opened
+only by the future final-audit evaluator after the complete evaluation protocol
+is frozen.
 
 ## 5. Episode assignment is not availability
 
@@ -278,25 +286,36 @@ logically isolated from training and from one another:
 
 - separate patient IDs, patient-level split, storage root, credentials/mount,
   loader class, evaluator process, and cache namespace;
-- a distinct canonical sparse input manifest for the T1 gate cohort, frozen
-  before evaluation and containing the only pixels available to reconstruction;
+- a distinct, predeclared canonical sparse input manifest for the T1 gate
+  cohort, containing the only pixels available to its reconstruction process;
+- every T1 sparse-input-manifest change creates a new version and hash and is
+  recorded before the affected evaluation; it is never an implicit expansion;
 - no evaluation path or evaluator provider in a training process or training
   config;
-- no training, feature normalization, early stopping, model selection, support
-  placement, or threshold tuning on evaluation pixels or labels;
+- no gradient training, feature-statistic fitting, weight updates, patient-state
+  reuse, or support construction for training from evaluation pixels or labels;
 - no encoder features, registrations, crops, masks, summaries, or pretrained
   patient state derived from either evaluation cohort in training artifacts;
-- T1 lesion-validation runs only after its checkpoint, config, input manifest,
-  metrics, margins, interval, and multiplicity policy are frozen;
-- T5 final audit remains sealed throughout T0.5/T1;
+- T1 lesion-validation may return aggregate metrics and lesion/ROI diagnostics
+  to guide architecture, config, threshold, and checkpoint-selection-rule
+  decisions, but it returns no dense target, ROI label, per-pixel target tensor,
+  or patient state to the training process;
+- each T1 evaluation records its code, checkpoint, config, input-manifest,
+  metric, margin, interval, and multiplicity-policy hashes so development use is
+  auditable rather than hidden;
+- T5 final audit remains sealed throughout T0.5/T1 and until architectures,
+  configs, thresholds, checkpoint-selection rules, and analysis plans are all
+  frozen;
 - lesion/ROI labels are opened only by the corresponding isolated evaluator.
 
-The T1 gate result may accept or reject the already frozen representation, but
-must not be used for gradient updates, hyperparameter search, threshold tuning,
-checkpoint ranking, or repeated trial-and-error. A failed T1-M run is recorded
-as failed; any new hypothesis requires a newly declared validation protocol,
-not another look at the same evaluator. The final T5 cohort is never used to
-authorize or select T2.
+T1 lesion-validation feedback may accept, reject, or guide revision of the
+developing representation. It must not be used for gradient updates, feature
+normalization, dense supervision, target-derived inputs, or patient-specific
+state reuse. Every development decision informed by this cohort must cite the
+corresponding evaluation and artifact hashes. Before opening T5, the final
+architecture, configs, thresholds, checkpoint-selection rules, and analysis
+plans are frozen and hashed. T5 feedback cannot authorize model revision,
+checkpoint reselection, threshold tuning, or T2 selection.
 
 Oracle routing, E3, E4, or other privileged studies must use separate configs,
 artifact namespaces, and explicit `PRIVILEGED_UPPER_BOUND` labels. Their
@@ -409,7 +428,8 @@ The following are prohibited in the main path:
 - target pixels or target-derived values before receipt-gated reveal;
 - hidden target content used for neighbor search, primitive selection,
   coverage, early stopping, or topology decisions;
-- audit metrics used to tune training or select checkpoints;
+- T5 final-audit metrics used to tune training, select checkpoints, revise
+  thresholds, or change analysis plans;
 - teacher or pretrained dense features presented as the main method;
 - silent filling of missing modalities or unsupported pixels.
 

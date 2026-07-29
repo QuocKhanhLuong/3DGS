@@ -56,6 +56,9 @@ roles:
 
   reviewer:
     model: gpt-5.6-sol
+    # AgenTeam 3.7.0 strict validation accepts only low/medium/high here
+    # (reasoning_effort=max raises E002). Stage reviews are therefore launched
+    # through the built-in reviewer role, whose execution effort is fixed at max.
     reasoning_effort: high
     system_instructions: |
       Review as an adversarial top medical-imaging venue reviewer. Attempt to

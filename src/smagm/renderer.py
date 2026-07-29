@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 import math
 from typing import Literal, Sequence
 
@@ -10,6 +12,9 @@ import torch
 
 from .contracts.coordinates import PhysicalPlane
 from .gaussians import GaussianBatch
+
+
+RENDERER_OUTPUT_SCHEMA_VERSION = "render-result-v1"
 
 
 @dataclass(frozen=True)
@@ -54,7 +59,7 @@ class SlabProfile:
 
 @dataclass(frozen=True)
 class RenderConfig:
-    """Named numerical policy and chunking controls for the reference kernel."""
+    """Controls for the through-plane profile-aware Gaussian reference renderer."""
 
     support_epsilon: float = 1e-8
     pixel_chunk_size: int | None = None
@@ -82,6 +87,33 @@ class RenderConfig:
             or not 0.0 < self.minimum_supported_psf_mass <= 1.0
         ):
             raise ValueError("minimum_supported_psf_mass must lie in (0, 1]")
+
+    @property
+    def renderer_version(self) -> str:
+        """Controlled implementation/config identifier, never caller supplied.
+
+        Chunk sizes are deliberately included: they are expected to be
+        numerically equivalent but remain part of a reproducible render record.
+        """
+        payload = {
+            "gaussian_chunk_size": self.gaussian_chunk_size,
+            "implementation": "through-plane-profile-aware-gaussian-reference-renderer/v1",
+            "minimum_supported_psf_mass": self.minimum_supported_psf_mass,
+            "pixel_chunk_size": self.pixel_chunk_size,
+            "profile": {
+                "kind": self.profile.kind,
+                "normalized_offsets": self.profile.normalized_offsets,
+                "weights": self.profile.weights,
+            },
+            "support_epsilon": self.support_epsilon,
+        }
+        digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        return f"through-plane-profile-aware-gaussian-reference-renderer/v1:{digest}"
+
+    @property
+    def renderer_output_schema_version(self) -> str:
+        """Version of the detached `RenderResult` digest envelope."""
+        return RENDERER_OUTPUT_SCHEMA_VERSION
 
 
 @dataclass(frozen=True)
@@ -139,7 +171,9 @@ def render_plane(gaussians: GaussianBatch, plane: PhysicalPlane, *, appearance_c
     samples; supported samples are renormalized and the configured coverage
     threshold determines the explicit unsupported mask. Chunk boundaries do not
     alter the operator and remain inside the differentiable tensor path;
-    manifest/selection operations are outside it.
+    manifest/selection operations are outside it.  The function is deliberately
+    side-effect free: it neither knows about episode ledgers nor issues
+    prediction receipts.
     """
     if not isinstance(gaussians, GaussianBatch) or not isinstance(plane, PhysicalPlane):
         raise TypeError("gaussians and plane must use their T0 contract types")
