@@ -1,8 +1,19 @@
 # Sparse Active Multi-Sequence MRI 3D Reconstruction
 
+> **ISBI precedence notice (2026-07-29).** This package contains the full
+> long-horizon T1–T5 architecture, but
+> [`../strategies/2026-07-29-isbi-realignment.md`](../strategies/2026-07-29-isbi-realignment.md)
+> governs thesis, tranche order, and claims. Static sparse support-anchor
+> reconstruction is primary; active trajectory is a deferred T4 extension.
+> Any CVPR-first or active-policy-first wording below is historical unless the
+> ISBI strategy explicitly reauthorizes it.
+
 ## Status
 
-This directory defines the current research direction for **patient-specific 3D reconstruction from sparse, actively selected multi-sequence MRI slices**.
+This directory defines the long-horizon design for **patient-specific 3D
+reconstruction from permanently sparse multi-sequence MRI slices**. The current
+approved sequence is T0.5 then T1, followed by a Human Gate; T2+ is not
+authorized in the current run.
 
 ### Decisions currently locked
 
@@ -10,10 +21,15 @@ This directory defines the current research direction for **patient-specific 3D 
 2. **Main training regime:** permanently sparse patient supervision; no complete-volume targets in the main path.
 3. **Encoder:** analytic differential scaffold plus a shared high-resolution micro-CNN.
 4. **No teacher distillation:** teacher or pretrained dense encoders are upper-bound ablations only.
-5. **Observation legality:** only committed or context sequence–slice observations may enter the patient state.
+5. **Observation legality:** availability is permanent; episode context/target
+   roles are temporary, and target pixels require a renderer-minted prediction
+   receipt before reveal.
 6. **Local field decoder:** one shared tiny MLP with the smallest possible role.
-7. **Patient state:** adaptive anchors, local fields, structural and volumetric Gaussian primitives, observability, and cached evidence.
-8. **Inference:** model weights are frozen; only patient-specific state is updated.
+7. **Static representation thesis:** physical supports, a shared tiny
+   anchor-local structural field, anchored Gaussian birth and propagation form
+   the T2–T3 hypothesis; they are not yet implemented.
+8. **Inference:** model weights are frozen; only patient-specific state is
+   updated once those future tranches are authorized.
 
 ### Decisions intentionally left open
 
@@ -84,7 +100,10 @@ from which each modality is reconstructed at arbitrary physical coordinates:
 \hat V_t^m(\mathbf x)=R_m(\mathbf x;\mathcal S_t).
 \]
 
-At deployment, the trajectory chooses the next legal slice to maximize reconstruction improvement under a finite observation budget.
+In the current static program, reconstruction uses a declared permanently
+sparse observation set. A future T4 deployment extension may choose additional
+legal observations under an exact acquisition budget, but routing is not part
+of T0.5/T1 and is not the current headline.
 
 ---
 
@@ -97,7 +116,7 @@ Sparse observed MRI planes
 → compact structural and appearance cache
 → provisional physical anchors
 → shared tiny anchor-local field
-→ SDF/level-set constrained structural Gaussians
+→ StructuralField/level-set-constrained structural Gaussians
   + volumetric appearance Gaussians
 → anchor–Gaussian propagation
 → active sequence–slice trajectory
@@ -115,9 +134,11 @@ Main training:
 - does not use teacher features;
 - does not use complete-volume targets.
 
-A physically isolated fully sampled audit split may be used for:
+A patient-disjoint T1 lesion-validation evaluator may use a predeclared sparse
+input manifest plus isolated dense targets/labels for its one-shot medical
+fidelity gate. A separate sealed final-audit cohort remains reserved for T5.
 
-- final reconstruction metrics;
-- leakage checks;
-- oracle trajectory studies;
-- privileged-training upper bounds clearly labeled as ablations.
+Separate privileged/synthetic protocols may be used for leakage-positive
+controls, future oracle trajectory studies, or E3/E4 upper bounds, but their
+pixels, labels, checkpoints, and decisions cannot enter or select the main
+training path.

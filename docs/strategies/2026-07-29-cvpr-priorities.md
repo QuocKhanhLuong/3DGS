@@ -1,5 +1,10 @@
 # CVPR Priority Strategy — Sparse Active Multi-Sequence Reconstruction
 
+> **Historical, non-authoritative strategy.** For current work, follow
+> [`2026-07-29-isbi-realignment.md`](2026-07-29-isbi-realignment.md). Where the
+> two documents conflict, the ISBI realignment controls; in particular, this
+> document's active-policy-first thesis is not the current research direction.
+
 Date: 2026-07-29  
 Role: AgenTeam PM  
 Decision horizon: next implementation tranche through CVPR submission readiness
@@ -486,4 +491,3 @@ Given only committed context observations and candidate-plane metadata, produce 
 - gains vanish on the external cohort;
 - global image metrics improve while lesion recall, failure rates, or calibration worsen;
 - baseline code or data restrictions prevent a fair, auditable comparison.
-

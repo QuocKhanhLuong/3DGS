@@ -1,49 +1,50 @@
-# SDF-Manifold Active Gaussian Memory
+# Sparse Multi-Sequence MRI Gaussian Reconstruction
 
-Research repository for an ISBI-oriented medical imaging project that builds a patient-specific Gaussian representation from sparse, adaptively selected multi-sequence MRI observations.
+Research repository for an ISBI 2027 medical-imaging project that reconstructs
+a patient-specific 3D Gaussian representation from permanently sparse
+multi-sequence MRI observations.
 
 ## Core idea
 
-The method links two main contributions:
-
-1. **SDF/level-set adaptive low-DoF Gaussian prior** — a structural field derives Gaussian orientation and constrains position/covariance instead of optimizing free position–quaternion–scale parameters.
-2. **Balanced multi-wave observability routing** — parallel information fronts select complementary sequence–slice observations over an evolving feature–geometry manifold and stop at an observability fixed point.
+The primary thesis is a static sparse support-anchor representation:
 
 ```text
-Sparse observed MRI planes
+permanently sparse multi-sequence MRI slices
     → analytic differential scaffold
-    → teacher-free high-resolution micro-CNN
-    → compact structural and appearance cache
-    → adaptive anchor-local fields
-    → SDF/level-set constrained structural Gaussians
-      + volumetric appearance Gaussians
+    → compact teacher-free structural evidence
+    → physical support anchors
+    → one shared tiny anchor-local structural field
+    → anchored seed Gaussians
     → anchor–Gaussian propagation
-    → observability graph
-    → balanced multi-wave routing
-    → incremental local assimilation
-    → complete multi-sequence 3D reconstruction
-    → uncertainty and trajectory record
+    → latent patient-specific 3D Gaussian representation
+    → full-volume reconstruction
 ```
+
+T0 provides legal data access, physical geometry, and the through-plane
+profile-aware Gaussian reference renderer. It is enabling infrastructure, not
+the representation novelty. Active trajectory and adaptive acquisition are
+later extensions after the static representation has passed matched baselines.
 
 ## Start here
 
-- [`docs/reconstruction/README.md`](docs/reconstruction/README.md) — current reconstruction-focused research package and decision index.
+- [`docs/reconstruction/README.md`](docs/reconstruction/README.md) — long-horizon reconstruction package with the current ISBI precedence notice.
 - [`docs/reconstruction/FULL_FLOW.md`](docs/reconstruction/FULL_FLOW.md) — complete four-phase flow.
 - [`docs/reconstruction/PROOFREAD_NOTES.md`](docs/reconstruction/PROOFREAD_NOTES.md) — phase-by-phase review before implementation.
-- [`MASTER_KNOWLEDGE.md`](MASTER_KNOWLEDGE.md) — earlier consolidated conclusions and formulation.
-- [`KNOWLEDGE_PACKAGE.md`](KNOWLEDGE_PACKAGE.md) — earlier implementation and paper-development package.
-- [`architecture.md`](architecture.md) — earlier block architecture and interfaces.
-- [`pipeline.md`](pipeline.md) — earlier training and inference pipeline.
+- [`docs/strategies/2026-07-29-isbi-realignment.md`](docs/strategies/2026-07-29-isbi-realignment.md) — authoritative venue, thesis, tranche, gate, and claim policy.
+- [`docs/plans/2026-07-29-t05-t1-teacher-free-encoder-fixed-gaussian-baseline.md`](docs/plans/2026-07-29-t05-t1-teacher-free-encoder-fixed-gaussian-baseline.md) — approved T0.5/T1 implementation plan.
 
 ## Current primary task
 
-**Budgeted active multi-sequence MRI 3D reconstruction from sparse sequence–slice observations.**
+**Legal episodic sparse training followed by a teacher-free encoder and
+fixed-topology Gaussian baseline.**
 
 The main method learns from permanently sparse patient manifests. It does not require teacher distillation or complete-volume targets. Within a training episode, only context slices enter the patient state; acquired sparse target slices are revealed only after rendering. Fully sampled volumes, when available, are isolated for audit evaluation and privileged upper-bound ablations.
 
 ## Current locked decisions
 
 - permanently sparse main training supervision;
+- episode context/target roles separated from permanent availability;
+- render and prediction receipt registered before target reveal;
 - analytic differential scaffold plus teacher-free high-resolution micro-CNN;
 - no teacher distillation in the main architecture;
 - one shared tiny MLP for anchor-local structural-field decoding;
@@ -51,7 +52,8 @@ The main method learns from permanently sparse patient manifests. It does not re
 - patient-specific adaptive anchors and Gaussian memory;
 - structural surface Gaussians plus volumetric appearance Gaussians;
 - physical-plane rendering rather than camera-view rendering;
-- closed-loop active trajectory and explicit uncertainty.
+- explicit unsupported coverage and failure reporting;
+- active routing deferred until the static representation passes its gates.
 
 ## Reconstruction package map
 
@@ -69,23 +71,18 @@ The main method learns from permanently sparse patient manifests. It does not re
 | `docs/reconstruction/modules/TRAJECTORY_ROUTER.md` | Reconstruction-driven active routing |
 | `docs/reconstruction/modules/PLANE_RENDERER_RECONSTRUCTOR.md` | MRI plane rendering and continuous 3D output |
 
-## Current implementation priority
+## Current implementation order
 
-1. sparse-only patient manifest loader and leakage tests;
-2. analytic differential channel bank;
-3. teacher-free structural/appearance micro-CNN;
-4. structural warm-up losses and anti-collapse diagnostics;
-5. physical-plane target prediction prototype;
-6. anchor-local shared tiny MLP and local-field blending;
-7. initial anchor bootstrap from sparse observed planes;
-8. SDF/level-set constrained structural Gaussian state;
-9. volumetric appearance Gaussian state;
-10. physical-plane renderer and static sparse reconstruction baseline;
-11. uncertainty and observability state;
-12. single-wave and balanced multi-wave routing;
-13. adaptive topology and local graph repair;
-14. isolated full-volume audit evaluation.
+1. **T0 — completed:** legal physical operator.
+2. **T0.5 — next, human-gated:** legal episodic training corrections.
+3. **T1 — after T0.5-L:** teacher-free encoder and fixed-topology Gaussian baseline.
+4. **T2 — deferred:** support-anchor bootstrap and tiny local structural field.
+5. **T3 — deferred:** anchored Gaussian propagation.
+6. **T4 — deferred:** active trajectory.
+7. **T5 — deferred:** final full-volume export and isolated audit evaluation.
 
 ## Status
 
-Research design and pre-implementation proof-reading stage. High-fidelity full-volume reconstruction from a small query budget remains a hypothesis to be validated experimentally.
+T0 is complete. The repository is at the Human Gate before T0.5. No T2+
+implementation is authorized by the current tranche. The representation remains
+a hypothesis until the matched T1 reconstruction and lesion-fidelity gates pass.
