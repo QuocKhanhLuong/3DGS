@@ -6,15 +6,18 @@ Research repository for an ISBI-oriented medical imaging project that builds a p
 
 The method links two main contributions:
 
-1. **SDF/3D-SLNR-adaptive low-DoF Gaussian prior** — an anatomical structural field derives Gaussian orientation and constrains position/covariance instead of optimizing free position–quaternion–scale parameters.
+1. **SDF/level-set adaptive low-DoF Gaussian prior** — a structural field derives Gaussian orientation and constrains position/covariance instead of optimizing free position–quaternion–scale parameters.
 2. **Balanced multi-wave observability routing** — parallel information fronts select complementary sequence–slice observations over an evolving feature–geometry manifold and stop at an observability fixed point.
 
 ```text
 Sparse observed MRI planes
-    → compact evidence cache
+    → analytic differential scaffold
+    → teacher-free high-resolution micro-CNN
+    → compact structural and appearance cache
     → adaptive anchor-local fields
-    → SDF-constrained structural Gaussians
+    → SDF/level-set constrained structural Gaussians
       + volumetric appearance Gaussians
+    → anchor–Gaussian propagation
     → observability graph
     → balanced multi-wave routing
     → incremental local assimilation
@@ -25,9 +28,10 @@ Sparse observed MRI planes
 ## Start here
 
 - [`docs/reconstruction/README.md`](docs/reconstruction/README.md) — current reconstruction-focused research package and decision index.
-- [`docs/reconstruction/FULL_FLOW.md`](docs/reconstruction/FULL_FLOW.md) — complete direct sparse training, initialization, trajectory, and final reconstruction flow.
-- [`MASTER_KNOWLEDGE.md`](MASTER_KNOWLEDGE.md) — earlier consolidated conclusions, formulation, convergence, task, losses, metrics, and ablations.
-- [`KNOWLEDGE_PACKAGE.md`](KNOWLEDGE_PACKAGE.md) — earlier navigable implementation and paper-development package.
+- [`docs/reconstruction/FULL_FLOW.md`](docs/reconstruction/FULL_FLOW.md) — complete four-phase flow.
+- [`docs/reconstruction/PROOFREAD_NOTES.md`](docs/reconstruction/PROOFREAD_NOTES.md) — phase-by-phase review before implementation.
+- [`MASTER_KNOWLEDGE.md`](MASTER_KNOWLEDGE.md) — earlier consolidated conclusions and formulation.
+- [`KNOWLEDGE_PACKAGE.md`](KNOWLEDGE_PACKAGE.md) — earlier implementation and paper-development package.
 - [`architecture.md`](architecture.md) — earlier block architecture and interfaces.
 - [`pipeline.md`](pipeline.md) — earlier training and inference pipeline.
 
@@ -35,11 +39,12 @@ Sparse observed MRI planes
 
 **Budgeted active multi-sequence MRI 3D reconstruction from sparse sequence–slice observations.**
 
-The model directly learns from sparse patient episodes without teacher distillation in the core path. In one episode, only a small observed subset is encoded into the patient state. A separate hidden subset of slices or 3D points may be loaded only as reconstruction supervision. The complete registered volume is never provided as one model input.
+The main method learns from permanently sparse patient manifests. It does not require teacher distillation or complete-volume targets. Within a training episode, only context slices enter the patient state; acquired sparse target slices are revealed only after rendering. Fully sampled volumes, when available, are isolated for audit evaluation and privileged upper-bound ablations.
 
 ## Current locked decisions
 
-- direct sparse episodic training;
+- permanently sparse main training supervision;
+- analytic differential scaffold plus teacher-free high-resolution micro-CNN;
 - no teacher distillation in the main architecture;
 - one shared tiny MLP for anchor-local structural-field decoding;
 - cached evidence encoding once per queried slice;
@@ -48,18 +53,17 @@ The model directly learns from sparse patient episodes without teacher distillat
 - physical-plane rendering rather than camera-view rendering;
 - closed-loop active trajectory and explicit uncertainty.
 
-The exact low-FLOP evidence encoder remains an open experimental decision.
-
 ## Reconstruction package map
 
 | Document | Scope |
 |---|---|
 | `docs/reconstruction/FULL_FLOW.md` | Complete system flow and global state contracts |
-| `docs/reconstruction/phases/01_DIRECT_SPARSE_TRAINING.md` | Direct sparse episodic optimization without distillation |
+| `docs/reconstruction/PROOFREAD_NOTES.md` | Four-phase review and code-entry checklist |
+| `docs/reconstruction/phases/01_DIRECT_SPARSE_TRAINING.md` | Teacher-free permanently sparse training |
 | `docs/reconstruction/phases/02_INITIAL_ANCHOR_BOOTSTRAP.md` | Initial observation selection, provisional anchors, local fields, and Gaussian initialization |
 | `docs/reconstruction/phases/03_ACTIVE_TRAJECTORY_UPDATE.md` | Multi-wave query selection and incremental state update |
 | `docs/reconstruction/phases/04_FINAL_RECONSTRUCTION.md` | Full-volume, arbitrary-plane, geometry, and uncertainty reconstruction |
-| `docs/reconstruction/modules/EVIDENCE_ENCODER.md` | Replaceable low-FLOP encoder contract and candidate families |
+| `docs/reconstruction/modules/EVIDENCE_ENCODER.md` | Teacher-free structural evidence encoder |
 | `docs/reconstruction/modules/ANCHOR_LOCAL_FIELD.md` | Shared tiny local MLP and field blending |
 | `docs/reconstruction/modules/SDF_GAUSSIAN_MEMORY.md` | Structural and volumetric Gaussian memory |
 | `docs/reconstruction/modules/TRAJECTORY_ROUTER.md` | Reconstruction-driven active routing |
@@ -67,18 +71,21 @@ The exact low-FLOP evidence encoder remains an open experimental decision.
 
 ## Current implementation priority
 
-1. registered MRI slice provider and physical metadata;
-2. sparse episode sampler with observed/hidden-role enforcement;
-3. physical-plane Gaussian renderer;
-4. anchor-local shared tiny MLP and local-field blending;
-5. SDF-constrained structural Gaussian state;
-6. volumetric appearance Gaussian state;
+1. sparse-only patient manifest loader and leakage tests;
+2. analytic differential channel bank;
+3. teacher-free structural/appearance micro-CNN;
+4. structural warm-up losses and anti-collapse diagnostics;
+5. physical-plane target prediction prototype;
+6. anchor-local shared tiny MLP and local-field blending;
 7. initial anchor bootstrap from sparse observed planes;
-8. reconstruction losses and budgeted evaluation;
-9. uncertainty and observability state;
-10. single-wave and balanced multi-wave routing;
-11. adaptive topology and local graph repair.
+8. SDF/level-set constrained structural Gaussian state;
+9. volumetric appearance Gaussian state;
+10. physical-plane renderer and static sparse reconstruction baseline;
+11. uncertainty and observability state;
+12. single-wave and balanced multi-wave routing;
+13. adaptive topology and local graph repair;
+14. isolated full-volume audit evaluation.
 
 ## Status
 
-Research design and implementation planning stage. Claims such as high-fidelity full-volume reconstruction from a small query budget remain hypotheses to be validated experimentally.
+Research design and pre-implementation proof-reading stage. High-fidelity full-volume reconstruction from a small query budget remains a hypothesis to be validated experimentally.
