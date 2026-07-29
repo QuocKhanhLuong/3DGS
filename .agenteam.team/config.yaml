@@ -1,0 +1,137 @@
+version: "2"
+isolation: worktree
+
+roles:
+  researcher:
+    description: "CVPR novelty and primary-source literature lead"
+    participates_in: [research, strategy, design]
+    can_write: true
+    write_scope: ["docs/research/**"]
+
+  pm:
+    description: "Scientific program lead for thesis, gates, and stop rules"
+    participates_in: [strategy, design]
+    can_write: true
+    write_scope: ["docs/strategies/**"]
+
+  architect:
+    description: "Medical geometry, differentiable rendering, and tensor-contract lead"
+    participates_in: [design, plan]
+    can_write: true
+    write_scope: ["docs/designs/**"]
+
+  dev:
+    description: "PyTorch computer-vision research implementation lead"
+    participates_in: [plan, implement]
+    can_write: true
+    write_scope:
+      - "src/**"
+      - "lib/**"
+      - "scripts/**"
+      - "configs/**"
+      - "pyproject.toml"
+      - "CHANGELOG.md"
+      - "docs/plans/**"
+
+  qa:
+    description: "Scientific numeric, leakage, autograd, and regression verification lead"
+    participates_in: [plan, test, experiment]
+    can_write: true
+    write_scope:
+      - "tests/**"
+      - "**/*.test.*"
+
+  reviewer:
+    description: "Independent adversarial CVPR red-team reviewer"
+    participates_in: [review]
+    can_write: false
+
+  medical_data_steward:
+    description: "Medical data legality, acquisition realism, and audit-isolation lead"
+    participates_in: [research, design, test, review]
+    can_write: true
+    write_scope: ["docs/protocols/**"]
+
+  experiment_lead:
+    description: "Matched baselines, ablations, statistics, and external-evaluation lead"
+    participates_in: [strategy, experiment]
+    can_write: true
+    write_scope:
+      - "experiments/**"
+      - "configs/experiments/**"
+      - "docs/experiments/**"
+
+  reproducibility_auditor:
+    description: "Independent provenance, environment, compute, and artifact auditor"
+    participates_in: [design, experiment, review]
+    can_write: true
+    write_scope: ["docs/reproducibility/**"]
+
+final_verify:
+  - "python3 -m pytest -q"
+  - "python3 -m compileall -q src tests"
+  - "git diff --check"
+final_verify_policy: block
+final_verify_max_retries: 1
+
+pipeline:
+  stages:
+    - name: research
+      roles: [researcher, medical_data_steward]
+      gate: auto
+
+    - name: strategy
+      roles: [pm, researcher, experiment_lead]
+      gate: human
+
+    - name: design
+      roles: [architect, medical_data_steward, reproducibility_auditor]
+      gate: human
+      verify: "test -f docs/designs/*.md"
+
+    - name: plan
+      roles: [dev, architect, qa]
+      gate: human
+      verify: "test -f docs/plans/*.md"
+
+    - name: implement
+      roles: [dev]
+      gate: auto
+      max_retries: 2
+      criteria:
+        max_files_changed: 30
+        scope_paths:
+          - "src/**"
+          - "lib/**"
+          - "scripts/**"
+          - "configs/**"
+          - "pyproject.toml"
+          - "CHANGELOG.md"
+          - "docs/plans/**"
+        requires_tests: true
+
+    - name: test
+      roles: [qa, medical_data_steward]
+      gate: auto
+      max_retries: 1
+      rework_to: implement
+      verify: "python3 -m pytest -q"
+
+    - name: experiment
+      roles: [experiment_lead, qa, reproducibility_auditor]
+      gate: human
+
+    - name: review
+      roles: [reviewer, reproducibility_auditor, medical_data_steward]
+      gate: human
+
+  profiles:
+    discovery:
+      stages: [research, strategy, design]
+      hints: [novelty, literature, architecture, paper scope]
+    kernel:
+      stages: [design, plan, implement, test, review]
+      hints: [geometry, renderer, contract, module, implementation]
+    paper:
+      stages: [research, strategy, design, plan, implement, test, experiment, review]
+      hints: [benchmark, ablation, external evaluation, submission]

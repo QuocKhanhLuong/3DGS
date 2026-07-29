@@ -1,0 +1,20 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# AgenTeam runtime state; keep team configs and generated agent definitions.
+.agenteam/artifacts/
+.agenteam/events/
+.agenteam/gates/
+.agenteam/handoffs/
+.agenteam/locks/
+.agenteam/memory/
+.agenteam/reports/
+.agenteam/runs/
+.agenteam/state/
