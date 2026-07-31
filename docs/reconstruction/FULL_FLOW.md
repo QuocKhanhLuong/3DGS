@@ -1,8 +1,11 @@
-# Full Flow — Teacher-Free Sparse Active 3D Reconstruction
+# Full Flow — Static Sparse Representation and Deferred Active Extension
 
 ## 1. Scope
 
-This document defines the complete research flow for reconstructing registered multi-sequence MRI volumes from a small number of actively selected 2D slices.
+This document defines the complete research flow for reconstructing registered
+multi-sequence MRI volumes from permanently sparse observations. The static
+support-anchor representation is the primary method; active acquisition is an
+optional later extension and is not a dependency of the static core.
 
 The main training path uses:
 
@@ -10,7 +13,9 @@ The main training path uses:
 - no teacher distillation;
 - an analytic differential scaffold plus a high-resolution micro-CNN;
 - sparse acquired target planes for supervision;
-- the previously locked anchor, local-field, Gaussian, trajectory, and reconstruction modules.
+- the previously locked anchor, local-field, Gaussian, and reconstruction
+  modules. The trajectory module is separately authorized only for the later
+  T4 extension.
 
 Complete volumes may exist only in a separate audit/evaluation split or privileged upper-bound ablation. They are not main-training targets.
 
@@ -19,6 +24,7 @@ Complete volumes may exist only in a separate audit/evaluation split or privileg
 ## 2. Highest-level flow
 
 ```text
+STATIC REPRESENTATION CORE
 PHASE 1 — TEACHER-FREE PERMANENTLY SPARSE TRAINING
 Fixed sparse training-patient manifest Ω_i^sparse
 → split into context C_i and acquired sparse targets Q_i
@@ -38,7 +44,17 @@ New patient candidate pool
 → build local fields with shared tiny MLP
 → initialize structural and appearance Gaussian memory
 
-PHASE 3 — ACTIVE TRAJECTORY UPDATE
+PHASE 3 — AUTHORIZED T2/T3 STATE CONSTRUCTION
+Context evidence and physical supports
+→ anchor bootstrap, local fields, Gaussian memory, and static reconstruction
+
+PHASE 4 — STATIC FINAL RECONSTRUCTION
+Final static patient representation
+→ evaluate continuous fields on target physical grid
+→ reconstruct requested modalities and uncertainty
+→ export the static reconstruction package
+
+OPTIONAL LATER EXTENSION — DEFERRED T4 ACTIVE ACQUISITION
 Current patient representation
 → estimate candidate reconstruction gain
 → select one or a small batch of new slices
@@ -49,13 +65,11 @@ Current patient representation
 → repair trajectory graph locally
 → repeat until stopping or budget exhaustion
 
-PHASE 4 — FINAL 3D RECONSTRUCTION
-Final patient representation
-→ evaluate continuous fields on target physical grid
-→ reconstruct every requested MRI modality
-→ reconstruct geometry and uncertainty
-→ export full volumes, slices, surfaces, and trajectory record
 ```
+
+The static core above does not require the optional T4 extension. Any active
+trajectory implementation requires separate authorization and must preserve
+the same legal observation, state, and reconstruction contracts.
 
 ---
 
@@ -126,7 +140,7 @@ Within an episode:
 - target pixels may be revealed only after state construction;
 - non-manifest slices remain inaccessible throughout training.
 
-### 4.2 Patient inference and active acquisition
+### 4.2 Optional T4 patient inference and active acquisition
 
 At inference round \(t\), only committed observations
 
@@ -305,7 +319,11 @@ Project anchors toward stable level sets, derive local orientation, and initiali
 
 ---
 
-## 7. Active trajectory flow
+## 7. Deferred T4 active trajectory flow
+
+The following flow is a long-horizon extension. It is not part of the static
+representation core and remains separately authorized and blocked in the live
+executable status.
 
 At round \(t\):
 
@@ -371,7 +389,7 @@ Repair only affected graph regions when possible, then select the next observati
 
 ---
 
-## 8. Stopping conditions
+## 8. Deferred T4 stopping conditions
 
 A successful stop should require persistence over multiple rounds. Candidate conditions include:
 

@@ -14,30 +14,31 @@ Keep context small. Do not explore the entire repository by default.
 Use the smallest applicable document set, in this order:
 
 1. Read this file.
-2. Read the current strategy and
+2. Read `docs/README.md` for the active documentation path.
+3. Read the current strategy and
    `docs/strategies/2026-07-31-execution-status-addendum.md` for authorization,
    claims, and executable status.
-3. Read `docs/reconstruction/` only at the relevant theoretical module or phase
+4. Read `docs/reconstruction/` only at the relevant theoretical module or phase
    entry for the method contract.
-4. Read `CODEBASE.md` for stable software ownership and dependency direction.
-5. Read `docs/codex/README.md` for the current executable phase status, runnable
+5. Read `CODEBASE.md` for stable software ownership and dependency direction.
+6. Read `docs/codex/README.md` for the current executable phase status, runnable
    entry points, and blocked phases.
-6. Read `quality/checklists.json` and the relevant phase entry for required
+7. Read `quality/checklists.json` and the relevant phase entry for required
    automated evidence and Human Gate questions.
-7. Read `README.md` only for the repository thesis and high-level project map.
+8. Read `README.md` only for the repository thesis and high-level project map.
    Do not rely on its implementation-status section when it conflicts with
    `docs/codex/README.md`; the root README may lag behind merged code.
-8. For T1-B encoder, cache, conditioning, structural-loss, or fixed-support
+9. For T1-B encoder, cache, conditioning, structural-loss, or fixed-support
    work, read `docs/codex/T1B_TEACHER_FREE_ENCODER.md`.
-9. For changes affecting research claims, phase authorization, tranche order,
+10. For changes affecting research claims, phase authorization, tranche order,
    Human Gates, or stop decisions, read
    `docs/strategies/2026-07-29-isbi-realignment.md`.
-10. Read only the task-specific plan, reconstruction module, phase document, or
+11. Read only the task-specific plan, reconstruction module, phase document, or
    reproducibility note needed for the requested change.
 
-Do not recursively summarize `docs/`. Files under `docs/meetings/`, historical
-CVPR strategy documents, and old design notes are not authoritative unless the
-user explicitly asks for historical context.
+Do not recursively summarize `docs/`. Documents outside the active index are
+not authoritative unless an authoritative file explicitly links them or the
+user asks for historical context.
 
 When documents conflict, follow the authority and precedence rules in the ISBI
 realignment strategy. Code presence, a merged pull request, passing tests, or an

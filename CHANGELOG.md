@@ -15,6 +15,13 @@
   T1-C or making a scientific-validation claim;
 - made no scientific-validation claim; T1-B `PASS` is a software-gate decision
   only, while retrospective T0/T0.5/T1-A gates remain unrecorded.
+- added the canonical active-document index and documentation lifecycle and
+  retention policy;
+- removed superseded CVPR-first, pre-code health, meeting, proofread, and
+  completed implementation-plan documents from the active tree;
+- normalized retained reconstruction theory to the static ISBI thesis and
+  added document-link and stale-status quality checks;
+- no runtime scientific behavior changed in this documentation cleanup.
 
 ### Added
 

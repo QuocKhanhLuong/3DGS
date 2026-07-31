@@ -26,15 +26,17 @@ responsibility belongs in `anchors/`, `fields/`, `memory/`, or `routing/`.
 
 Use the following order when implementing or reviewing code:
 
-1. `docs/strategies/2026-07-29-isbi-realignment.md` and its current execution-
+1. `docs/README.md` for the active documentation path.
+2. `docs/strategies/2026-07-29-isbi-realignment.md` and its current execution-
    status addendum for the thesis, claims, authorization, Human Gates, and stop
    decisions.
-2. `docs/reconstruction/` for the full theoretical method and cross-phase
+3. `docs/reconstruction/` for the full theoretical method and cross-phase
    invariants.
-3. `CODEBASE.md` for the final software architecture and file ownership.
-4. `docs/codex/README.md` and the current phase handoff for the subset that is
+4. `CODEBASE.md` for the final software architecture and file ownership.
+5. `docs/codex/README.md` and the current phase handoff for the subset that is
    currently executable or authorized.
-5. The nearest tests and implementation files for exact runtime behavior.
+6. The relevant quality checklist, then the nearest tests and implementation
+   files for exact runtime behavior.
 
 When documents conflict, strategy controls authorization, reconstruction docs
 control the intended method, and this file controls where that method belongs
@@ -649,10 +651,13 @@ Minimum final groups:
 
 Use small CPU analytic or synthetic references before large medical-data runs.
 
-## 13. Current implementation map
+## 13. Executable snapshot after T1-B — 2026-07-31
 
-At the time this file was introduced, `main` contains the following executable
-foundation:
+Snapshot commit: `b6d51e2952ad108aa8fa7602a3085f936e6390fc`. This is a dated
+executable snapshot; live phase status remains owned by
+[`docs/codex/README.md`](docs/codex/README.md).
+
+At this snapshot, `main` contains the following executable foundation:
 
 ```text
 IMPLEMENTED
@@ -730,3 +735,28 @@ The project is structurally complete only when:
 - every headline result maps to immutable experiment and artifact provenance;
 - phase documents can be removed from runtime context without making the final
   code architecture ambiguous.
+
+## Documentation lifecycle and retention
+
+Each active scientific or software rule has one canonical documentation owner:
+
+- `docs/reconstruction/` contains long-lived theoretical contracts and no
+  phase-status diary.
+- `docs/strategies/` contains the current governing strategy, execution
+  addenda, and immutable Human Gate decisions only.
+- `docs/research/` contains living primary-source novelty and collision records
+  only.
+- `docs/designs/` contains unresolved or currently active cross-module design
+  decisions; remove a design after its contracts live in code, tests, and this
+  blueprint.
+- `docs/plans/` contains only currently active implementation plans; remove a
+  plan when its tranche closes.
+- `docs/codex/` contains maintained executable handoffs and status.
+- `docs/reproducibility/` contains immutable execution evidence records.
+- `docs/meetings/` does not retain meeting transcripts unless they contain a
+  unique approved decision that is not recorded elsewhere.
+
+Git history is the archive. Obsolete documents should be deleted rather than
+copied into an archive tree. Duplicated status prose must point to
+`docs/codex/README.md` instead. The status in this file describes final
+software responsibility, not merely phase completion.
