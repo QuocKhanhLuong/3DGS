@@ -65,8 +65,10 @@ def run_demo(*, steps: int = 4, device: str = "cpu", dtype: torch.dtype = torch.
             feature_shape_hw=shape_hw,
             stride_vu=(1, 1),
             offset_vu_input_pixels=(0.0, 0.0),
+            input_plane=context_plane,
         ),
         modality_ids=("synthetic-mri",),
+        valid_feature_mask=analytic.valid_mask,
     )
     supports = sample_fixed_supports(
         features,

@@ -23,7 +23,7 @@ class FixedGaussianHeadConfig:
     input_dim: int
     appearance_channels: int = 1
     hidden_dim: int = 32
-    max_center_offset_mm: float = 0.5
+    max_center_offset_mm: float | tuple[float, float, float] = 0.5
     min_scale_mm: float = 0.5
     max_scale_mm: float = 6.0
     max_off_diagonal_mm: float = 1.0
@@ -34,19 +34,30 @@ class FixedGaussianHeadConfig:
             value = getattr(self, name)
             if not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
-        for name in (
-            "max_center_offset_mm",
-            "min_scale_mm",
+        for name in ("min_scale_mm",
             "max_scale_mm",
             "max_off_diagonal_mm",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
                 raise ValueError(f"{name} must be finite")
-        if self.max_center_offset_mm < 0 or self.min_scale_mm <= 0 or self.max_scale_mm <= self.min_scale_mm:
+        offsets = _center_offset_limits(self.max_center_offset_mm)
+        if any(value < 0.0 for value in offsets) or self.min_scale_mm <= 0 or self.max_scale_mm <= self.min_scale_mm:
             raise ValueError("centre and scale bounds are invalid")
         if self.max_off_diagonal_mm < 0:
             raise ValueError("max_off_diagonal_mm must be non-negative")
+
+
+def _center_offset_limits(value: float | tuple[float, float, float]) -> tuple[float, float, float]:
+    if isinstance(value, bool):
+        raise ValueError("max_center_offset_mm must be finite")
+    if isinstance(value, (int, float)):
+        limits = (float(value),) * 3
+    else:
+        limits = tuple(float(component) for component in value)
+    if len(limits) != 3 or any(not math.isfinite(component) for component in limits):
+        raise ValueError("max_center_offset_mm must be a finite scalar or three finite local RAS-mm limits")
+    return limits
 
 
 @dataclass(frozen=True)
@@ -155,7 +166,10 @@ def construct_fixed_gaussians(
         raise ValueError("support count and raw output count disagree")
     if raw_output.appearance_raw.shape[1] != config.appearance_channels:
         raise ValueError("appearance channels disagree with head config")
-    centers = supports.centers_ras_mm + config.max_center_offset_mm * torch.tanh(raw_output.center_offset_raw)
+    local_limits = raw_output.center_offset_raw.new_tensor(_center_offset_limits(config.max_center_offset_mm))
+    local_offsets = local_limits * torch.tanh(raw_output.center_offset_raw)
+    world_offsets = torch.einsum("ni,nij->nj", local_offsets, supports.support_basis_ras)
+    centers = supports.centers_ras_mm + world_offsets
     factor = _safe_covariance_factor(raw_output.covariance_raw, config)
     log_amplitude = raw_output.log_amplitude_raw
     if config.use_reliability_amplitude:
@@ -163,8 +177,10 @@ def construct_fixed_gaussians(
     appearance = torch.tanh(raw_output.appearance_raw)
     appearance_valid = torch.ones_like(appearance, dtype=torch.bool)
     primitive_ids = tuple(
-        f"fixed:{observation_id}:{int(v)}:{int(u)}"
-        for observation_id, (v, u) in zip(supports.observation_ids, supports.feature_indices_vu.tolist())
+        f"fixed:{plane_hash}:{observation_id}:{int(v)}:{int(u)}"
+        for plane_hash, observation_id, (v, u) in zip(
+            supports.source_plane_hashes, supports.observation_ids, supports.feature_indices_vu.tolist()
+        )
     )
     patient_state_index = torch.zeros(supports.count, dtype=torch.long, device=centers.device)
     return gaussian_batch_from_raw(

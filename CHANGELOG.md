@@ -4,6 +4,25 @@
 
 ### Changed
 
+- Tightened the in-review T1-A analytic-to-Gaussian reference: analytic
+  differential channels now respect declared in-plane millimetre spacing,
+  support selection uses only the declared valid feature topology (never
+  learned reliability values), and Gaussian centre offsets are mapped through
+  each support plane's canonical RAS basis before the one-time gauge-safe
+  runtime conversion.
+- Locked T1-A feature geometry to half-pixel `align_corners=False` output
+  strides 1, 2, or 4, including explicit invalid right/bottom padded centres
+  for odd input shapes. Public fixed-support construction now requires an
+  orthonormal per-support `(u, v, signed-normal)` RAS basis.
+- Bound T1-A feature grids and fixed supports to the exact canonical source
+  plane (including observation provenance), carried its SHA-256 signature into
+  Gaussian primitive provenance, and moved deterministic `max_points`
+  truncation after valid/non-padded row-major candidate filtering. Sampled
+  evidence tensors remain attached to their feature-map autograd graph.
+- Hardened bound feature-grid public geometry helpers so an explicit plane must
+  canonically match the transform-bound source plane; separately constructed
+  canonical equivalents remain valid.
+
 - Realigned the project and AgenTeam roles from a CVPR-first active-routing
   thesis to the ISBI 2027 permanently sparse support-anchor Gaussian
   representation thesis, with active routing deferred until after static
