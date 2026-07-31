@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 import math
 from typing import Sequence
 
@@ -98,6 +99,23 @@ class FeatureGridToPlaneTransform:
         if self.input_plane is None:
             raise ValueError("source_plane_hash requires a bound canonical input_plane")
         return hashlib.sha256(self.input_plane.canonical_json().encode("utf-8")).hexdigest()
+
+    def canonical_json(self) -> str:
+        """Return the immutable geometry identity used by feature caches."""
+        payload = {
+            "feature_shape_hw": self.feature_shape_hw,
+            "input_plane": self.input_plane.canonical_json() if self.input_plane is not None else None,
+            "input_shape_hw": self.input_shape_hw,
+            "offset_vu_input_pixels": self.offset_vu_input_pixels,
+            "sampling_convention": self.sampling_convention,
+            "stride_vu": self.stride_vu,
+            "valid_feature_mask_hash": self.valid_feature_mask_hash,
+        }
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+    @property
+    def transform_hash(self) -> str:
+        return hashlib.sha256(self.canonical_json().encode("utf-8")).hexdigest()
 
     def input_vu_from_feature_vu(
         self, v: float | torch.Tensor, u: float | torch.Tensor
@@ -186,12 +204,17 @@ class FeatureGridToPlaneTransform:
 
 @dataclass(frozen=True)
 class EncoderFeatureMaps:
-    """Compact structural, appearance, and reliability maps for one mini-batch."""
+    """Compact maps with one immutable source-plane transform per batch item.
+
+    ``grid_to_planes[i]`` is the only geometry allowed for item ``i``.  The
+    singular ``grid_to_plane`` property below is retained only as a convenience
+    for a batch of one and deliberately raises for larger batches.
+    """
 
     structural: torch.Tensor  # [B, C_str, Hf, Wf]
     appearance: torch.Tensor  # [B, C_app, Hf, Wf]
     reliability: torch.Tensor  # [B, 1, Hf, Wf]
-    grid_to_plane: FeatureGridToPlaneTransform
+    grid_to_planes: tuple[FeatureGridToPlaneTransform, ...]
     modality_ids: tuple[str, ...] = ()
     valid_feature_mask: torch.Tensor | None = None  # [B, 1, Hf, Wf], bool
 
@@ -221,13 +244,20 @@ class EncoderFeatureMaps:
             raise ValueError("all feature maps must share device")
         if self.appearance.dtype != dtype or self.reliability.dtype != dtype:
             raise ValueError("all feature maps must share dtype")
-        if not isinstance(self.grid_to_plane, FeatureGridToPlaneTransform):
-            raise TypeError("grid_to_plane must be a FeatureGridToPlaneTransform")
-        if feature_shape != self.grid_to_plane.feature_shape_hw:
-            raise ValueError("tensor spatial shape disagrees with grid_to_plane")
+        if not isinstance(self.grid_to_planes, tuple) or len(self.grid_to_planes) != batch:
+            raise ValueError("grid_to_planes must contain exactly one transform per batch item")
+        for transform in self.grid_to_planes:
+            if not isinstance(transform, FeatureGridToPlaneTransform):
+                raise TypeError("grid_to_planes must contain FeatureGridToPlaneTransform values")
+            if transform.input_plane is None:
+                raise ValueError("every grid_to_planes item must bind a source PhysicalPlane")
+            if feature_shape != transform.feature_shape_hw:
+                raise ValueError("all transforms must agree with the common feature tensor spatial shape")
         valid_feature_mask = self.valid_feature_mask
         if valid_feature_mask is None:
-            valid_feature_mask = self.grid_to_plane.valid_feature_mask(device=device).expand(batch, 1, -1, -1)
+            valid_feature_mask = torch.stack(
+                [transform.valid_feature_mask(device=device) for transform in self.grid_to_planes], dim=0
+            ).unsqueeze(1)
         if (
             not isinstance(valid_feature_mask, torch.Tensor)
             or valid_feature_mask.shape != (batch, 1, *feature_shape)
@@ -237,15 +267,15 @@ class EncoderFeatureMaps:
             raise ValueError("valid_feature_mask must be bool with shape [B, 1, Hf, Wf] on the feature device")
         if not bool(valid_feature_mask.flatten(1).any(dim=1).all()):
             raise ValueError("every feature map requires at least one valid feature centre")
-        allowed_mask = self.grid_to_plane.valid_feature_mask(device=device).expand(batch, 1, -1, -1)
+        allowed_mask = torch.stack(
+            [transform.valid_feature_mask(device=device) for transform in self.grid_to_planes], dim=0
+        ).unsqueeze(1)
         if bool((valid_feature_mask & ~allowed_mask).any()):
             raise ValueError("valid_feature_mask cannot mark right/bottom padded feature centres as legal")
-        if self.modality_ids and (
-            len(self.modality_ids) != batch
-            or any(not isinstance(value, str) or not value for value in self.modality_ids)
-        ):
-            raise ValueError("modality_ids must be empty or contain one non-empty ID per batch item")
+        if len(self.modality_ids) != batch or any(not isinstance(value, str) or not value for value in self.modality_ids):
+            raise ValueError("modality_ids must contain one non-empty ID per batch item")
         object.__setattr__(self, "modality_ids", tuple(self.modality_ids))
+        object.__setattr__(self, "grid_to_planes", tuple(self.grid_to_planes))
         object.__setattr__(self, "valid_feature_mask", valid_feature_mask)
 
     @property
@@ -255,6 +285,17 @@ class EncoderFeatureMaps:
     @property
     def feature_shape_hw(self) -> tuple[int, int]:
         return tuple(self.structural.shape[-2:])
+
+    @property
+    def grid_to_plane(self) -> FeatureGridToPlaneTransform:
+        """Return the sole transform for a batch of one.
+
+        This property never broadcasts geometry.  Callers with a larger batch
+        must select ``grid_to_planes[batch_index]`` explicitly.
+        """
+        if self.batch_size != 1:
+            raise ValueError("grid_to_plane is only ergonomic for batch size one; select grid_to_planes[i]")
+        return self.grid_to_planes[0]
 
     @property
     def concatenated_channels(self) -> int:

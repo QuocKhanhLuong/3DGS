@@ -27,7 +27,8 @@ def _features_for_plane(plane: PhysicalPlane) -> EncoderFeatureMaps:
         structural=torch.arange(16, dtype=torch.float64).reshape(1, 1, 4, 4),
         appearance=torch.ones((1, 1, 4, 4), dtype=torch.float64),
         reliability=torch.ones((1, 1, 4, 4), dtype=torch.float64),
-        grid_to_plane=FeatureGridToPlaneTransform((8, 8), (4, 4), (2, 2), input_plane=plane),
+        grid_to_planes=(FeatureGridToPlaneTransform((8, 8), (4, 4), (2, 2), input_plane=plane),),
+        modality_ids=("mri",),
     )
 
 
@@ -70,12 +71,12 @@ def test_stride_transform_maps_supports_to_expected_world_centres() -> None:
         structural=structural,
         appearance=appearance,
         reliability=reliability,
-        grid_to_plane=FeatureGridToPlaneTransform(
+        grid_to_planes=(FeatureGridToPlaneTransform(
             input_shape_hw=(8, 8),
             feature_shape_hw=(4, 4),
             stride_vu=(2, 2),
             input_plane=plane,
-        ),
+        ),),
         modality_ids=("mri",),
     )
     supports = sample_fixed_supports(
@@ -106,13 +107,15 @@ def test_support_topology_is_value_independent() -> None:
         structural=torch.randn((1, 2, 4, 4)),
         appearance=torch.randn((1, 1, 4, 4)),
         reliability=torch.ones((1, 1, 4, 4)),
-        grid_to_plane=transform,
+        grid_to_planes=(transform,),
+        modality_ids=("mri",),
     )
     second = EncoderFeatureMaps(
         structural=torch.randn((1, 2, 4, 4)) * 100.0,
         appearance=torch.randn((1, 1, 4, 4)) * 100.0,
         reliability=torch.ones((1, 1, 4, 4)),
-        grid_to_plane=transform,
+        grid_to_planes=(transform,),
+        modality_ids=("mri",),
     )
     a = sample_fixed_supports(first, plane, observation_id="obs-1", config=config)
     b = sample_fixed_supports(second, plane, observation_id="obs-1", config=config)
@@ -134,7 +137,8 @@ def test_valid_feature_mask_is_the_only_eligibility_signal() -> None:
             [[[[0.0, 1.0, 0.0, 1.0], [1.0, 0.0, 1.0, 0.0], [1.0, 0.0, 1.0, 1.0], [0.0, 1.0, 0.0, 1.0]]]],
             dtype=torch.float64,
         ),
-        grid_to_plane=transform,
+        grid_to_planes=(transform,),
+        modality_ids=("mri",),
         valid_feature_mask=valid,
     )
     supports = sample_fixed_supports(features, plane, config=FixedSupportConfig(step_vu=(1, 1)))
@@ -160,7 +164,8 @@ def test_half_pixel_feature_centres_and_plane_basis_are_preserved() -> None:
         structural=torch.zeros((1, 1, 4, 4), dtype=torch.float64),
         appearance=torch.zeros((1, 1, 4, 4), dtype=torch.float64),
         reliability=torch.ones((1, 1, 4, 4), dtype=torch.float64),
-        grid_to_plane=FeatureGridToPlaneTransform((8, 8), (4, 4), (2, 2), (0.5, 0.5), input_plane=plane),
+        grid_to_planes=(FeatureGridToPlaneTransform((8, 8), (4, 4), (2, 2), (0.5, 0.5), input_plane=plane),),
+        modality_ids=("mri",),
     )
     supports = sample_fixed_supports(features, plane, config=FixedSupportConfig(step_vu=(3, 3)))
     assert supports.feature_indices_vu.tolist() == [[0, 0], [0, 3], [3, 0], [3, 3]]
@@ -226,7 +231,7 @@ def test_support_sampling_rejects_observation_id_spoof_and_accepts_canonical_equ
     equivalent_plane = _legacy_plane_definition()
     supports = sample_fixed_supports(features, equivalent_plane, config=FixedSupportConfig(step_vu=(3, 3)))
     assert supports.observation_ids == ("obs-1",) * supports.count
-    assert supports.source_plane_hashes == (features.grid_to_plane.source_plane_hash,) * supports.count
+    assert supports.source_plane_hashes == (features.grid_to_planes[0].source_plane_hash,) * supports.count
 
 
 def test_support_plane_provenance_survives_into_gaussian_primitive_ids() -> None:
