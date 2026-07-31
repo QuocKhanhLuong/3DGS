@@ -7,7 +7,6 @@ accuracy or clinical/scientific validation.
 from __future__ import annotations
 
 import argparse
-import math
 
 import torch
 
@@ -148,4 +147,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

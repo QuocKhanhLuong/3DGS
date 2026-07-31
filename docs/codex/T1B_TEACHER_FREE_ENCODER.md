@@ -20,6 +20,10 @@ Strides 1, 2, and 4 use the locked `align_corners=False` half-pixel mapping.
 Odd shapes are right/bottom padded explicitly and padded feature centres remain
 invalid.
 
+The Gaussian head consumes canonical-RAS lower factors. Raw local covariance
+factors are converted through the selected support basis, symmetrized, and
+re-factored with the typed `covariance_epsilon` policy before runtime use.
+
 Reliability may modulate amplitudes or loss weights, but it never selects a
 support. Support indices are deterministic, value-independent, and shared
 across E0/E1/E2. There is no support-to-support communication, learned birth,
@@ -62,4 +66,3 @@ accuracy, or scientific superiority.
 T1-A is implemented as an executable software contract. T1-B is in
 development. T1-C and T2+ remain blocked. This handoff does not add scaffolding
 for those later phases.
-

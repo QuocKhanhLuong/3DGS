@@ -1,6 +1,7 @@
 """Teacher-free feature contracts and analytic evidence for T1-A."""
 
 from .analytic import ANALYTIC_CHANNEL_NAMES, AnalyticFeatureOutput, analytic_feature_bank
+from .cache import CachedFeatureMaps, FeatureCache, FeatureCacheKey, FeatureCacheMismatchError
 from .conditioning import IntensityPerturbation, apply_intensity_perturbation
 from .contracts import EncoderFeatureMaps, FeatureGridToPlaneTransform
 from .encoder import EncoderConfig, EncoderParameterReport, EvidenceEncoder
@@ -11,6 +12,10 @@ __all__ = [
     "EncoderFeatureMaps",
     "FeatureGridToPlaneTransform",
     "analytic_feature_bank",
+    "CachedFeatureMaps",
+    "FeatureCache",
+    "FeatureCacheKey",
+    "FeatureCacheMismatchError",
     "EncoderConfig",
     "EncoderParameterReport",
     "EvidenceEncoder",

@@ -7,6 +7,7 @@ from .structural import (
     cross_modality_structural_consistency_loss,
     reliability_regularization_loss,
     structural_consistency_loss,
+    structural_consistency_result,
     structural_variance_floor_loss,
 )
 
@@ -17,6 +18,6 @@ __all__ = [
     "cross_modality_structural_consistency_loss",
     "reliability_regularization_loss",
     "structural_consistency_loss",
+    "structural_consistency_result",
     "structural_variance_floor_loss",
 ]
-
