@@ -97,7 +97,7 @@ def test_link_parser_ignores_urls_mailto_anchors_and_fenced_code(tmp_path: Path)
         encoding="utf-8",
     )
     targets = _local_link_targets(sample)
-    assert targets == [(4, (tmp_path / "exists.md").resolve())]
+    assert targets == [(5, (tmp_path / "exists.md").resolve())]
 
 
 def test_docs_index_exists_and_all_active_map_links_resolve() -> None:
