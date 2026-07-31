@@ -2,6 +2,20 @@
 
 ## Unreleased — 2026-07-31
 
+### Governance and phase-gate synchronization
+
+- documented `CODEBASE.md` as the final theory-to-code blueprint and added the
+  T0–T5 phase-gate quality layer;
+- added the machine-readable checklist, evidence runner, ignored local reports,
+  and clean-commit/dirty-state semantics;
+- synchronized AgenTeam role workflow and narrowed the executable pipeline to
+  the authorized T1-B software tranche;
+- synchronized strategy, README, reconstruction, and Codex status documents;
+- recorded the explicit T1-B Human Gate `PASS` decision without authorizing
+  T1-C or making a scientific-validation claim;
+- made no scientific-validation claim; T1-B `PASS` is a software-gate decision
+  only, while retrospective T0/T0.5/T1-A gates remain unrecorded.
+
 ### Added
 
 - T1-B teacher-free E0/E1/E2 encoder contracts with common structural,

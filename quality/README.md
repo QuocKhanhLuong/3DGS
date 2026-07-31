@@ -34,11 +34,18 @@ contract is frozen and an implementation provides exact evidence.
 - `planned`: requirement exists, but executable evidence is not yet bound;
 - `file`: required artifact or document.
 
-## Verdict policy
+## Status and verdict policy
+
+The catalog stores `implementation_status` separately from `human_gate_status`.
+T0, T0.5, and T1-A are implemented with retrospective Human Gate status;
+T1-B is implemented with a committed passed Human Gate; T1-C through T5 are
+planned and blocked.
 
 Automated blockers do not use an aggregate score. One blocker failure prevents
-an automated pass. Agents may collect evidence and recommend
-`READY_FOR_HUMAN_REVIEW`, but they must not write the final Human Gate decision.
+an automated pass. Agents may collect evidence and recommend a human review,
+but they must not write the final Human Gate decision. Automated verdicts are
+`PASS`, `FAIL`, `INCOMPLETE`, `BLOCKED`, or `NOT_RUN`; phase verdicts additionally
+include `PASS_WITH_CONDITIONS`, `REWORK`, and `PENDING_HUMAN_GATE`.
 The final phase verdict is one of:
 
 - `PASS`
@@ -47,6 +54,8 @@ The final phase verdict is one of:
 - `FAIL`
 - `BLOCKED`
 - `PENDING_HUMAN_GATE`
+
+The runner never writes a Human Gate `PASS` or `PASS_WITH_CONDITIONS` record.
 
 A later phase may begin only when the previous automated gate passes, the
 previous Human Gate is `PASS` or `PASS_WITH_CONDITIONS`, all conditions are

@@ -1,5 +1,7 @@
 # T1-B Teacher-Free Encoder Handoff
 
+Status: `IMPLEMENTED SOFTWARE TRANCHE — HUMAN GATE PASSED`
+
 T1-B is an executable software tranche for comparing three compact evidence
 paths behind the same fixed-support and Gaussian-head contract. It is not a
 reconstruction-accuracy result.
@@ -61,8 +63,30 @@ reports are software-contract diagnostics only. They do not claim clinical
 validity, pathology recovery, real-MRI training success, reconstruction
 accuracy, or scientific superiority.
 
+## Phase-gate evidence
+
+```bash
+python scripts/check_phase.py T1B
+```
+
+The automated checklist may be run on a clean committed branch with
+`python scripts/check_phase.py T1B --run --report-dir quality/reports`, but its
+phase verdict is `PASS` because the committed Human Gate decision record exists.
+See [`2026-07-31-t1b-human-gate-decision.md`](../strategies/2026-07-31-t1b-human-gate-decision.md).
+
+The Human Gate decision accepted the following questions for this software
+tranche without turning them into scientific validation claims:
+
+- Are E0/E1/E2 fair in dimensions, fixed supports, Gaussian head,
+  initialization, optimization opportunity, and compute accounting?
+- Do collapse or shortcut risks remain, especially for structural channels and
+  reliability?
+- Is encoder and adapter compute accounted for without hiding E0 cost?
+- Are software evidence and scientific claims kept disciplined and separate?
+
 ## Phase boundary
 
-T1-A is implemented as an executable software contract. T1-B is in
-development. T1-C and T2+ remain blocked. This handoff does not add scaffolding
-for those later phases.
+T1-A is implemented as an executable software contract. T1-B software and its
+Human Gate are passed. Software completion does not establish representation
+value. T1-C remains blocked, as do T2+ phases. This handoff does not add
+scaffolding for those later phases.

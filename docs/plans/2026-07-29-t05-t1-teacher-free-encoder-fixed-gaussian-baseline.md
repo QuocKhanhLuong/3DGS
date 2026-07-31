@@ -2,7 +2,11 @@
 
 Date: 2026-07-29  
 Target venue context: ISBI 2027 / medical imaging  
-Status: proposed implementation tranche after T0
+Status: historical implementation plan. T0.5, T1-A, and T1-B software have
+since been implemented; T1-C remains unimplemented. Current executable status
+is controlled by [`docs/codex/README.md`](../codex/README.md). Do not treat this
+historical plan as Human Gate approval or rewrite its body as retrospective
+history.
 
 ## 1. Research direction to preserve
 

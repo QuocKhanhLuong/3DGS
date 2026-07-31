@@ -26,8 +26,9 @@ responsibility belongs in `anchors/`, `fields/`, `memory/`, or `routing/`.
 
 Use the following order when implementing or reviewing code:
 
-1. `docs/strategies/2026-07-29-isbi-realignment.md` for the current thesis,
-   claims, authorization, Human Gates, and stop decisions.
+1. `docs/strategies/2026-07-29-isbi-realignment.md` and its current execution-
+   status addendum for the thesis, claims, authorization, Human Gates, and stop
+   decisions.
 2. `docs/reconstruction/` for the full theoretical method and cross-phase
    invariants.
 3. `CODEBASE.md` for the final software architecture and file ownership.
@@ -126,7 +127,11 @@ was introduced. `docs/codex/README.md` remains the live executable-status index.
 │   ├── manifests/
 │   ├── sweeps/
 │   └── reports/
+├── quality/                    # machine-readable phase-gate evidence catalog
+├── tests/quality/              # quality catalog and runner contract tests
+├── docs/checklists/            # human-readable phase-gate documentation
 ├── scripts/
+│   ├── check_phase.py
 │   ├── train.py
 │   ├── reconstruct.py
 │   ├── evaluate.py
@@ -453,6 +458,24 @@ Final CLIs are thin orchestration layers. Scientific logic belongs in packages.
 | `cli/evaluate.py` | PLANNED | Evaluate serialized predictions on a declared non-sealed or sealed cohort. |
 | `cli/audit.py` | PLANNED | Verify hashes, opened-file ledgers, environment, and claim evidence. |
 | `scripts/*.py` | PLANNED | Minimal executable wrappers only; no duplicate training or model logic. |
+
+### 7.17 Quality and phase-gate governance infrastructure
+
+The quality layer governs development and research evidence; it is not part of
+the `src/smagm` runtime architecture.
+
+| Path | Responsibility |
+|---|---|
+| `quality/checklists.json` | Machine-readable invariant, contract, evidence, and Human Gate requirements. |
+| `scripts/check_phase.py` | Evidence runner that validates the catalog and executes declared checks; it is not scientific model code. |
+| `tests/quality/` | Catalog and runner contract tests. |
+| `docs/checklists/` | Human-readable phase-gate documentation and interpretation rules. |
+| `quality/reports/` | Generated local JSON/Markdown evidence; ignored by Git. |
+
+Quality tooling may inspect and execute tests, but it must not import or mutate
+patient state. It cannot authorize a phase or write a Human Gate decision.
+Implementation PRs must update the relevant checklist evidence whenever a
+public interface or test path changes.
 
 ## 8. Dependency direction
 

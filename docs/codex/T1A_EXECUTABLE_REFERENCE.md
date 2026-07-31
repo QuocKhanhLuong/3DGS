@@ -1,6 +1,6 @@
 # T1-A — Executable Analytic-to-Gaussian Reference
 
-Status: `IN REVIEW`  
+Status: `IMPLEMENTED SOFTWARE CONTRACT`
 Scope: analytic evidence, feature-grid geometry, deterministic supports, safe
 fixed-topology Gaussian bridge, and one synthetic end-to-end gradient path.
 
@@ -34,6 +34,10 @@ python -m smagm.cli.t1a --steps 4
 python -m pytest -q tests/features tests/baselines
 python -m pytest -q
 ```
+
+The current reading order also includes [`CODEBASE.md`](../../CODEBASE.md) for
+stable software ownership and [`quality/checklists.json`](../../quality/checklists.json)
+for executable and Human Gate evidence requirements.
 
 Expected demo output contains finite values for:
 
@@ -107,9 +111,14 @@ Return changed files, test output, unresolved risks, and confirmation that no
 T1-B or T2+ code was added.
 ```
 
-## Gate to T1-B
+## Retrospective evidence and maintained baseline
 
-T1-B remains blocked until:
+T1-B now exists as an implemented software tranche, with its Human Gate still
+pending. T1-A remains the maintained analytic diagnostic baseline and is kept
+for attribution and regression checks. The T1-B software merge did not replace
+the T1-A baseline or establish reconstruction accuracy.
+
+The retrospective T1-A evidence requirements remain:
 
 - all CPU CI checks pass on an exact commit;
 - feature-grid alignment is independently reviewed;

@@ -11,9 +11,16 @@
 ## Status
 
 This directory defines the long-horizon design for **patient-specific 3D
-reconstruction from permanently sparse multi-sequence MRI slices**. The current
-approved sequence is T0.5 then T1, followed by a Human Gate; T2+ is not
-authorized in the current run.
+reconstruction from permanently sparse multi-sequence MRI slices**. It remains
+the theoretical method backbone. The live executable software and Human Gate
+state is maintained in [`docs/codex/README.md`](../codex/README.md); the
+current status addendum is
+[`docs/strategies/2026-07-31-execution-status-addendum.md`](../strategies/2026-07-31-execution-status-addendum.md).
+
+The repository currently contains implemented software contracts for T0, T0.5,
+and T1-A, plus the implemented T1-B software tranche with its Human Gate
+passed. T1-C and T2+ remain blocked. Merged software is not scientific
+validation or Human Gate approval.
 
 ### Decisions currently locked
 
@@ -31,14 +38,34 @@ authorized in the current run.
 8. **Inference:** model weights are frozen; only patient-specific state is
    updated once those future tranches are authorized.
 
+### Implemented software contracts
+
+- T1 encoder dimensions: configurable structural channels (default 16),
+  appearance channels (default 8), and exactly one bounded reliability channel.
+- Per-item feature-grid geometry with locked
+  `align_corners=False` half-pixel semantics, strides 1/2/4, and explicit
+  invalid right/bottom padding for odd shapes.
+- Exact feature-cache key binding for observation, source plane, encoder
+  variant/configuration/state, preprocessing, transform, valid mask, dtype, and
+  output contract.
+- Common E0/E1/E2 software path through deterministic fixed supports and the
+  shared Gaussian head.
+
+These are executable interface contracts, not evidence that one representation
+is scientifically better.
+
 ### Decisions intentionally left open
 
-- exact analytic channels and micro-CNN capacity;
-- exact encoder output stride in \(\{1,2,4\}\);
 - exact parameterization of volumetric appearance Gaussians;
+- fair matched training protocol and real-data optimization;
+- explicit modality conditioning selected by ablation;
 - analytic versus learned trajectory utility;
 - whether geometry is represented by a true SDF, a local SDF bundle, or a structural level-set field;
 - exact protocol used to train or audit active routing under permanently sparse supervision.
+
+The following remain incomplete or planned: modality conditioning, real-data
+training, matched attribution experiments, support anchors, local fields,
+propagation, routing, and T5 reconstruction/export/evaluation.
 
 The downstream phase interfaces remain stable while these decisions are experimentally compared.
 

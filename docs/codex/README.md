@@ -6,13 +6,17 @@ or another coding agent.  It complements the scientific documents under
 
 ## Status vocabulary
 
-- `IMPLEMENTED`: the executable software contract and tests exist; this is not a
+Software state and Human Gate state are separate. A merged implementation is
+not a Human Gate decision and is not a scientific validation claim.
+
+- `IMPLEMENTED SOFTWARE CONTRACT`: executable contract and focused tests exist.
+- `IMPLEMENTED SOFTWARE TRANCHE — HUMAN GATE PENDING`: the bounded software
+  tranche exists, but a Human Gate decision is still required.
+- `IMPLEMENTED SOFTWARE TRANCHE — HUMAN GATE PASSED`: the bounded software
+  tranche and its committed Human Gate decision exist; this is still not a
   scientific validation claim.
-- `IN DEVELOPMENT`: implementation is being added and must not be treated as an
-  accepted research result.
-- `PLANNED`: the interface and stop rules are documented, but runnable code does
-  not yet exist.
-- `BLOCKED`: the previous phase gate has not passed.
+- `BLOCKED`: the phase is not authorized or its preceding Human Gate remains
+  unresolved.
 
 Passing unit tests means that the executable contract works.  It does **not**
 mean that reconstruction accuracy, clinical fidelity, or paper novelty has been
@@ -22,26 +26,43 @@ validated.
 
 | Phase | Purpose | Status | Runnable entry point |
 |---|---|---|---|
-| T0 | Canonical coordinates and physical-plane Gaussian renderer | IMPLEMENTED | `python -m pytest -q tests/render tests/contracts` |
-| T0.5 | Legal sparse episodes, prediction receipts, cost, amplitude gauge | IMPLEMENTED | `python -m pytest -q tests/contracts tests/integration` |
-| T1-A | Analytic evidence, explicit feature geometry, fixed supports, safe Gaussian bridge | IMPLEMENTED — executable software contract only | `python -m smagm.cli.t1a --steps 4` |
-| T1-B | Teacher-free micro-CNN, structural losses, and cache contracts | IN DEVELOPMENT | `python -m smagm.cli.t1b --help` |
+| T0 | Canonical coordinates and physical-plane Gaussian renderer | IMPLEMENTED SOFTWARE CONTRACT | `python -m pytest -q tests/render tests/contracts` |
+| T0.5 | Legal sparse episodes, prediction receipts, cost, amplitude gauge | IMPLEMENTED SOFTWARE CONTRACT | `python -m pytest -q tests/contracts tests/integration` |
+| T1-A | Analytic evidence, explicit feature geometry, fixed supports, safe Gaussian bridge | IMPLEMENTED SOFTWARE CONTRACT | `python -m smagm.cli.t1a --steps 4` |
+| T1-B | Teacher-free micro-CNN, structural losses, and cache contracts | IMPLEMENTED SOFTWARE TRANCHE — HUMAN GATE PASSED | `python -m smagm.cli.t1b --help` |
 | T1-C | Sparse context-to-target trainer and E0/E1/E2 experiment orchestration | BLOCKED | not available |
 | T2 | Physical anchor bootstrap and shared tiny local field | BLOCKED | not available |
 | T3 | Anchor-Gaussian propagation and adaptive topology | BLOCKED | not available |
 | T4 | Legal active sequence-slice trajectory | BLOCKED | not available |
 | T5 | Full-grid reconstruction, uncertainty, and isolated export/evaluation | BLOCKED | not available |
 
+The machine-readable quality catalog separates `implementation_status` from
+`human_gate_status`. T1-B has a committed Human Gate decision record. Run the
+phase-gate evidence with:
+
+```bash
+python scripts/check_phase.py --list
+python scripts/check_phase.py T1B
+python scripts/check_phase.py T1B --run --report-dir quality/reports
+```
+
+The runner may report automated evidence, but only a Human decision may close a
+Human Gate. T1-B now reports `PASS` only because that committed Human decision
+record exists. Do not treat this software tranche as reconstruction success.
+
 ## Required workflow for every phase
 
 ```text
-read authoritative reconstruction docs
+read strategy/addendum
+→ read docs/reconstruction
+→ read CODEBASE.md
+→ read docs/codex and the current handoff
+→ read the relevant quality checklist
 → read the phase-specific Codex handoff
 → implement only the named tranche
 → add analytic/synthetic tests
-→ run the phase command
+→ run the phase-gate checklist
 → run the complete CPU CI suite
-→ open a PR
 → review scientific claims separately from software correctness
 ```
 

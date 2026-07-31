@@ -24,7 +24,7 @@ roles:
 
   architect:
     description: "Final software blueprint, package ownership, dependency, geometry, and tensor-contract lead"
-    participates_in: [design, t1a_implement, t1_learned, t1_smoke_review]
+    participates_in: [design, t1a_implement, t1b_implement, t1_smoke_review]
     can_write: true
     write_scope: ["CODEBASE.md", "docs/designs/**"]
     handoff_contract:
@@ -34,12 +34,12 @@ roles:
 
   dev:
     description: "CODEBASE-mapped PyTorch medical-imaging research implementation lead"
-    participates_in: [t05_implement, t1a_implement, t1_learned]
+    participates_in: [t05_implement, t1a_implement, t1b_implement]
     can_write: true
     write_scope:
       - "src/**"
       - "lib/**"
-      - "scripts/**"
+      - "scripts/check_phase.py"
       - ".github/workflows/**"
       - "pyproject.toml"
       - "CHANGELOG.md"
@@ -52,11 +52,14 @@ roles:
 
   qa:
     description: "Architecture-contract, scientific-invariant, leakage, numeric, and regression verification lead"
-    participates_in: [t05_implement, t1a_implement, t1_learned, t1_experiment]
+    participates_in: [t05_implement, t1a_implement, t1b_implement, t1_experiment]
     can_write: true
     write_scope:
       - "tests/**"
       - "**/*.test.*"
+      - "quality/**"
+      - "tests/quality/**"
+      - "docs/checklists/**"
     handoff_contract:
       produces: "Blocking test and invariant report naming the stable module, legal/scientific contract, evidence, and remaining boundary"
       expects: "Implemented authorized slice with explicit interfaces and claimed invariants"
@@ -73,7 +76,7 @@ roles:
 
   medical_data_steward:
     description: "Sparse-data legality, ownership mapping, registration, and audit-isolation lead"
-    participates_in: [research, design, t05_implement, t05_review, t1_learned, t1_smoke_review, t1_experiment, t1_decision]
+    participates_in: [research, design, t05_implement, t05_review, t1b_implement, t1_smoke_review, t1_experiment, t1_decision]
     can_write: true
     write_scope: ["docs/protocols/**"]
     handoff_contract:
@@ -83,7 +86,7 @@ roles:
 
   experiment_lead:
     description: "Matched full-lifecycle experiments, ablations, statistics, and external-evaluation lead"
-    participates_in: [strategy, t1_learned, t1_experiment]
+    participates_in: [strategy, t1_experiment]
     can_write: true
     write_scope:
       - "experiments/**"
@@ -101,7 +104,7 @@ roles:
       - design
       - t05_review
       - t1a_review
-      - t1_learned
+      - t1b_implement
       - t1_smoke_review
       - t1_experiment
       - t1_decision
@@ -115,6 +118,8 @@ roles:
 final_verify:
   - "python3 -m pytest -q"
   - "python3 -m compileall -q src tests"
+  - "python3 scripts/check_phase.py --list"
+  - "python3 -m pytest -q tests/quality --tb=short"
   - "git diff --check"
 final_verify_policy: block
 final_verify_max_retries: 1
@@ -174,21 +179,25 @@ pipeline:
       rework_to: t1a_implement
       verify: "python3 -m pytest -q"
 
-    - name: t1_learned
-      roles: [dev, qa, architect, medical_data_steward, experiment_lead, reproducibility_auditor]
+    - name: t1b_implement
+      roles: [dev, qa, architect, medical_data_steward, reproducibility_auditor]
       gate: auto
       max_retries: 2
       criteria:
         max_files_changed: 30
         scope_paths:
           - "src/smagm/features/**"
-          - "src/smagm/losses/**"
-          - "src/smagm/training/**"
-          - "scripts/train_t1.py"
-          - "tests/**"
-          - "configs/t1/**"
-          - "experiments/**"
-          - "docs/experiments/**"
+          - "src/smagm/losses/structural.py"
+          - "src/smagm/baselines/**"
+          - "src/smagm/cli/t1b.py"
+          - "tests/features/**"
+          - "tests/losses/**"
+          - "tests/baselines/**"
+          - "quality/**"
+          - "tests/quality/**"
+          - "docs/codex/**"
+          - "docs/checklists/**"
+          - "scripts/check_phase.py"
           - "CHANGELOG.md"
         requires_tests: true
       verify: "python3 -m pytest -q"
@@ -196,7 +205,7 @@ pipeline:
     - name: t1_smoke_review
       roles: [reviewer, architect, medical_data_steward, reproducibility_auditor]
       gate: human
-      rework_to: t1_learned
+      rework_to: t1b_implement
       verify: "python3 -m pytest -q"
 
     - name: t1_experiment
@@ -219,8 +228,8 @@ pipeline:
       stages: [t1a_implement, t1a_review]
       hints: [features and baselines ownership, analytic features, feature alignment, fixed support, safe Gaussian]
     t1:
-      stages: [t1_learned, t1_smoke_review, t1_experiment, t1_decision]
-      hints: [CODEBASE-mapped features/losses/training ownership, teacher-free encoder, matched baselines, lesion fidelity, reproducibility]
+      stages: [t1b_implement, t1_smoke_review, t1_experiment, t1_decision]
+      hints: [CODEBASE-mapped T1-B feature/loss ownership, teacher-free encoder, matched baseline fairness, quality evidence, reproducibility]
     paper:
       stages:
         - research
@@ -230,7 +239,7 @@ pipeline:
         - t05_review
         - t1a_implement
         - t1a_review
-        - t1_learned
+        - t1b_implement
         - t1_smoke_review
         - t1_experiment
         - t1_decision
