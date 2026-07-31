@@ -17,4 +17,5 @@ dist/
 .agenteam/memory/
 .agenteam/reports/
 .agenteam/runs/
+experiments/runs/
 .agenteam/state/

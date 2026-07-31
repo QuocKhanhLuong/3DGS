@@ -14,12 +14,14 @@ from smagm.contracts.coordinates import PhysicalPlane
 from smagm.contracts.episode import EpisodeAssignment, EpisodeLedger
 from smagm.contracts.observation import AvailabilityObservationMeta, PatientSplitRegistry, SparseAvailabilityManifest
 from smagm.features.encoder import EncoderConfig, EvidenceEncoder
-from smagm.data.episodes import EpisodeSamplingConfig
+from smagm.data.episodes import EpisodeSamplingConfig, EpisodeSamplingError, EpisodeSamplingFailureReason
 from smagm.losses.reconstruction import ReconstructionLossConfig
 from smagm.renderer import RenderConfig
 from smagm.training.episode import LegalEpisodeConfig
+from smagm.training.objective import T1CObjectiveConfig
 from smagm.training.provenance import module_state_hash
 from smagm.training.sampling import build_matched_variant_schedule
+from smagm.training.schedule import StageConfig, TrainingSchedule, TrainingStage
 from smagm.training.trainer import T1CTrainer, TrainerConfig
 
 
@@ -44,7 +46,13 @@ def _plane(observation_id: str, z: float, shape: tuple[int, int]) -> PhysicalPla
     )
 
 
-def _episode(tmp_path, *, episode_id: str = "episode"):
+def _episode(
+    tmp_path,
+    *,
+    episode_id: str = "episode",
+    context_modality: str = "T2",
+    target_modality: str = "T2",
+):
     shape = (17, 15)
     payloads = {"context": _payload(0.0, shape), "target": _payload(0.3, shape)}
     entries = tuple(
@@ -53,7 +61,7 @@ def _episode(tmp_path, *, episode_id: str = "episode"):
             patient_id="patient-a",
             split="train",
             relative_path=f"{identifier}.npy",
-            modality_id="T2",
+            modality_id=context_modality if identifier == "context" else target_modality,
             plane=_plane(identifier, float(index), shape),
             is_synthetic=True,
         )
@@ -98,6 +106,7 @@ def _trainer(variant: str, seed: int = 7, trainer_config: TrainerConfig | None =
             supports=FixedSupportConfig(step_vu=(4, 4), border_vu=(1, 1)),
             renderer=RenderConfig(support_epsilon=1e-10),
             reconstruction_loss=ReconstructionLossConfig(intensity="mse"),
+            modality_to_appearance_channel={"T2": 0},
         ),
         trainer_config=trainer_config,
     )
@@ -137,6 +146,7 @@ def test_variants_share_assignment_support_topology_and_independent_state(tmp_pa
         state_hashes.append(module_state_hash(trainer.encoder, trainer.gaussian_head))
     assert len({report.assignment_hash for report in reports}) == 1
     assert len({report.support_count for report in reports}) == 1
+    assert len({report.support_topology_hash for report in reports}) == 1
     assert len(set(state_hashes)) == 3
 
 
@@ -198,6 +208,117 @@ def test_gradient_accumulation_updates_only_at_declared_boundary(tmp_path) -> No
     assert second.report.optimizer_updated is True
 
 
+def test_checkpoint_rejects_incomplete_accumulation_window(tmp_path) -> None:
+    trainer = _trainer("e1", trainer_config=TrainerConfig(accumulation_steps=2))
+    ledger, assignment = _episode(tmp_path)
+    trainer.train_step(ledger=ledger, assignment=assignment, target_id="target")
+    with pytest.raises(RuntimeError, match="incomplete gradient-accumulation"):
+        trainer.save_checkpoint(tmp_path / "mid-window.pt")
+
+
+def test_schedule_runs_context_only_warmup_then_joint_and_reconstruction_dominant(tmp_path) -> None:
+    schedule = TrainingSchedule(structural_warmup_steps=1, joint_reconstruction_steps=1)
+    trainer = _trainer("e1", trainer_config=TrainerConfig(schedule=schedule))
+    warmup_root = tmp_path / "warmup"
+    joint_root = tmp_path / "joint"
+    dominant_root = tmp_path / "dominant"
+    for root in (warmup_root, joint_root, dominant_root):
+        root.mkdir()
+    warmup_ledger, warmup_assignment = _episode(warmup_root, episode_id="warmup")
+    warmup = trainer.train_step(ledger=warmup_ledger, assignment=warmup_assignment)
+    assert warmup.report.stage == "structural_warmup"
+    assert warmup.report.legal_target_pixel_count == 0
+    assert warmup.report.reconstruction_intensity_loss is None
+    assert [event.event for event in warmup_ledger.event_records] == ["OPEN_CONTEXT"]
+    joint_ledger, joint_assignment = _episode(joint_root, episode_id="joint")
+    joint = trainer.train_step(ledger=joint_ledger, assignment=joint_assignment, target_id="target")
+    assert joint.report.stage == "joint_reconstruction"
+    assert joint.report.reconstruction_intensity_loss is not None
+    dominant_ledger, dominant_assignment = _episode(dominant_root, episode_id="dominant")
+    dominant = trainer.train_step(ledger=dominant_ledger, assignment=dominant_assignment, target_id="target")
+    assert dominant.report.stage == "reconstruction_dominant"
+    assert dominant.report.reconstruction_intensity_loss is not None
+
+
+def test_unavailable_structural_component_is_reported_not_silently_zeroed(tmp_path) -> None:
+    config = TrainerConfig(objective=T1CObjectiveConfig(structural_weights=(("not_implemented", 1.0),)))
+    ledger, assignment = _episode(tmp_path)
+    result = _trainer("e1", trainer_config=config).train_step(ledger=ledger, assignment=assignment, target_id="target")
+    assert result.report.inactive_components["not_implemented"] == "UNSUPPORTED_DECLARED_STRUCTURAL_COMPONENT"
+
+
+def test_modality_to_appearance_channel_is_explicit_bounded_and_hashable() -> None:
+    first = LegalEpisodeConfig(modality_to_appearance_channel={"T2": 0, "FLAIR": 1})
+    second = LegalEpisodeConfig(modality_to_appearance_channel={"FLAIR": 1, "T2": 0})
+    assert first.appearance_channel_for("T2", available_channels=2) == 0
+    assert first.appearance_channel_for("FLAIR", available_channels=2) == 1
+    assert first.modality_mapping_hash == second.modality_mapping_hash
+    with pytest.raises(ValueError, match="no appearance channel"):
+        first.appearance_channel_for("DWI", available_channels=2)
+    with pytest.raises(ValueError, match="outside"):
+        first.appearance_channel_for("FLAIR", available_channels=1)
+
+
+def test_legal_episode_rejects_assignment_without_target_modality_context(tmp_path) -> None:
+    ledger, assignment = _episode(tmp_path, context_modality="T2", target_modality="FLAIR")
+    trainer = _trainer("e1")
+    with pytest.raises(EpisodeSamplingError) as exc_info:
+        trainer.train_step(ledger=ledger, assignment=assignment, target_id="target")
+    assert exc_info.value.reason is EpisodeSamplingFailureReason.MISSING_CONTEXT_MODALITY
+    assert ledger.event_records == ()
+
+
+def test_checkpoint_resume_matches_uninterrupted_execution_at_optimizer_boundary(tmp_path) -> None:
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    resumed_first_root = tmp_path / "resumed-first"
+    resumed_second_root = tmp_path / "resumed-second"
+    for root in (first_root, second_root, resumed_first_root, resumed_second_root):
+        root.mkdir()
+    uninterrupted = _trainer("e1", seed=71)
+    first_ledger, first_assignment = _episode(first_root, episode_id="first")
+    second_ledger, second_assignment = _episode(second_root, episode_id="second")
+    uninterrupted.train_step(ledger=first_ledger, assignment=first_assignment, target_id="target")
+    uninterrupted.train_step(ledger=second_ledger, assignment=second_assignment, target_id="target")
+    expected = module_state_hash(uninterrupted.encoder, uninterrupted.gaussian_head)
+    resumable = _trainer("e1", seed=71)
+    resumed_first_ledger, resumed_first_assignment = _episode(resumed_first_root, episode_id="first")
+    resumable.train_step(ledger=resumed_first_ledger, assignment=resumed_first_assignment, target_id="target")
+    checkpoint = resumable.save_checkpoint(tmp_path / "boundary.pt")
+    restored = _trainer("e1", seed=999)
+    restored.load_checkpoint(checkpoint)
+    resumed_second_ledger, resumed_second_assignment = _episode(resumed_second_root, episode_id="second")
+    restored.train_step(ledger=resumed_second_ledger, assignment=resumed_second_assignment, target_id="target")
+    assert module_state_hash(restored.encoder, restored.gaussian_head) == expected
+
+
+def test_checkpoint_rejects_a_different_head_contract_with_compatible_shapes(tmp_path) -> None:
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    ledger, assignment = _episode(data_root)
+    trainer = _trainer("e1", seed=73)
+    trainer.train_step(ledger=ledger, assignment=assignment, target_id="target")
+    checkpoint = trainer.save_checkpoint(tmp_path / "head-contract.pt")
+    changed_encoder = EvidenceEncoder(EncoderConfig(variant="e1"))
+    changed_head = FixedGaussianHead(
+        FixedGaussianHeadConfig(input_dim=25, min_scale_mm=1.6, max_scale_mm=5.0, max_center_offset_mm=0.2)
+    )
+    changed_optimizer = torch.optim.Adam(list(changed_encoder.parameters()) + list(changed_head.parameters()), lr=1e-3)
+    incompatible = T1CTrainer(
+        encoder=changed_encoder,
+        gaussian_head=changed_head,
+        optimizer=changed_optimizer,
+        episode_config=LegalEpisodeConfig(
+            supports=FixedSupportConfig(step_vu=(4, 4), border_vu=(1, 1)),
+            renderer=RenderConfig(support_epsilon=1e-10),
+            reconstruction_loss=ReconstructionLossConfig(intensity="mse"),
+            modality_to_appearance_channel={"T2": 0},
+        ),
+    )
+    with pytest.raises(ValueError, match="immutable T1-C binding"):
+        incompatible.load_checkpoint(checkpoint)
+
+
 def test_target_is_never_encoded_or_cached_before_or_after_reveal(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     ledger, assignment = _episode(tmp_path)
     trainer = _trainer("e2")
@@ -210,7 +331,9 @@ def test_target_is_never_encoded_or_cached_before_or_after_reveal(tmp_path, monk
 
     monkeypatch.setattr(trainer.encoder, "forward", spy)
     output = trainer.train_step(ledger=ledger, assignment=assignment, target_id="target")
-    assert len(calls) == len(assignment.context_ids) == 1
+    # One declared intensity-perturbation view is legal structural supervision;
+    # both encoder calls still originate from the sole context observation.
+    assert len(calls) == 2 * len(assignment.context_ids) == 2
     assert len(output.step.feature_cache_key_hashes) == len(assignment.context_ids)
     assert output.step.target_id not in output.step.context_ids
 

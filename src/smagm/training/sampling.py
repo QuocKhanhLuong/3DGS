@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
+from types import MappingProxyType
+from typing import Mapping
 
 from ..contracts.observation import SparseAvailabilityManifest
 from ..data.episodes import EpisodeSamplingConfig, EpisodeSchedule, build_episode_schedule
@@ -21,6 +25,52 @@ class MatchedVariantSchedule:
         if variant not in self.variants:
             raise KeyError(f"unknown matched variant: {variant}")
         return self.episode_schedule
+
+
+@dataclass(frozen=True)
+class MatchedExperimentIdentity:
+    """Hash of every T1-C condition shared by E0, E1, and E2."""
+
+    manifest_hash: str
+    split_registry_hash: str
+    assignment_schedule_hash: str
+    modality_mapping_hash: str
+    shared_conditions: Mapping[str, object]
+    identity_hash: str
+
+    def __post_init__(self) -> None:
+        for name in ("manifest_hash", "split_registry_hash", "assignment_schedule_hash", "modality_mapping_hash", "identity_hash"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+                raise ValueError(f"{name} must be a SHA-256 digest")
+        object.__setattr__(self, "shared_conditions", MappingProxyType(dict(self.shared_conditions)))
+
+    @classmethod
+    def from_resolved_conditions(
+        cls,
+        *,
+        manifest_hash: str,
+        split_registry_hash: str,
+        assignment_schedule_hash: str,
+        modality_mapping_hash: str,
+        shared_conditions: Mapping[str, object],
+    ) -> "MatchedExperimentIdentity":
+        payload = {
+            "assignment_schedule_hash": assignment_schedule_hash,
+            "manifest_hash": manifest_hash,
+            "modality_mapping_hash": modality_mapping_hash,
+            "shared_conditions": dict(shared_conditions),
+            "split_registry_hash": split_registry_hash,
+        }
+        identity_hash = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        return cls(
+            manifest_hash=manifest_hash,
+            split_registry_hash=split_registry_hash,
+            assignment_schedule_hash=assignment_schedule_hash,
+            modality_mapping_hash=modality_mapping_hash,
+            shared_conditions=shared_conditions,
+            identity_hash=identity_hash,
+        )
 
 
 def build_matched_variant_schedule(

@@ -1,9 +1,103 @@
 {
+  "schema_version": 1,
   "claim_scope": "software-contract diagnostic only",
+  "seed": 29,
+  "variants": ["e0", "e1", "e2"],
   "episode": {
     "context_count": 1,
-    "target_count": 1
+    "target_count": 1,
+    "modality_policy": {
+      "same_modality_context_required": true,
+      "unseen_target_modality_policy": "reject"
+    },
+    "modality_to_appearance_channel": {"synthetic-mri": 0}
   },
+  "encoder": {
+    "output_stride": 1,
+    "structural_channels": 16,
+    "appearance_channels": 8,
+    "reliability_channels": 1,
+    "hidden_channels": 24,
+    "analytic_eps": 1e-06,
+    "local_radii_mm": [2, 4]
+  },
+  "head": {
+    "input_dim": 25,
+    "appearance_channels": 1,
+    "hidden_dim": 32,
+    "max_center_offset_mm": 0.25,
+    "min_scale_mm": 1.5,
+    "max_scale_mm": 5.0,
+    "max_off_diagonal_mm": 0.5,
+    "covariance_epsilon": 1e-06,
+    "use_reliability_amplitude": true
+  },
+  "supports": {
+    "step_vu": [4, 4],
+    "border_vu": [1, 1],
+    "max_points": null
+  },
+  "renderer": {
+    "support_epsilon": 1e-10,
+    "box_radius": 3,
+    "minimum_supported_psf_mass": 1.0
+  },
+  "reconstruction_loss": {
+    "intensity": "mse",
+    "intensity_weight": 1.0,
+    "gradient_weight": 0.0,
+    "frequency_weight": 0.0,
+    "empty_mask_policy": "raise"
+  },
+  "normalization": {
+    "policy": "zscore",
+    "epsilon": 1e-06,
+    "minimum_context_scale": 0.001,
+    "degenerate_scale_policy": "identity_scale",
+    "unseen_modality_policy": "reject"
+  },
+  "objective": {
+    "structural_weights": [
+      ["structural_consistency", 1.0],
+      ["appearance_sensitivity", 0.1],
+      ["reliability_regularization", 0.1],
+      ["variance_floor", 0.1]
+    ]
+  },
+  "training": {
+    "steps": 1,
+    "precision": "float32",
+    "accumulation_steps": 1,
+    "gradient_clip_norm": 10.0,
+    "checkpoint_interval": 1,
+    "optimizer": {
+      "name": "Adam",
+      "lr": 0.002,
+      "betas": [0.9, 0.999],
+      "eps": 1e-08,
+      "weight_decay": 0.0
+    },
+    "schedule": {
+      "structural_warmup_steps": 0,
+      "joint_reconstruction_steps": 1,
+      "structural_warmup": {
+        "reconstruction_weight": 0.0,
+        "structural_weight": 1.0,
+        "auxiliary_only": true
+      },
+      "joint_reconstruction": {
+        "reconstruction_weight": 1.0,
+        "structural_weight": 1.0,
+        "auxiliary_only": false
+      },
+      "reconstruction_dominant": {
+        "reconstruction_weight": 1.0,
+        "structural_weight": 0.1,
+        "auxiliary_only": false
+      }
+    }
+  },
+  "checkpointing": {"enabled": true},
   "fairness": {
     "common_feature_channels": [16, 8, 1],
     "common_fixed_support_step_vu": [4, 4],
@@ -12,8 +106,8 @@
     "common_steps": 1,
     "checkpoint_selection_rule": "minimum declared development loss; never audit metrics",
     "hardware_class": "cpu",
-    "precision": "float32"
-  },
-  "seed": 29,
-  "variants": ["e0", "e1", "e2"]
+    "precision": "float32",
+    "amplitude_gauge": "fixed_gaussian_runtime_once",
+    "evaluation_mask": "target-valid intersect renderer-supported"
+  }
 }

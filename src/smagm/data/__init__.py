@@ -11,10 +11,19 @@ from .manifest import (
     SparseManifest,
     validate_patient_split_manifests,
 )
-from .episodes import EpisodeSamplingConfig, EpisodeSchedule, build_episode_schedule
+from .episodes import (
+    EpisodeSamplingConfig,
+    EpisodeSamplingError,
+    EpisodeSamplingFailureReason,
+    EpisodeSchedule,
+    ModalityEpisodePolicy,
+    build_episode_schedule,
+)
 from .io import DecodedObservation, DecoderConfig, decode_observation
 from .normalization import (
     ModalityNormalization,
+    FrozenPopulationStatistic,
+    DegenerateNormalizationError,
     NormalizationConfig,
     NormalizedObservation,
     PreprocessingRecord,
@@ -29,9 +38,14 @@ __all__ = [
     "AvailabilityObservationMeta",
     "DecodedObservation",
     "DecoderConfig",
+    "DegenerateNormalizationError",
     "EpisodeSamplingConfig",
+    "EpisodeSamplingError",
+    "EpisodeSamplingFailureReason",
     "EpisodeSchedule",
+    "FrozenPopulationStatistic",
     "ModalityNormalization",
+    "ModalityEpisodePolicy",
     "NormalizationConfig",
     "NormalizedObservation",
     "PatientSplitRegistry",

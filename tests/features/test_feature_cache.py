@@ -31,7 +31,8 @@ def _features(dtype: torch.dtype = torch.float32, observation_id: str = "obs"):
         encoder_variant="e1",
         encoder_configuration_hash=encoder.config.config_hash,
         encoder_state_hash=encoder.state_hash(),
-        input_preprocessing_hash="preprocess-v1",
+        input_preprocessing_hash="b" * 64,
+        input_content_hash="a" * 64,
     )
     return encoder, features, key
 
@@ -46,14 +47,33 @@ def test_exact_matching_cache_retrieval_and_target_rejection() -> None:
         cache.put(key, features, target_derived=True)
 
 
-@pytest.mark.parametrize("field", ("encoder_configuration_hash", "encoder_state_hash", "input_preprocessing_hash", "dtype", "valid_feature_mask_hash"))
+@pytest.mark.parametrize(
+    "field",
+    (
+        "encoder_configuration_hash",
+        "encoder_state_hash",
+        "input_preprocessing_hash",
+        "input_content_hash",
+        "dtype",
+        "valid_feature_mask_hash",
+    ),
+)
 def test_mismatched_cache_metadata_fails_closed(field: str) -> None:
     _, features, key = _features()
     cache = FeatureCache()
     cache.put(key, features)
-    mismatch = replace(key, **{field: "mismatch" if field != "dtype" else "torch.float64"})
+    replacement = "c" * 64
+    if field == "dtype":
+        replacement = "torch.float64"
+    mismatch = replace(key, **{field: replacement})
     with pytest.raises(FeatureCacheMismatchError):
         cache.get(mismatch)
+
+
+def test_output_stride_mismatch_is_rejected_before_cache_lookup() -> None:
+    _, features, key = _features()
+    with pytest.raises(ValueError, match="output_stride"):
+        replace(key, output_stride=2)
 
 
 def test_mismatched_plane_and_transform_fail_closed() -> None:
@@ -65,3 +85,13 @@ def test_mismatched_plane_and_transform_fail_closed() -> None:
         cache.get(other_key)
     with pytest.raises(ValueError):
         replace(key, feature_grid_transform=other_key.feature_grid_transform)
+
+
+def test_input_identity_distinguishes_payload_and_mask_content() -> None:
+    _, features, key = _features()
+    cache = FeatureCache()
+    cache.put(key, features)
+    with pytest.raises(FeatureCacheMismatchError):
+        cache.get(replace(key, input_content_hash="b" * 64))
+    with pytest.raises(FeatureCacheMismatchError):
+        cache.get(replace(key, valid_feature_mask_hash="c" * 64))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
 import json
 import platform
@@ -39,6 +40,18 @@ class RunProvenance:
     environment: tuple[tuple[str, str], ...]
     environment_hash: str
     checkpoint_hash: str
+    modality_mapping_hash: str = "0" * 64
+    preprocessing_policy_hash: str = "0" * 64
+    encoder_variant: str = "unknown"
+    encoder_config_hash: str = "0" * 64
+    encoder_state_hash: str = "0" * 64
+    gaussian_head_initialization_hash: str = "0" * 64
+    renderer_config_hash: str = "0" * 64
+    amplitude_gauge_hash: str = "0" * 64
+    device: str = "unknown"
+    parameter_count: int = 0
+    run_started_at: str = "unknown"
+    run_ended_at: str = "unknown"
     artifact_hashes: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
@@ -51,11 +64,20 @@ class RunProvenance:
             "assignment_schedule_hash",
             "environment_hash",
             "checkpoint_hash",
+            "modality_mapping_hash",
+            "preprocessing_policy_hash",
+            "encoder_config_hash",
+            "encoder_state_hash",
+            "gaussian_head_initialization_hash",
+            "renderer_config_hash",
+            "amplitude_gauge_hash",
         ):
             if re.fullmatch(r"[0-9a-f]{64}", getattr(self, name)) is None:
                 raise ValueError(f"{name} must be a SHA-256 digest")
         if not self.environment or any(not key or not value for key, value in self.environment):
             raise ValueError("environment provenance must be explicit and non-empty")
+        if not self.encoder_variant or not self.device or self.parameter_count < 0:
+            raise ValueError("provenance requires encoder, device, and parameter metadata")
         for name, digest in self.artifact_hashes:
             if not name or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
                 raise ValueError("artifact hashes must contain names and SHA-256 digests")
@@ -75,6 +97,18 @@ def capture_run_provenance(
     seed: int,
     checkpoint_hash: str,
     artifact_hashes: Mapping[str, str] | None = None,
+    modality_mapping_hash: str = "0" * 64,
+    preprocessing_policy_hash: str = "0" * 64,
+    encoder_variant: str = "unknown",
+    encoder_config_hash: str = "0" * 64,
+    encoder_state_hash: str = "0" * 64,
+    gaussian_head_initialization_hash: str = "0" * 64,
+    renderer_config_hash: str = "0" * 64,
+    amplitude_gauge_hash: str = "0" * 64,
+    device: str = "unknown",
+    parameter_count: int = 0,
+    run_started_at: str | None = None,
+    run_ended_at: str | None = None,
     allow_dirty: bool = False,
 ) -> RunProvenance:
     root = Path(repository_root).resolve()
@@ -91,11 +125,15 @@ def capture_run_provenance(
     dirty = bool(dirty_entries)
     if dirty and not allow_dirty:
         raise RuntimeError("gate-quality provenance requires a clean repository; allow_dirty is development-only")
+    try:
+        processor = platform.processor() or "unknown"
+    except Exception:
+        processor = "unknown"
     environment = {
         "cuda_available": str(torch.cuda.is_available()),
         "machine": platform.machine() or "unknown",
         "platform": platform.platform(),
-        "processor": platform.processor() or "unknown",
+        "processor": processor,
         "python": platform.python_version(),
         "torch": torch.__version__,
     }
@@ -110,5 +148,17 @@ def capture_run_provenance(
         environment=tuple(sorted(environment.items())),
         environment_hash=canonical_hash(environment),
         checkpoint_hash=checkpoint_hash,
+        modality_mapping_hash=modality_mapping_hash,
+        preprocessing_policy_hash=preprocessing_policy_hash,
+        encoder_variant=encoder_variant,
+        encoder_config_hash=encoder_config_hash,
+        encoder_state_hash=encoder_state_hash,
+        gaussian_head_initialization_hash=gaussian_head_initialization_hash,
+        renderer_config_hash=renderer_config_hash,
+        amplitude_gauge_hash=amplitude_gauge_hash,
+        device=device,
+        parameter_count=parameter_count,
+        run_started_at=run_started_at or datetime.now(timezone.utc).isoformat(),
+        run_ended_at=run_ended_at or datetime.now(timezone.utc).isoformat(),
         artifact_hashes=tuple(sorted((artifact_hashes or {}).items())),
     )
