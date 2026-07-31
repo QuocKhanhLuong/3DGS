@@ -12,6 +12,9 @@ not a Human Gate decision and is not a scientific validation claim.
 - `IMPLEMENTED SOFTWARE CONTRACT`: executable contract and focused tests exist.
 - `IMPLEMENTED SOFTWARE TRANCHE — HUMAN GATE PENDING`: the bounded software
   tranche exists, but a Human Gate decision is still required.
+- `IMPLEMENTED SOFTWARE TRANCHE — HUMAN GATE PASSED`: the bounded software
+  tranche and its committed Human Gate decision exist; this is still not a
+  scientific validation claim.
 - `BLOCKED`: the phase is not authorized or its preceding Human Gate remains
   unresolved.
 
@@ -26,7 +29,7 @@ validated.
 | T0 | Canonical coordinates and physical-plane Gaussian renderer | IMPLEMENTED SOFTWARE CONTRACT | `python -m pytest -q tests/render tests/contracts` |
 | T0.5 | Legal sparse episodes, prediction receipts, cost, amplitude gauge | IMPLEMENTED SOFTWARE CONTRACT | `python -m pytest -q tests/contracts tests/integration` |
 | T1-A | Analytic evidence, explicit feature geometry, fixed supports, safe Gaussian bridge | IMPLEMENTED SOFTWARE CONTRACT | `python -m smagm.cli.t1a --steps 4` |
-| T1-B | Teacher-free micro-CNN, structural losses, and cache contracts | IMPLEMENTED SOFTWARE TRANCHE — HUMAN GATE PENDING | `python -m smagm.cli.t1b --help` |
+| T1-B | Teacher-free micro-CNN, structural losses, and cache contracts | IMPLEMENTED SOFTWARE TRANCHE — HUMAN GATE PASSED | `python -m smagm.cli.t1b --help` |
 | T1-C | Sparse context-to-target trainer and E0/E1/E2 experiment orchestration | BLOCKED | not available |
 | T2 | Physical anchor bootstrap and shared tiny local field | BLOCKED | not available |
 | T3 | Anchor-Gaussian propagation and adaptive topology | BLOCKED | not available |
@@ -34,7 +37,8 @@ validated.
 | T5 | Full-grid reconstruction, uncertainty, and isolated export/evaluation | BLOCKED | not available |
 
 The machine-readable quality catalog separates `implementation_status` from
-`human_gate_status`. Run the phase-gate evidence with:
+`human_gate_status`. T1-B has a committed Human Gate decision record. Run the
+phase-gate evidence with:
 
 ```bash
 python scripts/check_phase.py --list
@@ -43,9 +47,8 @@ python scripts/check_phase.py T1B --run --report-dir quality/reports
 ```
 
 The runner may report automated evidence, but only a Human decision may close a
-Human Gate. T1-B's phase verdict therefore remains
-`PENDING_HUMAN_GATE` even when its automated checks pass. Do not treat this
-software tranche as reconstruction success.
+Human Gate. T1-B now reports `PASS` only because that committed Human decision
+record exists. Do not treat this software tranche as reconstruction success.
 
 ## Required workflow for every phase
 

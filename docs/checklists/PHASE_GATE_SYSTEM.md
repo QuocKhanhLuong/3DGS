@@ -62,7 +62,7 @@ implementation:
 - `planned`: requirement exists, but no implementation is authorized.
 
 Human Gate state is separate: current T1-B software is `implemented` with a
-`pending` Human Gate, while T0/T0.5/T1-A are `implemented` with
+committed `passed` Human Gate, while T0/T0.5/T1-A are `implemented` with
 `retrospective_unrecorded` status and T1-C through T5 are `planned` and
 `blocked`.
 

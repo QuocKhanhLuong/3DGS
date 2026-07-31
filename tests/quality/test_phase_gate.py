@@ -39,7 +39,8 @@ def test_catalog_contains_all_phases_and_exact_status_pairs() -> None:
         assert phase["implementation_status"] == "implemented"
         assert phase["human_gate_status"] == "retrospective_unrecorded"
     assert catalog["phases"]["T1B"]["implementation_status"] == "implemented"
-    assert catalog["phases"]["T1B"]["human_gate_status"] == "pending"
+    assert catalog["phases"]["T1B"]["human_gate_status"] == "passed"
+    assert catalog["phases"]["T1B"]["human_gate_record"]
     for phase_name in ("T1C", "T2", "T3", "T4", "T5"):
         phase = catalog["phases"][phase_name]
         assert phase["implementation_status"] == "planned"
@@ -98,21 +99,22 @@ def test_runner_lists_catalog_without_executing_phase_commands() -> None:
     assert completed.returncode == 0, completed.stderr
     assert "T1B" in completed.stdout
     assert "implemented" in completed.stdout
-    assert "pending" in completed.stdout
+    assert "passed" in completed.stdout
     assert "T5" in completed.stdout
 
 
-def test_t1b_dry_run_keeps_human_gate_pending() -> None:
+def test_t1b_dry_run_does_not_rerun_automated_checks() -> None:
     runner = _load_runner()
     catalog = runner._load_catalog(CATALOG)
     report = runner._build_report(catalog, "T1B", run=False)
     assert report["automated_verdict"] == "NOT_RUN"
-    assert report["phase_verdict"] == "PENDING_HUMAN_GATE"
-    assert report["human_gate_status"] == "pending"
+    assert report["phase_verdict"] == "NOT_RUN"
+    assert report["human_gate_status"] == "passed"
+    assert report["human_gate_record"]
     assert report["final_human_gate"]["decision"] is None
 
 
-def test_t1b_automated_pass_still_has_pending_phase_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_t1b_automated_pass_respects_recorded_human_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     runner = _load_runner()
     catalog = runner._load_catalog(CATALOG)
 
@@ -123,7 +125,7 @@ def test_t1b_automated_pass_still_has_pending_phase_verdict(monkeypatch: pytest.
     monkeypatch.setattr(runner, "_evaluate_check", fake_evaluate)
     report = runner._build_report(catalog, "T1B", run=True, allow_dirty=True)
     assert report["automated_verdict"] == "PASS"
-    assert report["phase_verdict"] == "PENDING_HUMAN_GATE"
+    assert report["phase_verdict"] == "PASS"
 
 
 def test_planned_phase_reports_blocked_without_claiming_failure() -> None:
@@ -206,12 +208,13 @@ def test_runner_uses_current_python_interpreter(monkeypatch: pytest.MonkeyPatch)
     assert seen["command"][0] == sys.executable
 
 
-def test_no_report_writes_a_final_human_gate_pass() -> None:
+def test_automated_report_does_not_write_a_decision_field() -> None:
     runner = _load_runner()
     catalog = runner._load_catalog(CATALOG)
     report = runner._build_report(catalog, "T1B", run=False)
     rendered = runner._render_markdown(report)
     assert report["final_human_gate"]["decision"] is None
+    assert report["final_human_gate"]["status"] == "passed"
     assert "Decision: not recorded by the automated runner." in rendered
     assert "Decision: `PASS`" not in rendered
 

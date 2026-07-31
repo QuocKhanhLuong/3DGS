@@ -86,13 +86,13 @@ The main method learns from permanently sparse patient manifests. It does not re
 1. **T0 — implemented software contract:** legal physical operator.
 2. **T0.5 — implemented software contract:** legal episodic contracts.
 3. **T1-A — implemented software contract:** analytic evidence and fixed Gaussian reference.
-4. **T1-B — implemented software tranche; Human Gate pending:** teacher-free encoder, cache, structural objectives, and fixed-topology baseline.
+4. **T1-B — implemented software tranche; Human Gate passed:** teacher-free encoder, cache, structural objectives, and fixed-topology baseline.
 5. **T1-C — blocked:** legal episodic trainer and matched training experiments.
 6. **T2–T5 — blocked:** anchors, fields, memory, routing, reconstruction, and isolated evaluation.
 
 ## Status
 
 T0, T0.5, and T1-A are implemented software contracts. T1-B software is merged
-and its Human Gate is pending. T1-C and T2+ remain blocked. T1-B software
+and its Human Gate is passed. T1-C and T2+ remain blocked. T1-B software
 completion is not reconstruction success; the representation remains a
 hypothesis until the required matched evidence and Human Gate decisions exist.

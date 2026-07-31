@@ -1,6 +1,6 @@
 # T1-B Teacher-Free Encoder Handoff
 
-Status: `IMPLEMENTED SOFTWARE TRANCHE — HUMAN GATE PENDING`
+Status: `IMPLEMENTED SOFTWARE TRANCHE — HUMAN GATE PASSED`
 
 T1-B is an executable software tranche for comparing three compact evidence
 paths behind the same fixed-support and Gaussian-head contract. It is not a
@@ -71,9 +71,11 @@ python scripts/check_phase.py T1B
 
 The automated checklist may be run on a clean committed branch with
 `python scripts/check_phase.py T1B --run --report-dir quality/reports`, but its
-phase verdict remains `PENDING_HUMAN_GATE` when automated checks pass.
+phase verdict is `PASS` because the committed Human Gate decision record exists.
+See [`2026-07-31-t1b-human-gate-decision.md`](../strategies/2026-07-31-t1b-human-gate-decision.md).
 
-The remaining Human Gate questions are:
+The Human Gate decision accepted the following questions for this software
+tranche without turning them into scientific validation claims:
 
 - Are E0/E1/E2 fair in dimensions, fixed supports, Gaussian head,
   initialization, optimization opportunity, and compute accounting?
@@ -84,7 +86,7 @@ The remaining Human Gate questions are:
 
 ## Phase boundary
 
-T1-A is implemented as an executable software contract. T1-B software is
-implemented, but its Human Gate is pending. Software completion does not
-establish representation value. T1-C remains blocked, as do T2+ phases. This
-handoff does not add scaffolding for those later phases.
+T1-A is implemented as an executable software contract. T1-B software and its
+Human Gate are passed. Software completion does not establish representation
+value. T1-C remains blocked, as do T2+ phases. This handoff does not add
+scaffolding for those later phases.

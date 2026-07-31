@@ -38,8 +38,8 @@ contract is frozen and an implementation provides exact evidence.
 
 The catalog stores `implementation_status` separately from `human_gate_status`.
 T0, T0.5, and T1-A are implemented with retrospective Human Gate status;
-T1-B is implemented with a pending Human Gate; T1-C through T5 are planned and
-blocked.
+T1-B is implemented with a committed passed Human Gate; T1-C through T5 are
+planned and blocked.
 
 Automated blockers do not use an aggregate score. One blocker failure prevents
 an automated pass. Agents may collect evidence and recommend a human review,

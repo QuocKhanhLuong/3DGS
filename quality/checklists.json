@@ -84,7 +84,8 @@
     "T1B": {
       "title":"Teacher-free E0/E1/E2 evidence encoders, cache, and structural objectives",
       "implementation_status":"implemented",
-      "human_gate_status":"pending",
+      "human_gate_status":"passed",
+      "human_gate_record":"docs/strategies/2026-07-31-t1b-human-gate-decision.md",
       "prerequisites":["T1A"],
       "authoritative_documents":["docs/codex/T1B_TEACHER_FREE_ENCODER.md","CODEBASE.md"],
       "checks":[

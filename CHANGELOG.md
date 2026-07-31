@@ -11,7 +11,10 @@
 - synchronized AgenTeam role workflow and narrowed the executable pipeline to
   the authorized T1-B software tranche;
 - synchronized strategy, README, reconstruction, and Codex status documents;
-- made no scientific-validation claim and recorded no Human Gate approval.
+- recorded the explicit T1-B Human Gate `PASS` decision without authorizing
+  T1-C or making a scientific-validation claim;
+- made no scientific-validation claim; T1-B `PASS` is a software-gate decision
+  only, while retrospective T0/T0.5/T1-A gates remain unrecorded.
 
 ### Added
 

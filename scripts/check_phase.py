@@ -173,11 +173,12 @@ def _validate_catalog(data: dict[str, Any]) -> None:
             raise CatalogError(f"phase {phase_name} has invalid human_gate_status")
         if phase["implementation_status"] == "planned" and phase["human_gate_status"] != "blocked":
             raise CatalogError(f"planned phase {phase_name} must have a blocked Human Gate")
-        if phase["implementation_status"] == "implemented" and phase["human_gate_status"] not in {
-            "pending",
-            "retrospective_unrecorded",
-        }:
-            raise CatalogError(f"implemented phase {phase_name} has an invalid gate pairing")
+        if phase["implementation_status"] == "implemented" and phase["human_gate_status"] == "blocked":
+            raise CatalogError(f"implemented phase {phase_name} cannot have a blocked Human Gate")
+        if phase["human_gate_status"] in {"passed", "passed_with_conditions", "failed"}:
+            record = phase.get("human_gate_record")
+            if not isinstance(record, str) or not record or not (ROOT / record).is_file():
+                raise CatalogError(f"phase {phase_name} requires a committed human_gate_record")
         if not isinstance(phase["prerequisites"], list):
             raise CatalogError(f"phase {phase_name} prerequisites must be a list")
         unknown = set(phase["prerequisites"]) - phase_names
@@ -380,6 +381,7 @@ def _build_report(
         "title": phase["title"],
         "implementation_status": phase["implementation_status"],
         "human_gate_status": phase["human_gate_status"],
+        "human_gate_record": phase.get("human_gate_record"),
         "repository": {
             "commit": after["commit"],
             "before": before,
@@ -397,6 +399,7 @@ def _build_report(
         "non_claims": phase["non_claims"],
         "final_human_gate": {
             "status": phase["human_gate_status"],
+            "record": phase.get("human_gate_record"),
             "decision": None,
             "decided_by": None,
             "conditions": [],
@@ -413,6 +416,7 @@ def _render_markdown(report: dict[str, Any]) -> str:
         f"- Title: {report['title']}",
         f"- Implementation status: `{report['implementation_status']}`",
         f"- Human Gate status: `{report['human_gate_status']}`",
+        f"- Human Gate record: `{report['human_gate_record'] or 'none'}`",
         f"- Commit: `{repository['commit']}`",
         f"- Dirty before: `{repository['dirty_before']}`",
         f"- Dirty after: `{repository['dirty_after']}`",
@@ -442,6 +446,7 @@ def _render_markdown(report: dict[str, Any]) -> str:
             "## Final Human Gate",
             "",
             f"Status: `{report['final_human_gate']['status']}`",
+            f"Record: `{report['final_human_gate']['record'] or 'none'}`",
             "Decision: not recorded by the automated runner.",
             "",
         ]
@@ -474,6 +479,7 @@ def _print_report(report: dict[str, Any]) -> None:
     print(f"Phase: {report['phase']} — {report['title']}")
     print(f"Implementation status: {report['implementation_status']}")
     print(f"Human Gate status: {report['human_gate_status']}")
+    print(f"Human Gate record: {report['human_gate_record'] or 'none'}")
     print(f"Commit: {repository['commit']}")
     print(f"Dirty before: {repository['dirty_before']}")
     print(f"Dirty after: {repository['dirty_after']}")
