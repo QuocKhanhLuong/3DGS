@@ -25,7 +25,8 @@
     {"id":"G-RENDER-001","category":"renderer","binding":"invariant","severity":"blocker","mode":"human","description":"The low-level renderer remains pure, differentiable, and free of ledger or reveal ownership.","reviewer_role":"reviewer"},
     {"id":"G-FINITE-001","category":"numerics","binding":"contract","severity":"blocker","mode":"human","description":"New public numeric outputs reject or expose non-finite values instead of silently propagating them.","reviewer_role":"qa"},
     {"id":"G-CLAIM-001","category":"claims","binding":"invariant","severity":"blocker","mode":"human","description":"Tests and smoke runs are described as software evidence, not clinical or scientific validation.","reviewer_role":"reviewer"},
-    {"id":"G-REPRO-001","category":"reproducibility","binding":"contract","severity":"major","mode":"human","description":"Exact commit, dirty state, resolved configuration, seeds, environment, and relevant artifact hashes are recorded.","reviewer_role":"reproducibility_auditor"}
+    {"id":"G-REPRO-001","category":"reproducibility","binding":"contract","severity":"major","mode":"human","description":"Exact commit, dirty state, resolved configuration, seeds, environment, and relevant artifact hashes are recorded.","reviewer_role":"reproducibility_auditor"},
+    {"id":"G-DOCS-001","category":"documentation","binding":"contract","severity":"blocker","mode":"pytest","description":"Active documentation links resolve, retired documents stay absent, and active status prose does not use stale phase claims.","target":"tests/quality/test_document_hygiene.py"}
   ],
   "phases": {
     "T0": {
