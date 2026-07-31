@@ -147,7 +147,8 @@ def sample_fixed_supports(
         raise TypeError("features and plane must use T1-A contract types")
     if not isinstance(batch_index, int) or not 0 <= batch_index < features.batch_size:
         raise IndexError("batch_index is outside the feature batch")
-    bound_plane = features.grid_to_plane.input_plane
+    transform = features.grid_to_planes[batch_index]
+    bound_plane = transform.input_plane
     if bound_plane is None:
         raise ValueError("fixed support sampling requires a FeatureGridToPlaneTransform bound to its source PhysicalPlane")
     if plane.canonical_json() != bound_plane.canonical_json():
@@ -171,7 +172,7 @@ def sample_fixed_supports(
     sampled = concatenated[:, index_tensor[:, 0], index_tensor[:, 1]].transpose(0, 1)
     reliability = features.reliability[batch_index, :, index_tensor[:, 0], index_tensor[:, 1]].transpose(0, 1)
     world = [
-        features.grid_to_plane.world_from_feature_vu(plane, float(v), float(u))
+        transform.world_from_feature_vu(bound_plane, float(v), float(u))
         for v, u in valid_indices
     ]
     centers = torch.tensor(world, dtype=dtype, device=device)
@@ -180,7 +181,7 @@ def sample_fixed_supports(
         raise ValueError("the transform-bound source plane requires an observation_id")
     if observation_id is not None and observation_id != resolved_observation_id:
         raise ValueError("observation_id override does not match the transform-bound source plane")
-    source_plane_hash = features.grid_to_plane.source_plane_hash
+    source_plane_hash = transform.source_plane_hash
     return FixedSupportBatch(
         centers_ras_mm=centers,
         feature_vectors=sampled,
@@ -190,7 +191,7 @@ def sample_fixed_supports(
         source_plane_hashes=(source_plane_hash,) * len(valid_indices),
         batch_index=batch_index,
         support_basis_ras=torch.tensor(
-            (plane.axis_u_ras, plane.axis_v_ras, plane.signed_normal_ras),
+            (bound_plane.axis_u_ras, bound_plane.axis_v_ras, bound_plane.signed_normal_ras),
             dtype=dtype,
             device=device,
         ).expand(len(valid_indices), -1, -1),

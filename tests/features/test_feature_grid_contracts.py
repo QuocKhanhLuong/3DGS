@@ -143,7 +143,8 @@ def test_odd_shape_padding_is_explicit_and_never_becomes_support() -> None:
         structural=torch.zeros((1, 1, 3, 4), dtype=torch.float64),
         appearance=torch.zeros((1, 1, 3, 4), dtype=torch.float64),
         reliability=torch.ones((1, 1, 3, 4), dtype=torch.float64),
-        grid_to_plane=transform,
+        grid_to_planes=(transform,),
+        modality_ids=("mri",),
         valid_feature_mask=valid_feature_mask,
     )
     supports = sample_fixed_supports(features, plane, config=FixedSupportConfig(step_vu=(1, 1), max_points=4))
@@ -154,7 +155,8 @@ def test_odd_shape_padding_is_explicit_and_never_becomes_support() -> None:
             structural=torch.zeros((1, 1, 3, 4), dtype=torch.float64),
             appearance=torch.zeros((1, 1, 3, 4), dtype=torch.float64),
             reliability=torch.ones((1, 1, 3, 4), dtype=torch.float64),
-            grid_to_plane=transform,
+            grid_to_planes=(transform,),
+            modality_ids=("mri",),
             valid_feature_mask=torch.ones((1, 1, 3, 4), dtype=torch.bool),
         )
 

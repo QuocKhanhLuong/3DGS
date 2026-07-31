@@ -171,7 +171,8 @@ def test_renderer_reconstruction_loss_backpropagates_through_t1a_evidence_and_he
         structural=analytic.tensor[:, :5],
         appearance=analytic.tensor[:, :1],
         reliability=analytic.tensor[:, 7:8],
-        grid_to_plane=FeatureGridToPlaneTransform((8, 8), (8, 8), input_plane=plane),
+        grid_to_planes=(FeatureGridToPlaneTransform((8, 8), (8, 8), input_plane=plane),),
+        modality_ids=("mri",),
         valid_feature_mask=analytic.valid_mask,
     )
     supports = sample_fixed_supports(features, plane, config=FixedSupportConfig(step_vu=(2, 2), border_vu=(1, 1)))

@@ -27,6 +27,7 @@ class FixedGaussianHeadConfig:
     min_scale_mm: float = 0.5
     max_scale_mm: float = 6.0
     max_off_diagonal_mm: float = 1.0
+    covariance_epsilon: float = 1e-6
     use_reliability_amplitude: bool = True
 
     def __post_init__(self) -> None:
@@ -37,6 +38,7 @@ class FixedGaussianHeadConfig:
         for name in ("min_scale_mm",
             "max_scale_mm",
             "max_off_diagonal_mm",
+            "covariance_epsilon",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
@@ -46,6 +48,8 @@ class FixedGaussianHeadConfig:
             raise ValueError("centre and scale bounds are invalid")
         if self.max_off_diagonal_mm < 0:
             raise ValueError("max_off_diagonal_mm must be non-negative")
+        if self.covariance_epsilon <= 0.0:
+            raise ValueError("covariance_epsilon must be positive")
 
 
 def _center_offset_limits(value: float | tuple[float, float, float]) -> tuple[float, float, float]:
@@ -137,7 +141,8 @@ class FixedGaussianHead(nn.Module):
         return RawFixedGaussianOutput(center, covariance, amplitude, appearance)
 
 
-def _safe_covariance_factor(raw: torch.Tensor, config: FixedGaussianHeadConfig) -> torch.Tensor:
+def _safe_local_covariance_factor(raw: torch.Tensor, config: FixedGaussianHeadConfig) -> torch.Tensor:
+    """Map raw head values to a valid lower factor in the support-local frame."""
     count = raw.shape[0]
     factor = raw.new_zeros((count, 3, 3))
     diagonal_raw = raw[:, (0, 2, 5)]
@@ -150,6 +155,26 @@ def _safe_covariance_factor(raw: torch.Tensor, config: FixedGaussianHeadConfig) 
     factor[:, 2, 1] = off_diagonal[:, 2]
     factor[:, 2, 2] = diagonal[:, 2]
     return factor
+
+
+def _local_factor_to_ras(
+    local_factor: torch.Tensor,
+    support_basis_ras: torch.Tensor,
+    covariance_epsilon: float,
+) -> torch.Tensor:
+    """Rotate local covariance into canonical RAS and re-factor it.
+
+    ``support_basis_ras`` stores rows ``(axis_u, axis_v, signed_normal)``.
+    The epsilon is applied before the differentiable Cholesky so the runtime
+    factor is canonical RAS rather than a local-frame factor.
+    """
+    sigma_local = local_factor @ local_factor.transpose(-1, -2)
+    basis = support_basis_ras
+    sigma_ras = basis.transpose(-1, -2) @ sigma_local @ basis
+    sigma_ras = 0.5 * (sigma_ras + sigma_ras.transpose(-1, -2))
+    identity = torch.eye(3, dtype=sigma_ras.dtype, device=sigma_ras.device)
+    epsilon = torch.as_tensor(covariance_epsilon, dtype=sigma_ras.dtype, device=sigma_ras.device)
+    return torch.linalg.cholesky(sigma_ras + epsilon * identity)
 
 
 def construct_fixed_gaussians(
@@ -170,7 +195,8 @@ def construct_fixed_gaussians(
     local_offsets = local_limits * torch.tanh(raw_output.center_offset_raw)
     world_offsets = torch.einsum("ni,nij->nj", local_offsets, supports.support_basis_ras)
     centers = supports.centers_ras_mm + world_offsets
-    factor = _safe_covariance_factor(raw_output.covariance_raw, config)
+    local_factor = _safe_local_covariance_factor(raw_output.covariance_raw, config)
+    factor = _local_factor_to_ras(local_factor, supports.support_basis_ras, config.covariance_epsilon)
     log_amplitude = raw_output.log_amplitude_raw
     if config.use_reliability_amplitude:
         log_amplitude = log_amplitude + torch.log(supports.reliability.clamp_min(1e-4))
@@ -191,6 +217,10 @@ def construct_fixed_gaussians(
             appearance=appearance,
             appearance_valid=appearance_valid,
             patient_state_index=patient_state_index,
+            # The configured epsilon is already included in the differentiable
+            # RAS Cholesky above.  Keep GaussianBatch's residual representable
+            # epsilon at dtype tiny so it does not apply the policy twice.
+            covariance_epsilon=float(torch.finfo(centers.dtype).tiny),
             primitive_kind=("fixed_support",) * supports.count,
             primitive_id=primitive_ids,
         )

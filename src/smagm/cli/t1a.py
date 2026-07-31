@@ -60,13 +60,13 @@ def run_demo(*, steps: int = 4, device: str = "cpu", dtype: torch.dtype = torch.
         structural=analytic.tensor[:, 0:5],
         appearance=analytic.tensor[:, 0:1],
         reliability=analytic.tensor[:, 7:8],
-        grid_to_plane=FeatureGridToPlaneTransform(
+        grid_to_planes=(FeatureGridToPlaneTransform(
             input_shape_hw=shape_hw,
             feature_shape_hw=shape_hw,
             stride_vu=(1, 1),
             offset_vu_input_pixels=(0.0, 0.0),
             input_plane=context_plane,
-        ),
+        ),),
         modality_ids=("synthetic-mri",),
         valid_feature_mask=analytic.valid_mask,
     )

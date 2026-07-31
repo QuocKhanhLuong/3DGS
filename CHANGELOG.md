@@ -1,6 +1,31 @@
 # Changelog
 
-## Unreleased — 2026-07-29
+## Unreleased — 2026-07-31
+
+### Added
+
+- T1-B teacher-free E0/E1/E2 encoder contracts with common structural,
+  appearance, bounded-reliability, per-item geometry, and explicit topology
+  outputs. E1/E2 use only small standard PyTorch micro-CNN layers.
+- Explicit masked teacher-free structural consistency, appearance sensitivity,
+  reliability regularization, variance-floor diagnostics, and registered
+  cross-modality rejection.
+- Fail-closed in-memory feature-cache keys bound to observation, source plane,
+  encoder/configuration/state, preprocessing, transform, valid topology, dtype,
+  and output channels. Target-derived cache insertion is rejected.
+- CPU synthetic `smagm.cli.t1b` demonstrations for E0, E1, and E2.
+
+### Changed
+
+- T1-A feature maps now bind one source-plane transform and modality ID per
+  batch item; the fixed-support sampler selects only the requested item's
+  geometry and provenance.
+- T1-A local covariance factors are rotated into canonical RAS with a typed
+  differentiable Cholesky epsilon before construction of `GaussianBatch`.
+- Analytic gradient magnitude is exactly zero for zero gradients, and analytic
+  validity is topology-only erosion by the largest local-contrast support.
+
+## Historical Unreleased Notes — 2026-07-29
 
 ### Changed
 

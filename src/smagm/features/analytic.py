@@ -39,6 +39,8 @@ class AnalyticFeatureOutput:
             raise ValueError("valid_mask must have shape [B, 1, H, W]")
         if self.valid_mask.dtype is not torch.bool:
             raise TypeError("valid_mask must be bool")
+        if not bool(self.valid_mask.flatten(1).any(dim=1).all()):
+            raise ValueError("every image requires at least one valid analytic feature location")
         if not bool(torch.isfinite(self.tensor).all()):
             raise ValueError("analytic tensor must be finite")
 
@@ -97,31 +99,48 @@ def _validate_spacing_uv_mm(spacing_uv_mm: Sequence[float]) -> tuple[float, floa
     return spacing
 
 
-def analytic_feature_bank(
-    image: torch.Tensor,
-    valid_mask: torch.Tensor | None = None,
-    *,
-    local_radii: Sequence[int] = (2, 4),
-    spacing_uv_mm: Sequence[float] = (1.0, 1.0),
-    eps: float = 1e-6,
-) -> AnalyticFeatureOutput:
-    """Build the fixed T1-A structural evidence bank.
+def _validate_spacing_batch(
+    spacing_uv_mm: Sequence[float] | Sequence[Sequence[float]], batch_size: int
+) -> tuple[tuple[float, float], ...]:
+    """Normalize either one spacing pair or one pair per batch item."""
+    values = tuple(spacing_uv_mm)
+    if len(values) == 2 and all(isinstance(value, (int, float)) for value in values):
+        single = _validate_spacing_uv_mm(values)  # type: ignore[arg-type]
+        return (single,) * batch_size
+    if len(values) != batch_size:
+        raise ValueError("spacing_uv_mm must be one pair or contain one pair per batch item")
+    return tuple(_validate_spacing_uv_mm(value) for value in values)  # type: ignore[arg-type]
 
-    The operation is differentiable with respect to ``image``.  Replicate
-    padding makes constant images yield zero differential channels at the
-    boundary and keeps the pixel-centre grid unchanged.  ``local_radii`` are
-    physical millimetre radii; ``spacing_uv_mm`` declares the source plane's
-    canonical RAS-mm pixel spacing, so derivatives have intensity/mm units.
+
+def _analytic_valid_mask(mask: torch.Tensor, *, radius_v: int, radius_u: int) -> torch.Tensor:
+    """Erode only around declared invalid pixels, treating image borders as padded-valid.
+
+    The largest analytic neighborhood is the rectangular local-contrast window
+    at ``local_radii[-1]``.  A location is legal iff every in-image pixel in
+    that ``(2 * radius_v + 1) x (2 * radius_u + 1)`` neighborhood is valid.
+    Replicate padding makes out-of-image neighbors legal for all-valid inputs,
+    so this operation does not discard image borders.
     """
+    invalid = (~mask).to(dtype=torch.float32)
+    touched_invalid = F.max_pool2d(
+        invalid,
+        kernel_size=(2 * radius_v + 1, 2 * radius_u + 1),
+        stride=1,
+        padding=(radius_v, radius_u),
+    )
+    return touched_invalid == 0
 
-    image, mask = _validate_image(image, valid_mask)
-    radii = tuple(local_radii)
-    if radii != (2, 4):
-        raise ValueError("the reference channel contract currently requires local_radii=(2, 4)")
-    spacing_u, spacing_v = _validate_spacing_uv_mm(spacing_uv_mm)
-    if isinstance(eps, bool) or not isinstance(eps, (int, float)) or eps <= 0:
-        raise ValueError("eps must be positive")
-    normalized = _masked_standardize(image, mask, float(eps))
+
+def _analytic_feature_bank_single(
+    image: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    radii: tuple[int, int],
+    spacing_uv_mm: tuple[float, float],
+    eps: float,
+) -> AnalyticFeatureOutput:
+    spacing_u, spacing_v = spacing_uv_mm
+    normalized = _masked_standardize(image, mask, eps)
     gradient_u = _replicate_conv2d(
         normalized,
         torch.tensor(((0.0, 0.0, 0.0), (-0.5, 0.0, 0.5), (0.0, 0.0, 0.0))),
@@ -130,7 +149,8 @@ def analytic_feature_bank(
         normalized,
         torch.tensor(((0.0, -0.5, 0.0), (0.0, 0.0, 0.0), (0.0, 0.5, 0.0))),
     ) / spacing_v
-    gradient_magnitude = torch.sqrt(gradient_u.square() + gradient_v.square() + float(eps) ** 2)
+    eps_tensor = torch.as_tensor(eps, dtype=image.dtype, device=image.device)
+    gradient_magnitude = torch.sqrt(gradient_u.square() + gradient_v.square() + eps_tensor.square()) - eps_tensor
     laplacian_u = _replicate_conv2d(
         normalized,
         torch.tensor(((0.0, 0.0, 0.0), (1.0, -2.0, 1.0), (0.0, 0.0, 0.0))),
@@ -140,17 +160,14 @@ def analytic_feature_bank(
         torch.tensor(((0.0, 1.0, 0.0), (0.0, -2.0, 0.0), (0.0, 1.0, 0.0))),
     ) / (spacing_v * spacing_v)
     laplacian = laplacian_u + laplacian_v
-    contrast_r2 = _local_contrast(
-        normalized,
-        radius_v=max(1, int(round(radii[0] / spacing_v))),
-        radius_u=max(1, int(round(radii[0] / spacing_u))),
-    )
-    contrast_r4 = _local_contrast(
-        normalized,
-        radius_v=max(1, int(round(radii[1] / spacing_v))),
-        radius_u=max(1, int(round(radii[1] / spacing_u))),
-    )
-    weight = mask.to(dtype=image.dtype)
+    radius_r2_v = max(1, int(round(radii[0] / spacing_v)))
+    radius_r2_u = max(1, int(round(radii[0] / spacing_u)))
+    radius_r4_v = max(1, int(round(radii[1] / spacing_v)))
+    radius_r4_u = max(1, int(round(radii[1] / spacing_u)))
+    contrast_r2 = _local_contrast(normalized, radius_v=radius_r2_v, radius_u=radius_r2_u)
+    contrast_r4 = _local_contrast(normalized, radius_v=radius_r4_v, radius_u=radius_r4_u)
+    analytic_mask = _analytic_valid_mask(mask, radius_v=radius_r4_v, radius_u=radius_r4_u)
+    weight = analytic_mask.to(dtype=image.dtype)
     channels = (
         normalized,
         gradient_u,
@@ -161,5 +178,52 @@ def analytic_feature_bank(
         contrast_r4,
         weight,
     )
-    tensor = torch.cat(tuple(torch.where(mask, value, torch.zeros_like(value)) for value in channels), dim=1)
-    return AnalyticFeatureOutput(tensor=tensor, valid_mask=mask)
+    tensor = torch.cat(
+        tuple(torch.where(analytic_mask, value, torch.zeros_like(value)) for value in channels), dim=1
+    )
+    return AnalyticFeatureOutput(tensor=tensor, valid_mask=analytic_mask)
+
+
+def analytic_feature_bank(
+    image: torch.Tensor,
+    valid_mask: torch.Tensor | None = None,
+    *,
+    local_radii: Sequence[int] = (2, 4),
+    spacing_uv_mm: Sequence[float] | Sequence[Sequence[float]] = (1.0, 1.0),
+    eps: float = 1e-6,
+) -> AnalyticFeatureOutput:
+    """Build the fixed T1-A structural evidence bank.
+
+    The operation is differentiable with respect to ``image``.  Replicate
+    padding makes constant images yield zero differential channels at the
+    boundary and keeps the pixel-centre grid unchanged.  ``local_radii`` are
+    physical millimetre radii; ``spacing_uv_mm`` declares the source plane's
+    canonical RAS-mm pixel spacing, so derivatives have intensity/mm units.
+    Valid analytic evidence is topologically eroded by the largest declared
+    local-contrast support: for default ``(2, 4)`` this is the rectangle
+    ``radius_u=max(1, round(4 / spacing_u_mm))`` and
+    ``radius_v=max(1, round(4 / spacing_v_mm))``.  Image borders remain legal
+    for all-valid images; only in-image invalid pixels invalidate a location.
+    """
+
+    image, mask = _validate_image(image, valid_mask)
+    radii = tuple(local_radii)
+    if radii != (2, 4):
+        raise ValueError("the reference channel contract currently requires local_radii=(2, 4)")
+    if isinstance(eps, bool) or not isinstance(eps, (int, float)) or eps <= 0:
+        raise ValueError("eps must be positive")
+    spacing_batch = _validate_spacing_batch(spacing_uv_mm, image.shape[0])
+    return_outputs = [
+        _analytic_feature_bank_single(
+            image[index : index + 1],
+            mask[index : index + 1],
+            radii=(int(radii[0]), int(radii[1])),
+            spacing_uv_mm=spacing_batch[index],
+            eps=float(eps),
+        )
+        for index in range(image.shape[0])
+    ]
+    return AnalyticFeatureOutput(
+        tensor=torch.cat([output.tensor for output in return_outputs], dim=0),
+        valid_mask=torch.cat([output.valid_mask for output in return_outputs], dim=0),
+    )

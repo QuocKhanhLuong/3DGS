@@ -12,7 +12,7 @@ def test_constant_image_has_finite_zero_differential_channels() -> None:
     assert torch.allclose(output.tensor[:, 0], torch.zeros_like(output.tensor[:, 0]))
     for channel in (1, 2, 4, 5, 6):
         assert torch.allclose(output.tensor[:, channel], torch.zeros_like(output.tensor[:, channel]), atol=1e-12)
-    assert torch.all(output.tensor[:, 3] > 0)
+    assert torch.allclose(output.tensor[:, 3], torch.zeros_like(output.tensor[:, 3]), atol=1e-12)
     output.tensor.sum().backward()
     assert image.grad is not None
     assert torch.isfinite(image.grad).all()
