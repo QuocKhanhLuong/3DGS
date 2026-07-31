@@ -24,6 +24,11 @@ Current strategy and execution addendum
 - [`reconstruction/phases/`](reconstruction/phases/)
 - [`reconstruction/modules/`](reconstruction/modules/)
 
+### Active plans and designs
+
+- [`plans/2026-07-31-t1c-legal-episodic-trainer-plan.md`](plans/2026-07-31-t1c-legal-episodic-trainer-plan.md) — next implementation candidate; still blocked pending explicit T1-C authorization.
+- [`designs/2026-07-31-t2-anchor-local-field-plan.md`](designs/2026-07-31-t2-anchor-local-field-plan.md) — pre-authorization architecture; implementation remains blocked by T1-C and T1-F/T1-R/T1-M evidence.
+
 ### Software
 
 - [`CODEBASE.md`](../CODEBASE.md)
