@@ -9,18 +9,22 @@ and the currently authorized implementation tranche.
 
 Keep context small. Do not explore the entire repository by default.
 
-## Instruction and document precedence
+## Authority and minimum reading
 
-Before editing, use the smallest applicable document set:
+Use the smallest applicable document set, in this order:
 
 1. Read this file.
-2. Read `README.md` for the repository thesis and current primary task.
-3. Read `docs/codex/README.md` for the current phase status and runnable entry
-   points.
-4. For changes affecting research claims, phase authorization, tranche order,
-   or stop decisions, read
+2. Read `docs/codex/README.md` for the current executable phase status, runnable
+   entry points, and blocked phases.
+3. Read `README.md` only for the repository thesis and high-level project map.
+   Do not rely on its implementation-status section when it conflicts with
+   `docs/codex/README.md`; the root README may lag behind merged code.
+4. For T1-B encoder, cache, conditioning, structural-loss, or fixed-support
+   work, read `docs/codex/T1B_TEACHER_FREE_ENCODER.md`.
+5. For changes affecting research claims, phase authorization, tranche order,
+   Human Gates, or stop decisions, read
    `docs/strategies/2026-07-29-isbi-realignment.md`.
-5. Read only the task-specific plan, reconstruction module, phase document, or
+6. Read only the task-specific plan, reconstruction module, phase document, or
    reproducibility note needed for the requested change.
 
 Do not recursively summarize `docs/`. Files under `docs/meetings/`, historical
@@ -28,14 +32,27 @@ CVPR strategy documents, and old design notes are not authoritative unless the
 user explicitly asks for historical context.
 
 When documents conflict, follow the authority and precedence rules in the ISBI
-realignment strategy. Code presence, passing tests, or an old plan does not by
-itself authorize a later phase.
+realignment strategy. Code presence, a merged pull request, passing tests, or an
+old plan does not by itself authorize the next scientific phase.
+
+## Current executable boundary
+
+Always verify this boundary against `docs/codex/README.md` before editing. At
+the time of this instruction update:
+
+- T0 and T0.5 are implemented software contracts;
+- T1-A is an implemented executable software contract;
+- T1-B code is merged on `main` and remains an in-development software tranche;
+- T1-C and T2+ remain blocked.
+
+Do not describe T1-B as a validated reconstruction result. Its CLI and tests are
+software-contract diagnostics only.
 
 ## Context-efficient repository navigation
 
 Use this sequence before opening source files:
 
-1. Identify the requested behavior, relevant phase, and likely package area.
+1. Identify the requested behavior, active phase, and likely package area.
 2. Use Serena symbolic tools first when Serena MCP is connected:
    `get_symbols_overview`, `find_symbol`, and `find_referencing_symbols`.
 3. Otherwise use targeted `rg` queries for filenames, definitions, imports, and
@@ -60,20 +77,39 @@ tail -n 120 path/to/log
 Do not repeatedly reopen unchanged files. Reuse a concise task summary instead
 of retaining large raw excerpts.
 
+## Task-to-file routing
+
+Prefer these narrow entry points instead of scanning the package:
+
+- physical coordinates and planes: `src/smagm/contracts/coordinates.py`;
+- sparse availability, episode roles, receipts, and cost:
+  `src/smagm/contracts/`;
+- analytic evidence: `src/smagm/features/analytic.py`;
+- T1-B encoder E0/E1/E2: `src/smagm/features/encoder.py`;
+- feature-grid and encoder outputs: `src/smagm/features/contracts.py`;
+- exact feature cache: `src/smagm/features/cache.py`;
+- conditioning utilities: `src/smagm/features/conditioning.py`;
+- deterministic fixed supports: `src/smagm/baselines/fixed_support.py`;
+- fixed Gaussian head and constructor:
+  `src/smagm/baselines/fixed_gaussian.py`;
+- teacher-free structural objectives: `src/smagm/losses/structural.py`;
+- synthetic T1-B executable: `src/smagm/cli/t1b.py`;
+- physical-plane renderer: `src/smagm/renderer.py`.
+
+Read the corresponding focused tests before changing an established contract.
+
 ## Paths and files to avoid
 
 Do not inspect these paths unless the task explicitly requires them:
 
-- `.git/`
-- `.venv/`
-- `.pytest_cache/`
-- `build/`, `dist/`, `htmlcov/`
-- `*.egg-info/`, `__pycache__/`
-- `.agenteam/artifacts/`, `.agenteam/events/`, `.agenteam/gates/`
-- `.agenteam/handoffs/`, `.agenteam/locks/`, `.agenteam/memory/`
-- `.agenteam/reports/`, `.agenteam/runs/`, `.agenteam/state/`
+- `.git/`;
+- `.venv/`, `.pytest_cache/`, `build/`, `dist/`, `htmlcov/`;
+- `*.egg-info/`, `__pycache__/`;
+- `.agenteam/artifacts/`, `.agenteam/events/`, `.agenteam/gates/`;
+- `.agenteam/handoffs/`, `.agenteam/locks/`, `.agenteam/memory/`;
+- `.agenteam/reports/`, `.agenteam/runs/`, `.agenteam/state/`;
 - experiment outputs, logs, caches, generated reports, checkpoints, and local
-  datasets that may be added later
+  datasets that may be added later.
 
 Do not read binary or volumetric data unless explicitly requested, including
 `*.pt`, `*.pth`, `*.ckpt`, `*.npy`, `*.npz`, `*.nii`, `*.nii.gz`, `*.h5`,
@@ -85,7 +121,7 @@ version needed.
 
 ## Scope and phase gates
 
-Before changing code, state internally:
+Before changing code, determine:
 
 - the active phase and authorization source;
 - the files expected to change;
@@ -98,6 +134,7 @@ configs, or abstractions for blocked future phases.
 Unless the current authoritative status and the user's request explicitly
 permit it, do not implement:
 
+- T1-C sparse context-to-target training or E0/E1/E2 experiment orchestration;
 - T2 support-anchor bootstrap or anchor-local fields;
 - T3 anchor-Gaussian propagation or adaptive topology;
 - learned Gaussian birth, split, merge, or prune operations;
@@ -125,8 +162,37 @@ Preserve all applicable contracts when editing:
   upper-bound experiment is requested and authorized.
 
 Do not claim clinical validity, scanner acceleration, safety guarantees,
-recovery of unseen pathology, calibrated uncertainty, novelty, or superiority
-from unit tests or smoke runs.
+recovery of unseen pathology, calibrated uncertainty, novelty, reconstruction
+accuracy, or superiority from unit tests or smoke runs.
+
+## T1-B contracts
+
+For T1-B work, preserve these locked behaviors:
+
+- E0 uses the differentiable analytic bank plus a fixed measurable adapter;
+- E1 uses a shallow raw-image micro-CNN;
+- E2 uses analytic channels as input to the same class of shallow micro-CNN;
+- all variants share one `EncoderFeatureMaps` output contract;
+- defaults are 16 structural channels, 8 appearance channels, and exactly one
+  reliability channel bounded to `[0, 1]`;
+- output strides 1, 2, and 4 use the locked `align_corners=False` half-pixel
+  mapping;
+- odd input shapes are padded only on the right and bottom, and padded feature
+  centres remain invalid;
+- support indices are deterministic, value-independent, and shared across
+  E0/E1/E2;
+- reliability may weight amplitudes or losses but must not select supports;
+- there is no support-to-support communication in T1-B;
+- fixed-Gaussian covariance factors remain canonical-RAS factors after the
+  configured re-factorization policy;
+- feature-cache retrieval is exact-key only and target-derived insertion is
+  rejected;
+- structural objectives remain teacher-free, use legal masks, reject
+  unregistered cross-modality comparisons, and fail on empty legal masks.
+
+Do not add anchors, propagation, routing, learned topology, pseudo-labels,
+teacher distillation, segmentation supervision, or target-pixel leakage to
+T1-B.
 
 ## Implementation rules
 
@@ -140,7 +206,7 @@ from unit tests or smoke runs.
 - Use NumPy and PyTorch consistently with existing code; do not introduce a
   parallel framework for a small convenience.
 - Fail loudly on invalid geometry, illegal reveal order, shape mismatch,
-  unsupported coverage, or non-finite values.
+  unsupported coverage, empty legal comparisons, or non-finite values.
 - Do not hide scientific assumptions inside defaults. Expose them in typed
   configuration or clearly named arguments.
 - When behavior changes, update the nearest authoritative executable handoff or
@@ -153,6 +219,16 @@ During iteration, run the smallest relevant test target with concise output:
 ```bash
 python -m pytest -q tests/<area> --tb=short
 python -m pytest -q tests/path/test_file.py::test_name --tb=short
+```
+
+For T1-B changes, select only the affected checks first:
+
+```bash
+python -m pytest -q tests/features/test_encoder.py --tb=short
+python -m pytest -q tests/features/test_feature_alignment.py --tb=short
+python -m pytest -q tests/features/test_feature_cache.py --tb=short
+python -m pytest -q tests/losses/test_structural_losses.py --tb=short
+PYTHONPATH=src python -m smagm.cli.t1b --variant e2 --steps 1
 ```
 
 Run the full CPU suite once when the change is cross-cutting or before declaring
