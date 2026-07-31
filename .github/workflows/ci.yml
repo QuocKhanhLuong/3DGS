@@ -23,6 +23,10 @@ jobs:
           python -m pip install -e . --no-deps
       - name: Test
         run: python -m pytest -q
+      - name: Validate phase-gate catalog and runner contracts
+        run: |
+          python scripts/check_phase.py --list
+          python -m pytest -q tests/quality --tb=short
       - name: Compile sources and tests
         run: python -m compileall -q src tests
       - name: Require a clean checkout after validation
