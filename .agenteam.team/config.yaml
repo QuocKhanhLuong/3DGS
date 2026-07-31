@@ -3,25 +3,37 @@ isolation: worktree
 
 roles:
   researcher:
-    description: "ISBI/MICCAI full-mechanism novelty and primary-source literature lead"
+    description: "ISBI/MICCAI full-mechanism novelty, theory-to-code, and primary-source literature lead"
     participates_in: [research, strategy]
     can_write: true
     write_scope: ["docs/research/**"]
+    handoff_contract:
+      produces: "Primary-source evidence map: theoretical claim -> reconstruction module -> stable software owner -> experiment or falsification"
+      expects: "Current strategy, relevant docs/reconstruction sections, CODEBASE ownership, and a focused research question"
+      passes_to: "pm for thesis and gate decisions, or architect for module and interface mapping"
 
   pm:
-    description: "ISBI representation-thesis, gates, and stop-rules lead"
+    description: "Scientific-program thesis, claim-to-evidence, Human Gate, and stop-rule lead"
     participates_in: [strategy, t1_decision]
     can_write: true
     write_scope: ["docs/strategies/**"]
+    handoff_contract:
+      produces: "Governance record with falsifiable thesis, claim-to-evidence matrix, authorization boundary, stop/demotion/rollback rule, and unresolved decision"
+      expects: "Research evidence, architecture mapping, executable status, and human authorization context"
+      passes_to: "architect for software-boundary decisions, experiment_lead for matched tests, or Human for gate approval"
 
   architect:
-    description: "Medical geometry, differentiable rendering, and tensor-contract lead"
-    participates_in: [design, t1a_implement]
+    description: "Final software blueprint, package ownership, dependency, geometry, and tensor-contract lead"
+    participates_in: [design, t1a_implement, t1_learned, t1_smoke_review]
     can_write: true
-    write_scope: ["docs/designs/**"]
+    write_scope: ["CODEBASE.md", "docs/designs/**"]
+    handoff_contract:
+      produces: "Architecture decision with stable owner, dependency direction, typed interfaces, preserved contracts, migration boundary, risks, and verification needs"
+      expects: "Strategy authorization, research theory-to-code mapping, and relevant CODEBASE/reconstruction contracts"
+      passes_to: "dev for the authorized implementation slice, qa for contract tests, and reviewer for architecture conformance"
 
   dev:
-    description: "PyTorch medical-imaging research implementation lead"
+    description: "CODEBASE-mapped PyTorch medical-imaging research implementation lead"
     participates_in: [t05_implement, t1a_implement, t1_learned]
     can_write: true
     write_scope:
@@ -32,28 +44,45 @@ roles:
       - "pyproject.toml"
       - "CHANGELOG.md"
       - "docs/plans/**"
+      - "docs/codex/**"
+    handoff_contract:
+      produces: "Implemented CODEBASE responsibility with changed files, preserved contracts, focused tests, executable status update, and remaining boundary"
+      expects: "Authorized tranche, stable CODEBASE owner, typed interface decisions, and current executable status"
+      passes_to: "qa for focused verification, reviewer for adversarial review, and reproducibility_auditor for evidence"
 
   qa:
-    description: "Scientific numeric, leakage, autograd, and regression verification lead"
+    description: "Architecture-contract, scientific-invariant, leakage, numeric, and regression verification lead"
     participates_in: [t05_implement, t1a_implement, t1_learned, t1_experiment]
     can_write: true
     write_scope:
       - "tests/**"
       - "**/*.test.*"
+    handoff_contract:
+      produces: "Blocking test and invariant report naming the stable module, legal/scientific contract, evidence, and remaining boundary"
+      expects: "Implemented authorized slice with explicit interfaces and claimed invariants"
+      passes_to: "reviewer for adversarial interpretation and Human for any gate decision"
 
   reviewer:
-    description: "Independent adversarial top medical-imaging venue reviewer"
+    description: "Independent adversarial scientific and CODEBASE-conformance reviewer"
     participates_in: [t05_review, t1a_review, t1_smoke_review, t1_decision]
     can_write: false
+    handoff_contract:
+      produces: "Structured BLOCK/WARN/NOTE review with theoretical contract, affected code module, evidence, and required fix or decision"
+      expects: "Implementation, focused tests, CODEBASE mapping, strategy boundary, and claim-to-evidence record"
+      passes_to: "Human for final approval or dev/architect for bounded fixes"
 
   medical_data_steward:
-    description: "Permanently sparse manifest, registration, and audit-isolation lead"
-    participates_in: [research, design, t05_review, t1_smoke_review, t1_decision]
+    description: "Sparse-data legality, ownership mapping, registration, and audit-isolation lead"
+    participates_in: [research, design, t05_implement, t05_review, t1_learned, t1_smoke_review, t1_experiment, t1_decision]
     can_write: true
     write_scope: ["docs/protocols/**"]
+    handoff_contract:
+      produces: "Data-legality and code-mapping review covering manifests, normalization, cache, router metadata, missing modalities, licenses, and audit isolation"
+      expects: "Relevant CODEBASE ownership, data/protocol changes, opened-file evidence, and preprocessing provenance"
+      passes_to: "dev/qa for fail-closed fixes, reviewer for review, and Human for any legality veto or gate decision"
 
   experiment_lead:
-    description: "Matched baselines, ablations, statistics, and external-evaluation lead"
+    description: "Matched full-lifecycle experiments, ablations, statistics, and external-evaluation lead"
     participates_in: [strategy, t1_learned, t1_experiment]
     can_write: true
     write_scope:
@@ -61,18 +90,27 @@ roles:
       - "configs/t1/**"
       - "configs/experiments/**"
       - "docs/experiments/**"
+    handoff_contract:
+      produces: "Matched experiment manifest and report locking legal data, geometry, budgets, primitive/complexity accounting, seeds, hardware, evaluation, and claim interpretation"
+      expects: "Authorized hypothesis, stable CODEBASE module mapping, resolved configuration, and confounder policy"
+      passes_to: "qa for validation, reproducibility_auditor for provenance, and pm/reviewer for scientific decision"
 
   reproducibility_auditor:
-    description: "Independent provenance, environment, compute, and artifact auditor"
+    description: "Independent CODEBASE, state-schema, provenance, environment, compute, and artifact auditor"
     participates_in:
       - design
       - t05_review
       - t1a_review
+      - t1_learned
       - t1_smoke_review
       - t1_experiment
       - t1_decision
     can_write: true
     write_scope: ["docs/reproducibility/**"]
+    handoff_contract:
+      produces: "Independent provenance report with commit, CODEBASE/state schema, config, manifest, cache, artifact, environment, hardware, serialization, trajectory, and audit-isolation evidence"
+      expects: "Resolved implementation/experiment artifacts, authorization record, opened-file ledger, and serialized outputs"
+      passes_to: "reviewer and Human for gate evidence; dev/experiment_lead for bounded reproducibility fixes"
 
 final_verify:
   - "python3 -m pytest -q"
@@ -97,7 +135,7 @@ pipeline:
       verify: "test -f docs/designs/2026-07-29-t05-t1-isbi-design-delta.md"
 
     - name: t05_implement
-      roles: [dev, qa]
+      roles: [dev, qa, medical_data_steward]
       gate: auto
       max_retries: 2
       criteria:
@@ -137,7 +175,7 @@ pipeline:
       verify: "python3 -m pytest -q"
 
     - name: t1_learned
-      roles: [dev, qa, experiment_lead]
+      roles: [dev, qa, architect, medical_data_steward, experiment_lead, reproducibility_auditor]
       gate: auto
       max_retries: 2
       criteria:
@@ -156,13 +194,13 @@ pipeline:
       verify: "python3 -m pytest -q"
 
     - name: t1_smoke_review
-      roles: [reviewer, medical_data_steward, reproducibility_auditor]
+      roles: [reviewer, architect, medical_data_steward, reproducibility_auditor]
       gate: human
       rework_to: t1_learned
       verify: "python3 -m pytest -q"
 
     - name: t1_experiment
-      roles: [experiment_lead, qa, reproducibility_auditor]
+      roles: [experiment_lead, qa, medical_data_steward, reproducibility_auditor]
       gate: auto
 
     - name: t1_decision
@@ -173,16 +211,16 @@ pipeline:
   profiles:
     discovery:
       stages: [research, strategy, design]
-      hints: [novelty, literature, architecture, paper scope]
+      hints: [full-mechanism novelty, CODEBASE theory-to-code mapping, architecture, paper scope]
     t05:
       stages: [t05_implement, t05_review]
-      hints: [episode assignment, prediction receipt, amplitude gauge, legality]
+      hints: [CODEBASE contracts/data ownership, episode assignment, prediction receipt, amplitude gauge, legality]
     t1a:
       stages: [t1a_implement, t1a_review]
-      hints: [analytic features, feature alignment, fixed support, safe Gaussian]
+      hints: [features and baselines ownership, analytic features, feature alignment, fixed support, safe Gaussian]
     t1:
       stages: [t1_learned, t1_smoke_review, t1_experiment, t1_decision]
-      hints: [teacher-free encoder, matched baselines, lesion fidelity]
+      hints: [CODEBASE-mapped features/losses/training ownership, teacher-free encoder, matched baselines, lesion fidelity, reproducibility]
     paper:
       stages:
         - research
@@ -196,4 +234,4 @@ pipeline:
         - t1_smoke_review
         - t1_experiment
         - t1_decision
-      hints: [ISBI, reconstruction, ablation, external evaluation, submission]
+      hints: [ISBI, CODEBASE lifecycle, reconstruction, ablation, external evaluation, submission]
