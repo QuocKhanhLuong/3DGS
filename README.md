@@ -27,11 +27,21 @@ later extensions after the static representation has passed matched baselines.
 
 ## Start here
 
-- [`docs/reconstruction/README.md`](docs/reconstruction/README.md) — long-horizon reconstruction package with the current ISBI precedence notice.
+- [`docs/strategies/2026-07-31-execution-status-addendum.md`](docs/strategies/2026-07-31-execution-status-addendum.md) — live executable status addendum; it does not rewrite the dated strategy.
+- [`docs/reconstruction/README.md`](docs/reconstruction/README.md) — theoretical reconstruction backbone.
+- [`CODEBASE.md`](CODEBASE.md) — final theory-to-code architecture, ownership, and dependency direction.
+- [`docs/codex/README.md`](docs/codex/README.md) — executable handoffs and current software/Human Gate matrix.
+- [`quality/README.md`](quality/README.md) and [`docs/checklists/PHASE_GATE_SYSTEM.md`](docs/checklists/PHASE_GATE_SYSTEM.md) — machine-readable and human-readable gate evidence.
 - [`docs/reconstruction/FULL_FLOW.md`](docs/reconstruction/FULL_FLOW.md) — complete four-phase flow.
 - [`docs/reconstruction/PROOFREAD_NOTES.md`](docs/reconstruction/PROOFREAD_NOTES.md) — phase-by-phase review before implementation.
 - [`docs/strategies/2026-07-29-isbi-realignment.md`](docs/strategies/2026-07-29-isbi-realignment.md) — authoritative venue, thesis, tranche, gate, and claim policy.
 - [`docs/plans/2026-07-29-t05-t1-teacher-free-encoder-fixed-gaussian-baseline.md`](docs/plans/2026-07-29-t05-t1-teacher-free-encoder-fixed-gaussian-baseline.md) — approved T0.5/T1 implementation plan.
+
+The authority and reading order is:
+
+```text
+strategy/addendum → docs/reconstruction → CODEBASE.md → docs/codex → quality system
+```
 
 ## Current primary task
 
@@ -73,16 +83,16 @@ The main method learns from permanently sparse patient manifests. It does not re
 
 ## Current implementation order
 
-1. **T0 — completed:** legal physical operator.
-2. **T0.5 — next, human-gated:** legal episodic training corrections.
-3. **T1 — after T0.5-L:** teacher-free encoder and fixed-topology Gaussian baseline.
-4. **T2 — deferred:** support-anchor bootstrap and tiny local structural field.
-5. **T3 — deferred:** anchored Gaussian propagation.
-6. **T4 — deferred:** active trajectory.
-7. **T5 — deferred:** final full-volume export and isolated audit evaluation.
+1. **T0 — implemented software contract:** legal physical operator.
+2. **T0.5 — implemented software contract:** legal episodic contracts.
+3. **T1-A — implemented software contract:** analytic evidence and fixed Gaussian reference.
+4. **T1-B — implemented software tranche; Human Gate pending:** teacher-free encoder, cache, structural objectives, and fixed-topology baseline.
+5. **T1-C — blocked:** legal episodic trainer and matched training experiments.
+6. **T2–T5 — blocked:** anchors, fields, memory, routing, reconstruction, and isolated evaluation.
 
 ## Status
 
-T0 is complete. The repository is at the Human Gate before T0.5. No T2+
-implementation is authorized by the current tranche. The representation remains
-a hypothesis until the matched T1 reconstruction and lesion-fidelity gates pass.
+T0, T0.5, and T1-A are implemented software contracts. T1-B software is merged
+and its Human Gate is pending. T1-C and T2+ remain blocked. T1-B software
+completion is not reconstruction success; the representation remains a
+hypothesis until the required matched evidence and Human Gate decisions exist.

@@ -5,6 +5,11 @@ Status: authoritative strategy; Human Gate 1 approved for Stage 2 T0.5 only
 Owner: PM / scientific-program lead
 Primary venue: ISBI 2027, with medical-imaging validity standards aligned to ISBI/MICCAI
 
+> **Executable-status precedence notice (2026-07-31).** The dated
+> authorization history and scientific stop rules below remain unchanged. For
+> the repository's current implementation and Human Gate state, see the
+> [execution-status addendum](2026-07-31-execution-status-addendum.md).
+
 ## 1. Authority and precedence
 
 This document is the governing research and implementation strategy for the
