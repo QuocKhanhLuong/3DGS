@@ -115,8 +115,8 @@ T1-B or T2+ code was added.
 T1-B software and its committed Human Gate are passed. T1-A remains the
 maintained analytic attribution and regression baseline. The T1-B software
 merge and Human Gate did not replace the T1-A baseline or establish
-reconstruction accuracy. T1-C remains blocked and requires separate
-authorization.
+reconstruction accuracy. T1-C was subsequently authorized and implemented
+under its separate handoff; T2 remains blocked.
 
 The retrospective T1-A evidence requirements remain:
 

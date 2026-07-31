@@ -30,7 +30,7 @@ validated.
 | T0.5 | Legal sparse episodes, prediction receipts, cost, amplitude gauge | IMPLEMENTED SOFTWARE CONTRACT | `python -m pytest -q tests/contracts tests/integration` |
 | T1-A | Analytic evidence, explicit feature geometry, fixed supports, safe Gaussian bridge | IMPLEMENTED SOFTWARE CONTRACT | `python -m smagm.cli.t1a --steps 4` |
 | T1-B | Teacher-free micro-CNN, structural losses, and cache contracts | IMPLEMENTED SOFTWARE TRANCHE — HUMAN GATE PASSED | `python -m smagm.cli.t1b --help` |
-| T1-C | Sparse context-to-target trainer and E0/E1/E2 experiment orchestration | BLOCKED | not available |
+| T1-C | Sparse context-to-target trainer and E0/E1/E2 experiment orchestration | IMPLEMENTED SOFTWARE TRANCHE — HUMAN GATE PENDING | `python scripts/train.py --help` |
 | T2 | Physical anchor bootstrap and shared tiny local field | BLOCKED | not available |
 | T3 | Anchor-Gaussian propagation and adaptive topology | BLOCKED | not available |
 | T4 | Legal active sequence-slice trajectory | BLOCKED | not available |
@@ -49,6 +49,12 @@ python scripts/check_phase.py T1B --run --report-dir quality/reports
 The runner may report automated evidence, but only a Human decision may close a
 Human Gate. T1-B now reports `PASS` only because that committed Human decision
 record exists. Do not treat this software tranche as reconstruction success.
+
+T1-C has separate Human authorization to implement and now has executable
+software evidence, but its Human Gate remains pending. Run
+`python scripts/check_phase.py T1C`; T2 remains blocked regardless of local
+T1-C test results until T1-F/T1-R/T1-M evidence and an explicit T2 decision
+exist.
 
 ## Required workflow for every phase
 

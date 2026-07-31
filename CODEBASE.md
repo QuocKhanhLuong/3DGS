@@ -204,10 +204,10 @@ It must never contain model architecture.
 | File | Status | Responsibility |
 |---|---|---|
 | `manifest.py` | IMPLEMENTED | Focused exports and helpers for sparse manifests. |
-| `io.py` | PLANNED | Decode legally opened observation payloads into tensors while preserving source metadata. No direct arbitrary-path reads. |
-| `normalization.py` | PLANNED | Context-only normalization, inverse-normalization records, modality policies, and hashable preprocessing configuration. |
-| `registration.py` | PLANNED | Registration metadata and confidence validation; no registration model hidden inside loaders. |
-| `episodes.py` | PLANNED | Deterministic sampling of legal `EpisodeAssignment` objects from a fixed manifest. It returns IDs and metadata, not target pixels. |
+| `io.py` | IMPLEMENTED | Decode legally opened NumPy plane bytes into tensors while preserving source metadata. No direct arbitrary-path reads. |
+| `normalization.py` | IMPLEMENTED/PARTIAL | Context-only normalization records, explicit unseen-modality policy, and hashable preprocessing configuration. Inverse-normalization/export policy remains future work. |
+| `registration.py` | IMPLEMENTED/PARTIAL | Registration metadata and confidence validation; no registration model hidden inside loaders. Dataset-specific overlap products remain future work. |
+| `episodes.py` | IMPLEMENTED | Deterministic sampling of legal `EpisodeAssignment` objects from a fixed manifest. It returns IDs and metadata, not target pixels. |
 | `cohorts.py` | PLANNED | Training, lesion-validation, and sealed final-audit cohort declarations and isolation checks. |
 
 Data code may depend on `contracts/`; it must not depend on `features/`,
@@ -239,11 +239,11 @@ an optimizer.
 | File | Status | Responsibility |
 |---|---|---|
 | `structural.py` | PARTIAL | Structural consistency, appearance sensitivity, reliability regularization, variance-floor, and registered cross-modality comparison. Final scope includes explicit spatial equivariance, covariance penalty, and local differential preservation. |
-| `reconstruction.py` | PLANNED | Supported-mask-aware intensity losses and gradient/frequency-sensitive target-plane losses. |
+| `reconstruction.py` | IMPLEMENTED | Supported-mask-aware intensity losses and optional gradient/frequency-sensitive target-plane losses with typed empty-mask behavior. |
 | `field.py` | PLANNED | Field overlap, gradient regularity, Eikonal/sign/level-set terms when scientifically authorized. |
 | `gaussian.py` | PLANNED | Scale, displacement, coverage, overlap, complexity, and topology acceptance regularizers. |
 | `calibration.py` | PLANNED | Explicit uncertainty calibration objectives and diagnostics. |
-| `compose.py` | PLANNED | Typed, switchable objective composition and component logging. |
+| `compose.py` | IMPLEMENTED/PARTIAL | Typed, switchable reconstruction/structural objective composition. Field, Gaussian, and calibration terms remain blocked with their owning phases. |
 
 A loss being implemented does not imply that its corresponding scientific gate
 has passed.
@@ -355,13 +355,13 @@ Lower-level packages must not import `training/`.
 
 | File | Status | Responsibility |
 |---|---|---|
-| `episode.py` | PLANNED | Legal context-only state construction, target metadata exposure, commit, render, receipt registration, reveal, and live-loss handoff. |
-| `objective.py` | PLANNED | Build the switchable predictive, structural, field, Gaussian, and calibration objective from typed results. |
-| `trainer.py` | PLANNED | Optimizer, AMP policy, gradient handling, checkpointing, validation, and bounded logging. |
-| `schedule.py` | PLANNED | Structural warm-up, joint reconstruction, and reconstruction-dominant refinement without encoding phase names into model APIs. |
-| `sampling.py` | PLANNED | Deterministic patient/episode/target sampling and matched schedules across variants. |
-| `metrics.py` | PLANNED | Training diagnostics: unsupported fraction, collapse, feature alignment, gradient health, memory size, and compute. |
-| `provenance.py` | PLANNED | Resolved config, commit, manifest, assignment, environment, hardware, and artifact bindings. |
+| `episode.py` | IMPLEMENTED | Legal context-only state construction, target metadata exposure, commit, render, receipt registration, reveal, and live-loss handoff. |
+| `objective.py` | IMPLEMENTED/PARTIAL | Builds the switchable predictive and authorized structural objective from typed results. Later field, Gaussian, and calibration terms remain blocked. |
+| `trainer.py` | IMPLEMENTED/PARTIAL | Optimizer, declared precision, gradient accumulation/clipping, safe checkpoints, and bounded step reporting. Long-running validation/early-stopping orchestration remains experiment policy. |
+| `schedule.py` | IMPLEMENTED/PARTIAL | Typed structural warm-up, joint reconstruction, and reconstruction-dominant refinement policy without phase-shaped model APIs. |
+| `sampling.py` | IMPLEMENTED | Deterministic matched episode/target schedules across E0/E1/E2. |
+| `metrics.py` | IMPLEMENTED/PARTIAL | Gradient health and parameter diagnostics; full experiment-level collapse, latency, and memory aggregation remains pending real experiments. |
+| `provenance.py` | IMPLEMENTED/PARTIAL | Commit, dirty state, config, manifest, split, assignment, seed, environment, checkpoint, and artifact bindings. Full immutable experiment-directory serialization remains pending real runs. |
 
 A final legal training step is:
 
@@ -455,11 +455,12 @@ Final CLIs are thin orchestration layers. Scientific logic belongs in packages.
 |---|---|---|
 | `cli/t1a.py` | DIAGNOSTIC | Synthetic analytic-to-fixed-Gaussian contract check. Retain as a bounded diagnostic or later move under `cli/debug/`; do not treat it as final architecture. |
 | `cli/t1b.py` | DIAGNOSTIC | Synthetic E0/E1/E2 render/backward contract check. It is not the legal joint trainer. |
-| `cli/train.py` | PLANNED | Parse resolved config and call `training.Trainer`. |
+| `cli/train.py` | DIAGNOSTIC | Bounded synthetic legal E0/E1/E2 optimizer path with provenance. Final real-data config resolution remains experiment work. |
 | `cli/reconstruct.py` | PLANNED | Build/update patient state and serialize a reconstruction package. |
 | `cli/evaluate.py` | PLANNED | Evaluate serialized predictions on a declared non-sealed or sealed cohort. |
 | `cli/audit.py` | PLANNED | Verify hashes, opened-file ledgers, environment, and claim evidence. |
-| `scripts/*.py` | PLANNED | Minimal executable wrappers only; no duplicate training or model logic. |
+| `scripts/train.py` | IMPLEMENTED | Thin source-checkout wrapper for the T1-C diagnostic; contains no model logic. |
+| other `scripts/*.py` | PLANNED | Minimal executable wrappers only; no duplicate training or model logic. |
 
 ### 7.17 Quality and phase-gate governance infrastructure
 
@@ -684,6 +685,16 @@ NOT YET COMPLETE
 ├── full-volume reconstruction and export
 └── isolated medical-fidelity and final-audit evaluation
 ```
+
+### 13.1 Executable T1-C delta — 2026-07-31
+
+After the dated T1-B snapshot above, the explicitly authorized T1-C software
+tranche added manifest-bound plane decoding, context-only preprocessing,
+deterministic matched episode schedules, supported-mask reconstruction
+objectives, receipt-gated legal optimizer steps, checkpoint/provenance
+contracts, and the synthetic `smagm.cli.train` diagnostic. Its Human Gate and
+T1-F/T1-R/T1-M scientific evidence remain pending. No T2 package, anchor,
+field, propagation, routing, or full-volume implementation exists.
 
 ## 14. Phase-to-code implementation map
 

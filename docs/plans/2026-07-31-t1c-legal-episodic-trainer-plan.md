@@ -1,7 +1,7 @@
 # T1-C Plan — Legal Episodic Trainer and Matched T1 Attribution
 
 Date: 2026-07-31  
-Status: **PLAN READY — IMPLEMENTATION BLOCKED PENDING EXPLICIT T1-C AUTHORIZATION**  
+Status: **IMPLEMENTED SOFTWARE PLAN — HUMAN GATE PENDING**
 Depends on: T1-B implemented software tranche and committed Human Gate `PASS`  
 Stable owners: `src/smagm/data/`, `src/smagm/losses/`, `src/smagm/training/`, `configs/`, `experiments/`
 
@@ -29,19 +29,18 @@ The governing references are:
 
 ## 2. Authorization boundary
 
-This document is an implementation plan, not authorization.
+This document remains the implementation plan, not a Human Gate decision.
 
-T1-C may begin only after an explicit Human decision opens the tranche. The
-existing T1-B Human Gate proves that the T1-B software contract is accepted; it
-does not automatically authorize trainer implementation or establish that the
-representation improves reconstruction.
+The repository owner explicitly authorized the T1-C implementation tranche on
+2026-07-31. The existing T1-B Human Gate and that implementation authorization
+do not establish that the representation improves reconstruction.
 
-Until T1-C is explicitly authorized:
+The completed implementation remains bounded as follows:
 
-- no `src/smagm/training/` implementation is added;
-- no T1-C config or experiment is activated;
+- `src/smagm/training/` contains only the fixed-topology T1-C trainer;
+- T1-C config and synthetic diagnostics make software claims only;
 - no T2 package or placeholder is created;
-- `docs/codex/README.md` continues to report T1-C as `BLOCKED`.
+- `docs/codex/README.md` reports T1-C as implemented with Human Gate pending.
 
 ## 3. Scientific and software scope
 
@@ -435,9 +434,9 @@ It is not reconstruction evidence by itself.
 
 ## 12. Quality checklist activation
 
-When implementation is authorized, convert the existing T1-C `planned` checks
-in `quality/checklists.json` into exact `pytest`, `command`, or `file` evidence.
-Add checks for:
+The implemented tranche converts the T1-C `planned` checks in
+`quality/checklists.json` into exact `pytest`, `command`, or `file` evidence
+covering:
 
 - legal episode state machine;
 - prediction-before-reveal;
@@ -523,5 +522,5 @@ routing, full-volume reconstruction, or T2+ placeholders. Stop when a required
 scientific choice is not frozen instead of inventing it.
 ```
 
-Until explicit authorization is recorded, this section is a future handoff
-boundary only and must not be executed as an implementation request.
+This boundary governed the implemented tranche and remains the scope limit for
+T1-C rework while its Human Gate is pending.

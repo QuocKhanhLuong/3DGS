@@ -16,6 +16,7 @@ Current strategy and execution addendum
 - [`strategies/2026-07-29-isbi-realignment.md`](strategies/2026-07-29-isbi-realignment.md)
 - [`strategies/2026-07-31-execution-status-addendum.md`](strategies/2026-07-31-execution-status-addendum.md)
 - [`strategies/2026-07-31-t1b-human-gate-decision.md`](strategies/2026-07-31-t1b-human-gate-decision.md)
+- [`strategies/2026-07-31-t1c-implementation-authorization.md`](strategies/2026-07-31-t1c-implementation-authorization.md)
 
 ### Theory
 
@@ -26,8 +27,8 @@ Current strategy and execution addendum
 
 ### Active plans and designs
 
-- [`plans/2026-07-31-t1c-legal-episodic-trainer-plan.md`](plans/2026-07-31-t1c-legal-episodic-trainer-plan.md) — next implementation candidate; still blocked pending explicit T1-C authorization.
-- [`designs/2026-07-31-t2-anchor-local-field-plan.md`](designs/2026-07-31-t2-anchor-local-field-plan.md) — pre-authorization architecture; implementation remains blocked by T1-C and T1-F/T1-R/T1-M evidence.
+- [`plans/2026-07-31-t1c-legal-episodic-trainer-plan.md`](plans/2026-07-31-t1c-legal-episodic-trainer-plan.md) — implemented software plan; Human Gate and T1-F/T1-R/T1-M evidence remain pending.
+- [`designs/2026-07-31-t2-anchor-local-field-plan.md`](designs/2026-07-31-t2-anchor-local-field-plan.md) — pre-authorization architecture; implementation remains blocked by T1-F/T1-R/T1-M evidence and an explicit T2 decision.
 
 ### Software
 
@@ -35,6 +36,7 @@ Current strategy and execution addendum
 - [`codex/README.md`](codex/README.md)
 - [`codex/T1A_EXECUTABLE_REFERENCE.md`](codex/T1A_EXECUTABLE_REFERENCE.md)
 - [`codex/T1B_TEACHER_FREE_ENCODER.md`](codex/T1B_TEACHER_FREE_ENCODER.md)
+- [`codex/T1C_EPISODIC_TRAINER.md`](codex/T1C_EPISODIC_TRAINER.md)
 
 ### Research
 
