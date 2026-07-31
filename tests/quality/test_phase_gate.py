@@ -126,6 +126,8 @@ def test_t1b_automated_pass_respects_recorded_human_gate(monkeypatch: pytest.Mon
     report = runner._build_report(catalog, "T1B", run=True, allow_dirty=True)
     assert report["automated_verdict"] == "PASS"
     assert report["phase_verdict"] == "PASS"
+    assert not report["pending_reviewer_roles"]
+    assert all(item["status"] != "PENDING_HUMAN" for item in report["results"])
 
 
 def test_planned_phase_reports_blocked_without_claiming_failure() -> None:

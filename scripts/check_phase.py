@@ -333,6 +333,11 @@ def _build_report(
     execution_blocked = run and before["dirty"] and not allow_dirty
     checks = list(catalog["global_checks"]) + list(phase["checks"])
     results = [_evaluate_check(check, run=run, execution_blocked=execution_blocked) for check in checks]
+    if phase["human_gate_status"] in {"passed", "passed_with_conditions", "failed"}:
+        for item in results:
+            if item["status"] == "PENDING_HUMAN":
+                item["status"] = "RECORDED_HUMAN"
+                item["human_gate_record"] = phase["human_gate_record"]
     after = _git_metadata()
 
     if execution_blocked:
