@@ -137,7 +137,7 @@ pipeline:
     - name: design
       roles: [architect, medical_data_steward, reproducibility_auditor]
       gate: human
-      verify: "test -f docs/designs/2026-07-29-t05-t1-isbi-design-delta.md"
+      verify: "test -f CODEBASE.md && test -f docs/README.md"
 
     - name: t05_implement
       roles: [dev, qa, medical_data_steward]

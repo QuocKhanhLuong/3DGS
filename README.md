@@ -27,15 +27,12 @@ later extensions after the static representation has passed matched baselines.
 
 ## Start here
 
-- [`docs/strategies/2026-07-31-execution-status-addendum.md`](docs/strategies/2026-07-31-execution-status-addendum.md) — live executable status addendum; it does not rewrite the dated strategy.
+- [`docs/README.md`](docs/README.md) — canonical active-document index.
+- [`docs/strategies/2026-07-31-execution-status-addendum.md`](docs/strategies/2026-07-31-execution-status-addendum.md) — current executable status.
 - [`docs/reconstruction/README.md`](docs/reconstruction/README.md) — theoretical reconstruction backbone.
-- [`CODEBASE.md`](CODEBASE.md) — final theory-to-code architecture, ownership, and dependency direction.
-- [`docs/codex/README.md`](docs/codex/README.md) — executable handoffs and current software/Human Gate matrix.
-- [`quality/README.md`](quality/README.md) and [`docs/checklists/PHASE_GATE_SYSTEM.md`](docs/checklists/PHASE_GATE_SYSTEM.md) — machine-readable and human-readable gate evidence.
-- [`docs/reconstruction/FULL_FLOW.md`](docs/reconstruction/FULL_FLOW.md) — complete four-phase flow.
-- [`docs/reconstruction/PROOFREAD_NOTES.md`](docs/reconstruction/PROOFREAD_NOTES.md) — phase-by-phase review before implementation.
-- [`docs/strategies/2026-07-29-isbi-realignment.md`](docs/strategies/2026-07-29-isbi-realignment.md) — authoritative venue, thesis, tranche, gate, and claim policy.
-- [`docs/plans/2026-07-29-t05-t1-teacher-free-encoder-fixed-gaussian-baseline.md`](docs/plans/2026-07-29-t05-t1-teacher-free-encoder-fixed-gaussian-baseline.md) — approved T0.5/T1 implementation plan.
+- [`CODEBASE.md`](CODEBASE.md) — final software architecture and ownership.
+- [`docs/codex/README.md`](docs/codex/README.md) — executable status and maintained handoffs.
+- [`quality/README.md`](quality/README.md) — machine-readable and human-readable gate evidence.
 
 The authority and reading order is:
 
@@ -45,8 +42,8 @@ strategy/addendum → docs/reconstruction → CODEBASE.md → docs/codex → qua
 
 ## Current primary task
 
-**Legal episodic sparse training followed by a teacher-free encoder and
-fixed-topology Gaussian baseline.**
+**T1-B software and its Human Gate are complete; T1-C is the next scientific
+implementation candidate but remains blocked until separately authorized.**
 
 The main method learns from permanently sparse patient manifests. It does not require teacher distillation or complete-volume targets. Within a training episode, only context slices enter the patient state; acquired sparse target slices are revealed only after rendering. Fully sampled volumes, when available, are isolated for audit evaluation and privileged upper-bound ablations.
 
@@ -70,7 +67,6 @@ The main method learns from permanently sparse patient manifests. It does not re
 | Document | Scope |
 |---|---|
 | `docs/reconstruction/FULL_FLOW.md` | Complete system flow and global state contracts |
-| `docs/reconstruction/PROOFREAD_NOTES.md` | Four-phase review and code-entry checklist |
 | `docs/reconstruction/phases/01_DIRECT_SPARSE_TRAINING.md` | Teacher-free permanently sparse training |
 | `docs/reconstruction/phases/02_INITIAL_ANCHOR_BOOTSTRAP.md` | Initial observation selection, provisional anchors, local fields, and Gaussian initialization |
 | `docs/reconstruction/phases/03_ACTIVE_TRAJECTORY_UPDATE.md` | Multi-wave query selection and incremental state update |

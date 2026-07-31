@@ -76,13 +76,12 @@ tests/baselines/
 You are working on QuocKhanhLuong/3DGS T1-A only.
 
 Read:
+- CODEBASE.md
 - docs/reconstruction/README.md
-- docs/reconstruction/FULL_FLOW.md
 - docs/reconstruction/modules/EVIDENCE_ENCODER.md
-- docs/designs/2026-07-29-t05-t1-isbi-design-delta.md
-- docs/plans/2026-07-29-t05-t1-teacher-free-encoder-fixed-gaussian-baseline.md
 - docs/codex/README.md
-- docs/codex/T1A_EXECUTABLE_REFERENCE.md
+- quality/checklists.json
+- the nearest T1-A source files and tests
 
 Inspect all current T0/T0.5 contracts and the T1-A files before editing.
 
@@ -113,10 +112,11 @@ T1-B or T2+ code was added.
 
 ## Retrospective evidence and maintained baseline
 
-T1-B now exists as an implemented software tranche, with its Human Gate still
-pending. T1-A remains the maintained analytic diagnostic baseline and is kept
-for attribution and regression checks. The T1-B software merge did not replace
-the T1-A baseline or establish reconstruction accuracy.
+T1-B software and its committed Human Gate are passed. T1-A remains the
+maintained analytic attribution and regression baseline. The T1-B software
+merge and Human Gate did not replace the T1-A baseline or establish
+reconstruction accuracy. T1-C remains blocked and requires separate
+authorization.
 
 The retrospective T1-A evidence requirements remain:
 

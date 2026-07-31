@@ -24,10 +24,10 @@ When another document conflicts with this strategy:
 3. reconstruction phase and module documents remain useful design references
    only where they are consistent with items 1 and 2.
 
-In particular, `docs/strategies/2026-07-29-cvpr-priorities.md` and any other
-CVPR-first strategy document are non-authoritative on conflict. They are
-historical research records, not permission to make active routing the paper
-headline or to implement T2+ work.
+In particular, superseded CVPR-first strategy material is non-authoritative on
+conflict. It is historical research context, not permission to make active
+routing the paper headline or to implement T2+ work. Superseded material
+remains available through Git history.
 
 ## 2. Venue framing and single paper thesis
 

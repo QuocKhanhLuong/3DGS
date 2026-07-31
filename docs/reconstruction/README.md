@@ -1,4 +1,4 @@
-# Sparse Active Multi-Sequence MRI 3D Reconstruction
+# Sparse Multi-Sequence MRI Gaussian Reconstruction — Theory Backbone
 
 > **ISBI precedence notice (2026-07-29).** This package contains the full
 > long-horizon T1–T5 architecture, but
@@ -8,9 +8,12 @@
 > Any CVPR-first or active-policy-first wording below is historical unless the
 > ISBI strategy explicitly reauthorizes it.
 
+Use [`../README.md`](../README.md) for the active documentation index. This
+directory is the long-lived theory backbone, not a phase-status diary.
+
 ## Status
 
-This directory defines the long-horizon design for **patient-specific 3D
+This directory defines the long-horizon theory for **patient-specific 3D
 reconstruction from permanently sparse multi-sequence MRI slices**. It remains
 the theoretical method backbone. The live executable software and Human Gate
 state is maintained in [`docs/codex/README.md`](../codex/README.md); the
@@ -76,7 +79,6 @@ The downstream phase interfaces remain stable while these decisions are experime
 ### End-to-end specification
 
 - [`FULL_FLOW.md`](FULL_FLOW.md) — complete teacher-free training, initialization, active-update, and final-reconstruction flow.
-- [`PROOFREAD_NOTES.md`](PROOFREAD_NOTES.md) — phase-by-phase consistency review and code-entry checklist.
 
 ### Phase specifications
 
