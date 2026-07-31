@@ -6,9 +6,10 @@ or another coding agent.  It complements the scientific documents under
 
 ## Status vocabulary
 
-- `IMPLEMENTED`: code, tests, and a runnable command exist on `main`.
-- `IN REVIEW`: implementation exists on a branch or pull request and must not be
-  treated as an accepted research result.
+- `IMPLEMENTED`: the executable software contract and tests exist; this is not a
+  scientific validation claim.
+- `IN DEVELOPMENT`: implementation is being added and must not be treated as an
+  accepted research result.
 - `PLANNED`: the interface and stop rules are documented, but runnable code does
   not yet exist.
 - `BLOCKED`: the previous phase gate has not passed.
@@ -23,13 +24,13 @@ validated.
 |---|---|---|---|
 | T0 | Canonical coordinates and physical-plane Gaussian renderer | IMPLEMENTED | `python -m pytest -q tests/render tests/contracts` |
 | T0.5 | Legal sparse episodes, prediction receipts, cost, amplitude gauge | IMPLEMENTED | `python -m pytest -q tests/contracts tests/integration` |
-| T1-A | Analytic evidence, explicit feature geometry, fixed supports, safe Gaussian bridge | IN REVIEW | `python -m smagm.cli.t1a --steps 4` |
-| T1-B | Teacher-free micro-CNN and structural losses | BLOCKED by T1-A review | not available |
-| T1-C | Sparse context-to-target trainer and E0/E1/E2 configs | BLOCKED by T1-B | not available |
-| T2 | Physical anchor bootstrap and shared tiny local field | BLOCKED by T1 decision | not available |
-| T3 | Anchor-Gaussian propagation and adaptive topology | BLOCKED by T2 | not available |
-| T4 | Legal active sequence-slice trajectory | BLOCKED by static T3 baseline | not available |
-| T5 | Full-grid reconstruction, uncertainty, and isolated export/evaluation | BLOCKED by T4 | not available |
+| T1-A | Analytic evidence, explicit feature geometry, fixed supports, safe Gaussian bridge | IMPLEMENTED — executable software contract only | `python -m smagm.cli.t1a --steps 4` |
+| T1-B | Teacher-free micro-CNN, structural losses, and cache contracts | IN DEVELOPMENT | `python -m smagm.cli.t1b --help` |
+| T1-C | Sparse context-to-target trainer and E0/E1/E2 experiment orchestration | BLOCKED | not available |
+| T2 | Physical anchor bootstrap and shared tiny local field | BLOCKED | not available |
+| T3 | Anchor-Gaussian propagation and adaptive topology | BLOCKED | not available |
+| T4 | Legal active sequence-slice trajectory | BLOCKED | not available |
+| T5 | Full-grid reconstruction, uncertainty, and isolated export/evaluation | BLOCKED | not available |
 
 ## Required workflow for every phase
 
@@ -65,3 +66,7 @@ experiments establish otherwise, it does not claim:
 - equivalence to camera-view vanilla 3D Gaussian Splatting;
 - successful recovery of unobserved pathology;
 - a complete reproduction of any cited prior method.
+
+T1-B software demonstrations do not claim reconstruction accuracy, clinical
+validity, pathology recovery, successful real-MRI training, scientific
+superiority, completed support anchors, or propagation.
