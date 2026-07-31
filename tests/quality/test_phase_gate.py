@@ -41,7 +41,10 @@ def test_catalog_contains_all_phases_and_exact_status_pairs() -> None:
     assert catalog["phases"]["T1B"]["implementation_status"] == "implemented"
     assert catalog["phases"]["T1B"]["human_gate_status"] == "passed"
     assert catalog["phases"]["T1B"]["human_gate_record"]
-    for phase_name in ("T1C", "T2", "T3", "T4", "T5"):
+    assert catalog["phases"]["T1C"]["implementation_status"] == "implemented"
+    assert catalog["phases"]["T1C"]["human_gate_status"] == "pending"
+    assert all(check["mode"] != "planned" for check in catalog["phases"]["T1C"]["checks"])
+    for phase_name in ("T2", "T3", "T4", "T5"):
         phase = catalog["phases"][phase_name]
         assert phase["implementation_status"] == "planned"
         assert phase["human_gate_status"] == "blocked"

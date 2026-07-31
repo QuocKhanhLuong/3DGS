@@ -88,5 +88,5 @@ tranche without turning them into scientific validation claims:
 
 T1-A is implemented as an executable software contract. T1-B software and its
 Human Gate are passed. Software completion does not establish representation
-value. T1-C remains blocked, as do T2+ phases. This handoff does not add
-scaffolding for those later phases.
+value. T1-C was subsequently authorized and implemented under its separate
+handoff; T2+ remain blocked. This T1-B handoff adds no later-phase scaffolding.

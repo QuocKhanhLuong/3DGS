@@ -1,0 +1,19 @@
+{
+  "claim_scope": "software-contract diagnostic only",
+  "episode": {
+    "context_count": 1,
+    "target_count": 1
+  },
+  "fairness": {
+    "common_feature_channels": [16, 8, 1],
+    "common_fixed_support_step_vu": [4, 4],
+    "common_gaussian_head_hidden_dim": 32,
+    "common_optimizer": "Adam",
+    "common_steps": 1,
+    "checkpoint_selection_rule": "minimum declared development loss; never audit metrics",
+    "hardware_class": "cpu",
+    "precision": "float32"
+  },
+  "seed": 29,
+  "variants": ["e0", "e1", "e2"]
+}

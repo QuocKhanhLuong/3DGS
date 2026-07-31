@@ -53,7 +53,8 @@ the time of this instruction update:
 - T1-A is an implemented executable software contract;
 - T1-B code is merged on `main` as an implemented software tranche; its Human
   Gate is passed by the committed 2026-07-31 decision record;
-- T1-C and T2+ remain blocked.
+- T1-C is an implemented software tranche with its Human Gate pending;
+- T2+ remain blocked.
 
 Do not describe T1-B as a validated reconstruction result. Its CLI and tests are
 software-contract diagnostics only.
@@ -144,7 +145,6 @@ configs, or abstractions for blocked future phases.
 Unless the current authoritative status and the user's request explicitly
 permit it, do not implement:
 
-- T1-C sparse context-to-target training or E0/E1/E2 experiment orchestration;
 - T2 support-anchor bootstrap or anchor-local fields;
 - T3 anchor-Gaussian propagation or adaptive topology;
 - learned Gaussian birth, split, merge, or prune operations;
@@ -204,6 +204,25 @@ Do not add anchors, propagation, routing, learned topology, pseudo-labels,
 teacher distillation, segmentation supervision, or target-pixel leakage to
 T1-B.
 
+## T1-C contracts
+
+For T1-C work, preserve these locked behaviors:
+
+- decoding accepts ledger-returned bytes, never arbitrary filesystem paths;
+- preprocessing is fitted from exactly the assigned context set;
+- all context payloads are opened before `FrozenPatientState` creation;
+- target geometry may be exposed before rendering, but target bytes are
+  decoded only after receipt-gated reveal;
+- the target-valid and renderer-supported mask is explicit, and an empty legal
+  mask is a typed skip or failure that cannot silently optimize zero;
+- E0/E1/E2 share assignment schedules, fixed support topology, downstream
+  head, renderer, update opportunity, and accounting policy;
+- learned variants receive finite encoder gradients and every variant receives
+  finite Gaussian-head gradients;
+- checkpoints and run records bind configuration, manifest, split, assignment,
+  seed, environment, state, and artifact provenance;
+- T1-C remains fixed-topology and introduces no T2+ package or placeholder.
+
 ## Implementation rules
 
 - Target Python 3.10 or newer as declared in `pyproject.toml`.
@@ -239,6 +258,15 @@ python -m pytest -q tests/features/test_feature_alignment.py --tb=short
 python -m pytest -q tests/features/test_feature_cache.py --tb=short
 python -m pytest -q tests/losses/test_structural_losses.py --tb=short
 PYTHONPATH=src python -m smagm.cli.t1b --variant e2 --steps 1
+```
+
+For T1-C changes, start with:
+
+```bash
+python -m pytest -q tests/data/test_t1c_data.py tests/losses/test_reconstruction_losses.py tests/training --tb=short
+PYTHONPATH=src python -m smagm.cli.train --variant e0 --steps 1
+PYTHONPATH=src python -m smagm.cli.train --variant e1 --steps 1
+PYTHONPATH=src python -m smagm.cli.train --variant e2 --steps 1
 ```
 
 Run the full CPU suite once when the change is cross-cutting or before declaring

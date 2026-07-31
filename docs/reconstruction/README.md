@@ -22,7 +22,8 @@ current status addendum is
 
 The repository currently contains implemented software contracts for T0, T0.5,
 and T1-A, plus the implemented T1-B software tranche with its Human Gate
-passed. T1-C and T2+ remain blocked. Merged software is not scientific
+passed. T1-C software is implemented with its Human Gate pending; T2+ remain
+blocked. Merged software is not scientific
 validation or Human Gate approval.
 
 ### Decisions currently locked

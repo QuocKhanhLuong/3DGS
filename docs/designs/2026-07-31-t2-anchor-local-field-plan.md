@@ -2,7 +2,7 @@
 
 Date: 2026-07-31  
 Status: **PRE-AUTHORIZATION DESIGN — IMPLEMENTATION BLOCKED**  
-Blocked by: T1-C implementation, T1-F/T1-R/T1-M evidence, and explicit Human authorization  
+Blocked by: T1-F/T1-R/T1-M evidence and explicit Human authorization
 Stable owners: `src/smagm/anchors/`, `src/smagm/fields/`, `src/smagm/memory/initialize.py`, `src/smagm/state/builder.py`
 
 ## 1. Purpose

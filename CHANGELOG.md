@@ -11,8 +11,8 @@
 - synchronized AgenTeam role workflow and narrowed the executable pipeline to
   the authorized T1-B software tranche;
 - synchronized strategy, README, reconstruction, and Codex status documents;
-- recorded the explicit T1-B Human Gate `PASS` decision without authorizing
-  T1-C or making a scientific-validation claim;
+- recorded the explicit T1-B Human Gate `PASS` decision and the later Human
+  authorization to implement only T1-C, without authorizing T2+;
 - made no scientific-validation claim; T1-B `PASS` is a software-gate decision
   only, while retrospective T0/T0.5/T1-A gates remain unrecorded.
 - added the canonical active-document index and documentation lifecycle and
@@ -24,6 +24,16 @@
 - no runtime scientific behavior changed in this documentation cleanup.
 
 ### Added
+
+- T1-C manifest-bound NumPy plane decoding, exact context-only normalization,
+  deterministic matched episode schedules, declared registration records, and
+  explicit missing-modality policy.
+- Supported-mask reconstruction losses, legal receipt-gated episode
+  orchestration, gradient/precision/accumulation policy, safe checkpoint
+  round-trips, immutable provenance, and a CPU synthetic training CLI.
+- T1-C legality, loss, E0/E1/E2 autograd/fairness, independent-state,
+  checkpoint, and provenance tests. The tranche remains pending Human Gate and
+  makes no reconstruction-quality claim.
 
 - T1-B teacher-free E0/E1/E2 encoder contracts with common structural,
   appearance, bounded-reliability, per-item geometry, and explicit topology

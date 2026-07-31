@@ -62,9 +62,9 @@ implementation:
 - `planned`: requirement exists, but no implementation is authorized.
 
 Human Gate state is separate: current T1-B software is `implemented` with a
-committed `passed` Human Gate, while T0/T0.5/T1-A are `implemented` with
-`retrospective_unrecorded` status and T1-C through T5 are `planned` and
-`blocked`.
+committed `passed` Human Gate, T0/T0.5/T1-A are `implemented` with
+`retrospective_unrecorded` status, T1-C is `implemented` with a `pending`
+Human Gate, and T2 through T5 are `planned` and `blocked`.
 
 When a phase design freezes, replace each relevant `planned` entry with a
 focused `pytest`, `command`, or `file` check. Do not delete an invariant merely
@@ -148,7 +148,7 @@ three diagnostic render/backward paths.
 
 ### T1-C
 
-Will validate legal context-to-target training, supported-mask losses,
+Validates legal context-to-target training, supported-mask losses,
 prediction-before-reveal end to end, matched E0/E1/E2 experiments, independent
 weights, and immutable experiment provenance.
 
