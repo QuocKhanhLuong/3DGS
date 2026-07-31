@@ -14,17 +14,25 @@ Keep context small. Do not explore the entire repository by default.
 Use the smallest applicable document set, in this order:
 
 1. Read this file.
-2. Read `docs/codex/README.md` for the current executable phase status, runnable
+2. Read the current strategy and
+   `docs/strategies/2026-07-31-execution-status-addendum.md` for authorization,
+   claims, and executable status.
+3. Read `docs/reconstruction/` only at the relevant theoretical module or phase
+   entry for the method contract.
+4. Read `CODEBASE.md` for stable software ownership and dependency direction.
+5. Read `docs/codex/README.md` for the current executable phase status, runnable
    entry points, and blocked phases.
-3. Read `README.md` only for the repository thesis and high-level project map.
+6. Read `quality/checklists.json` and the relevant phase entry for required
+   automated evidence and Human Gate questions.
+7. Read `README.md` only for the repository thesis and high-level project map.
    Do not rely on its implementation-status section when it conflicts with
    `docs/codex/README.md`; the root README may lag behind merged code.
-4. For T1-B encoder, cache, conditioning, structural-loss, or fixed-support
+8. For T1-B encoder, cache, conditioning, structural-loss, or fixed-support
    work, read `docs/codex/T1B_TEACHER_FREE_ENCODER.md`.
-5. For changes affecting research claims, phase authorization, tranche order,
+9. For changes affecting research claims, phase authorization, tranche order,
    Human Gates, or stop decisions, read
    `docs/strategies/2026-07-29-isbi-realignment.md`.
-6. Read only the task-specific plan, reconstruction module, phase document, or
+10. Read only the task-specific plan, reconstruction module, phase document, or
    reproducibility note needed for the requested change.
 
 Do not recursively summarize `docs/`. Files under `docs/meetings/`, historical
@@ -42,7 +50,8 @@ the time of this instruction update:
 
 - T0 and T0.5 are implemented software contracts;
 - T1-A is an implemented executable software contract;
-- T1-B code is merged on `main` and remains an in-development software tranche;
+- T1-B code is merged on `main` as an implemented software tranche; its Human
+  Gate remains pending;
 - T1-C and T2+ remain blocked.
 
 Do not describe T1-B as a validated reconstruction result. Its CLI and tests are
@@ -235,11 +244,18 @@ Run the full CPU suite once when the change is cross-cutting or before declaring
 repository-wide validation:
 
 ```bash
+python scripts/check_phase.py --list
+python scripts/check_phase.py <current-phase>
+python -m pytest -q tests/quality --tb=short
 python -m pytest -q
 python -m compileall -q src tests
 git diff --check
 git status --short
 ```
+
+When the current phase has an executable gate, run it with `--run` only from a
+clean committed tree. `--allow-dirty` is reserved for development-only
+evidence. The runner reports evidence and never approves a Human Gate.
 
 Do not repeatedly run the full suite after every edit. Do not start long
 training, download datasets or checkpoints, use a GPU, or run unbounded
@@ -267,5 +283,9 @@ At completion, report only:
 2. tests or checks actually run and their result;
 3. scientific or implementation assumptions not verified;
 4. the Human Gate or phase boundary at which work stopped.
+
+Before claiming completion, inspect the relevant `quality/checklists.json` entry
+and report automated and Human Gate states separately. Agents cannot approve
+Human Gates.
 
 Do not present an implementation as an accepted research result.

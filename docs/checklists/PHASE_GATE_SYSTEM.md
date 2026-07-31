@@ -52,12 +52,19 @@ refactored, but the underlying requirement remains.
 
 ## Checklist lifecycle
 
-Future phases are intentionally present from the start:
+Future phases are intentionally represented in the catalog without executable
+implementation:
 
 - `planned`: requirement and expected owner are recorded, but no executable test
   is claimed;
-- `active`: implementation exists and exact tests or commands can run;
-- `retrospective`: an earlier merged phase is checked against the same system.
+- `implemented`: software exists and exact tests or commands can run;
+- `active`: reserved for an explicitly authorized tranche under development;
+- `planned`: requirement exists, but no implementation is authorized.
+
+Human Gate state is separate: current T1-B software is `implemented` with a
+`pending` Human Gate, while T0/T0.5/T1-A are `implemented` with
+`retrospective_unrecorded` status and T1-C through T5 are `planned` and
+`blocked`.
 
 When a phase design freezes, replace each relevant `planned` entry with a
 focused `pytest`, `command`, or `file` check. Do not delete an invariant merely
@@ -100,7 +107,9 @@ phase is not yet authorized or lacks bound executable evidence.
   terminology, medical risk, and claim discipline;
 - **gate owner**: records the final Human Gate decision and conditions.
 
-The implementing agent must not approve its own Human Gate.
+The configured roles are `pm`, `reviewer`, `qa`, `reproducibility_auditor`,
+`medical_data_steward`, `experiment_lead`, `architect`, `dev`, and `researcher`.
+The implementing agent and all other agents must not approve a Human Gate.
 
 ## Gate decisions
 
