@@ -34,6 +34,11 @@
 - T1-C legality, loss, E0/E1/E2 autograd/fairness, independent-state,
   checkpoint, and provenance tests. The tranche remains pending Human Gate and
   makes no reconstruction-quality claim.
+- T1-C hardening now adds modality-aware one-target episode sampling,
+  minimum-scale normalization fallbacks, decoded-input cache identity,
+  config-driven run artifacts, typed objective stages, accumulation-safe exact
+  resume, and expanded fairness/provenance bindings. It remains an
+  implementation candidate under review, not a scientific validation result.
 
 - T1-B teacher-free E0/E1/E2 encoder contracts with common structural,
   appearance, bounded-reliability, per-item geometry, and explicit topology

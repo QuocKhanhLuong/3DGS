@@ -63,8 +63,8 @@ implementation:
 
 Human Gate state is separate: current T1-B software is `implemented` with a
 committed `passed` Human Gate, T0/T0.5/T1-A are `implemented` with
-`retrospective_unrecorded` status, T1-C is `implemented` with a `pending`
-Human Gate, and T2 through T5 are `planned` and `blocked`.
+`retrospective_unrecorded` status, T1-C is `active` with a `pending` Human
+Gate, and T2 through T5 are `planned` and `blocked`.
 
 When a phase design freezes, replace each relevant `planned` entry with a
 focused `pytest`, `command`, or `file` check. Do not delete an invariant merely

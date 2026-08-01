@@ -53,7 +53,7 @@ the time of this instruction update:
 - T1-A is an implemented executable software contract;
 - T1-B code is merged on `main` as an implemented software tranche; its Human
   Gate is passed by the committed 2026-07-31 decision record;
-- T1-C is an implemented software tranche with its Human Gate pending;
+- T1-C is an implemented candidate in review with its Human Gate pending;
 - T2+ remain blocked.
 
 Do not describe T1-B as a validated reconstruction result. Its CLI and tests are
