@@ -3,6 +3,19 @@
 Decision authority: repository owner, by explicit instruction in the active
 implementation thread.
 
+## Precedence
+
+This later owner decision supersedes only the earlier implementation-blocking
+and per-phase stop requirements for T2, T3, and T5 in
+[`2026-07-29-isbi-realignment.md`](2026-07-29-isbi-realignment.md). The original
+scientific thesis, legality rules, claim restrictions, evidence requirements,
+medical-fidelity requirements, stop/demotion rules, and T4 routing prohibition
+remain active.
+
+Where the earlier strategy says T2+ implementation is prohibited pending an
+intermediate Human Gate, this document now permits continuous static-pipeline
+implementation. It does not retroactively mark any gate as passed.
+
 ## Decision
 
 **Continuous implementation of the static reconstruction pipeline is
