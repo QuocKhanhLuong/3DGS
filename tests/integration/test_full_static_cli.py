@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -10,9 +11,19 @@ from smagm.cli.evaluate import run as evaluate_run
 from smagm.cli.full_static_train import run as train_run
 from smagm.cli.reconstruct import run as reconstruct_run
 from smagm.evaluation import open_serialized_predictions
+from smagm.features.encoder import EncoderConfig, EvidenceEncoder
+from smagm.state import load_patient_state
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _field_state_hash(payload: dict[str, torch.Tensor]) -> str:
+    content = b"".join(
+        name.encode() + value.detach().cpu().contiguous().numpy().tobytes()
+        for name, value in payload.items()
+    )
+    return hashlib.sha256(content).hexdigest()
 
 
 def test_full_static_train_reconstruct_evaluate_audit_chain(tmp_path) -> None:
@@ -27,6 +38,20 @@ def test_full_static_train_reconstruct_evaluate_audit_chain(tmp_path) -> None:
     step = training["steps"][0]
     assert step["event_order"] == ["OPEN_CONTEXT", "COMMIT_TARGET", "REGISTER_PREDICTION", "REVEAL_TARGET"]
     assert step["encoder_gradient_norm"] > 0 and step["field_gradient_norm"] > 0
+
+    checkpoint = torch.load(train_dir / "checkpoint.pt", map_location="cpu", weights_only=True)
+    patient_state = load_patient_state(train_dir / "patient_state.pt")
+    assert checkpoint["patient_state_version"] == patient_state.state_version
+    assert checkpoint["field_for_patient_state_hash"] == patient_state.field_model_hash
+    assert _field_state_hash(checkpoint["field"]) == patient_state.field_model_hash
+    encoder = EvidenceEncoder(EncoderConfig(variant="e2"))
+    encoder.load_state_dict(checkpoint["encoder"])
+    assert encoder.state_hash() == checkpoint["encoder_for_patient_state_hash"]
+    assert checkpoint["post_snapshot_optimizer_updates"] == 1
+    assert any(
+        not torch.equal(checkpoint["field"][name], checkpoint["field_after_training"][name])
+        for name in checkpoint["field"]
+    )
 
     reconstruction = reconstruct_run(
         checkpoint_path=train_dir / "checkpoint.pt",
