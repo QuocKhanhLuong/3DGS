@@ -1,13 +1,14 @@
 # Codex Phase Handoffs
 
 This directory is the executable handoff layer for contributors who use Codex
-or another coding agent.  It complements the scientific documents under
+or another coding agent. It complements the scientific documents under
 `docs/reconstruction/`; it does not replace them.
 
 ## Status vocabulary
 
-Software state and Human Gate state are separate. A merged implementation is
-not a Human Gate decision and is not a scientific validation claim.
+Software state, implementation authorization, and Human Gate state are
+separate. A merged implementation is not a Human Gate decision and is not a
+scientific validation claim.
 
 - `IMPLEMENTED SOFTWARE CONTRACT`: executable contract and focused tests exist.
 - `IMPLEMENTED SOFTWARE TRANCHE — HUMAN GATE PENDING`: the bounded software
@@ -15,12 +16,11 @@ not a Human Gate decision and is not a scientific validation claim.
 - `IMPLEMENTED SOFTWARE TRANCHE — HUMAN GATE PASSED`: the bounded software
   tranche and its committed Human Gate decision exist; this is still not a
   scientific validation claim.
-- `IMPLEMENTED CANDIDATE — IN REVIEW`: an explicitly authorized software
-  tranche is being hardened and reviewed; its Human Gate remains pending.
-- `BLOCKED`: the phase is not authorized or its preceding Human Gate remains
-  unresolved.
+- `AUTHORIZED FOR IMPLEMENTATION — NOT YET IMPLEMENTED`: owner permission and a
+  maintained plan exist, but executable software evidence does not yet exist.
+- `BLOCKED`: implementation is not authorized or is explicitly excluded.
 
-Passing unit tests means that the executable contract works.  It does **not**
+Passing unit tests means that the executable contract works. It does **not**
 mean that reconstruction accuracy, clinical fidelity, or paper novelty has been
 validated.
 
@@ -36,21 +36,20 @@ validated.
 | T2 | Physical anchor bootstrap and shared tiny local field | BLOCKED | not available |
 | T3 | Anchor-Gaussian propagation and adaptive topology | BLOCKED | not available |
 | T4 | Legal active sequence-slice trajectory | BLOCKED | not available |
-| T5 | Full-grid reconstruction, uncertainty, and isolated export/evaluation | BLOCKED | not available |
+| T5 | Plane/full-grid reconstruction, export, isolated evaluation, and statistics | AUTHORIZED FOR IMPLEMENTATION — NOT YET IMPLEMENTED | planned in `docs/plans/2026-08-01-t5-reconstruction-export-evaluation-plan.md` |
 
-The machine-readable quality catalog separates `implementation_status` from
-`human_gate_status`. T1-B has a committed Human Gate decision record. Run the
-phase-gate evidence with:
+## Current implementation program
 
-```bash
-python scripts/check_phase.py --list
-python scripts/check_phase.py T1B
-python scripts/check_phase.py T1B --run --report-dir quality/reports
+The repository owner has authorized one continuous static-pipeline sprint:
+
+```text
+T1-C hardening
+→ T2 anchors + StructuralField + seed Gaussians
+→ T3 bounded propagation
+→ T5 reconstruction/export/evaluation
 ```
 
-The runner may report automated evidence, but only a Human decision may close a
-Human Gate. T1-B now reports `PASS` only because that committed Human decision
-record exists. Do not treat this software tranche as reconstruction success.
+Use:
 
 T1-C has separate Human authorization to implement and is an executable
 candidate under review; its Human Gate remains pending. Run
@@ -58,20 +57,29 @@ candidate under review; its Human Gate remains pending. Run
 T1-C test results until T1-F/T1-R/T1-M evidence and an explicit T2 decision
 exist.
 
-## Required workflow for every phase
+T4 remains blocked. Intermediate software tests do not create scientific passes.
+T1-C, T2, T3, and T5 remain pending final consolidated evidence and an explicit
+owner decision.
+
+The machine-readable quality catalog separates `implementation_status` from
+`human_gate_status`. Update each phase from `planned` to `active` only when its
+implementation starts, and to `implemented` only when executable software and
+its declared evidence exist. Human-gate status remains `pending` until an owner
+record is committed.
+
+## Required workflow for the fast-track branch
 
 ```text
-read strategy/addendum
-→ read docs/reconstruction
-→ read CODEBASE.md
-→ read docs/codex and the current handoff
-→ read the relevant quality checklist
-→ read the phase-specific Codex handoff
-→ implement only the named tranche
-→ add analytic/synthetic tests
-→ run the phase-gate checklist
-→ run the complete CPU CI suite
-→ review scientific claims separately from software correctness
+read fast-track authorization
+→ read CODEBASE and nearest theory/plan
+→ implement only the current stable package responsibility
+→ add focused legality/geometry/autograd/numeric tests
+→ preserve config switches for matched ablations
+→ continue to the next static stage after software guards pass
+→ run complete CPU suite and phase checks
+→ freeze configs/checkpoints/predictions
+→ run one consolidated isolated evaluation
+→ obtain one final owner review
 ```
 
 Every phase implementation must include:
@@ -81,12 +89,13 @@ Every phase implementation must include:
 3. blocking unit/integration tests;
 4. a CLI or script with `--help`;
 5. configuration and artifact provenance where training is involved;
-6. an honest README section listing non-claims;
-7. no placeholder implementation for a later phase.
+6. honest non-claims;
+7. a switch that recovers the matched simpler ablation;
+8. no T4 routing implementation.
 
 ## Global non-claims
 
-The repository is an executable research-code scaffold.  Until separate
+The repository is an executable research-code scaffold. Until separate
 experiments establish otherwise, it does not claim:
 
 - clinical validity or real-patient deployment readiness;
@@ -94,8 +103,7 @@ experiments establish otherwise, it does not claim:
 - calibrated safety guarantees;
 - equivalence to camera-view vanilla 3D Gaussian Splatting;
 - successful recovery of unobserved pathology;
-- a complete reproduction of any cited prior method.
-
-T1-B software demonstrations do not claim reconstruction accuracy, clinical
-validity, pathology recovery, successful real-MRI training, scientific
-superiority, completed support anchors, or propagation.
+- a complete reproduction of any cited prior method;
+- that planned or implemented anchors, fields, propagation, or full-grid export
+  improve reconstruction;
+- that automated software evidence is a scientific Human Gate pass.
