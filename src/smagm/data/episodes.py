@@ -45,6 +45,8 @@ class ModalityEpisodePolicy:
     def __post_init__(self) -> None:
         if not isinstance(self.same_modality_context_required, bool):
             raise TypeError("same_modality_context_required must be bool")
+        if not self.same_modality_context_required:
+            raise ValueError("the bounded T1-C reference requires same_modality_context_required=True")
         if self.unseen_target_modality_policy != "reject":
             raise ValueError("the T1-C reference rejects unseen target modalities")
 

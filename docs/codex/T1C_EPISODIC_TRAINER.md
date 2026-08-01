@@ -53,7 +53,13 @@ The command rejects a dirty checkout so a development run cannot be presented
 as final evidence. Exact gate evidence must run on a clean commit and records
 resolved config, manifest, split, assignment schedule, modality mapping,
 preprocessing, encoder/head, renderer/gauge, checkpoint, receipt, state,
-environment, and artifact hashes.
+environment, opened-file ledger, and artifact hashes. A resumable checkpoint is
+accepted only when its immutable run identity, manifest, split registry, and
+scheduled assignment hashes match; it is never written mid-accumulation.
+
+When `--output-dir` is supplied, the run writes the declared resolved config,
+provenance, metrics, summary, checkpoint, serialized episode ledger, and an
+artifact-digest manifest. These artifacts document software execution only.
 
 ## Non-claims and boundary
 

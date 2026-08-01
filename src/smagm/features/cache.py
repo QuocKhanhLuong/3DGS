@@ -15,6 +15,25 @@ class FeatureCacheMismatchError(KeyError):
     """Raised for a cache miss or any key mismatch."""
 
 
+def _feature_value_hash(features: EncoderFeatureMaps) -> str:
+    """Audit immutable cached values without detaching the live autograd path."""
+
+    digest = hashlib.sha256()
+    for name, tensor in (
+        ("structural", features.structural),
+        ("appearance", features.appearance),
+        ("reliability", features.reliability),
+        ("valid_feature_mask", features.valid_feature_mask),
+    ):
+        value = tensor.detach().cpu().contiguous()
+        digest.update(f"{name}:{value.dtype}:{tuple(value.shape)}".encode("utf-8"))
+        if value.dtype is torch.bool:
+            digest.update(value.to(dtype=torch.uint8).numpy().tobytes())
+        else:
+            digest.update(value.numpy().tobytes())
+    return digest.hexdigest()
+
+
 @dataclass(frozen=True)
 class FeatureCacheKey:
     """All provenance needed to identify one legal context feature tensor."""
@@ -102,6 +121,7 @@ class FeatureCacheKey:
 class CachedFeatureMaps:
     key: FeatureCacheKey
     features: EncoderFeatureMaps
+    feature_value_hash: str
 
 
 class FeatureCache:
@@ -128,12 +148,19 @@ class FeatureCache:
         )
         if actual != key:
             raise FeatureCacheMismatchError("cache key does not match feature provenance or output contract")
-        self._items[key] = CachedFeatureMaps(key=key, features=features)
+        self._items[key] = CachedFeatureMaps(
+            key=key,
+            features=features,
+            feature_value_hash=_feature_value_hash(features),
+        )
 
     def get(self, key: FeatureCacheKey) -> EncoderFeatureMaps:
         if key not in self._items:
             raise FeatureCacheMismatchError("no exact feature-cache entry exists for the requested key")
-        return self._items[key].features
+        cached = self._items[key]
+        if _feature_value_hash(cached.features) != cached.feature_value_hash:
+            raise FeatureCacheMismatchError("cached feature tensor values changed after insertion")
+        return cached.features
 
     def __len__(self) -> int:
         return len(self._items)

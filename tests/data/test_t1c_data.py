@@ -191,5 +191,7 @@ def test_modality_policy_requires_a_same_modality_context_and_rejects_multi_targ
             config=EpisodeSamplingConfig(context_count=1, seed=2, modality_policy=ModalityEpisodePolicy()),
         )
     assert exc_info.value.reason is EpisodeSamplingFailureReason.MISSING_CONTEXT_MODALITY
+    with pytest.raises(ValueError, match="requires same_modality"):
+        ModalityEpisodePolicy(same_modality_context_required=False)
     with pytest.raises(ValueError, match="exactly one target"):
         EpisodeSamplingConfig(context_count=1, target_count=2)

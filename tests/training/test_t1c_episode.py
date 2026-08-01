@@ -52,9 +52,11 @@ def _episode(
     episode_id: str = "episode",
     context_modality: str = "T2",
     target_modality: str = "T2",
+    payload_phase: float = 0.0,
+    manifest_id: str = "m",
 ):
     shape = (17, 15)
-    payloads = {"context": _payload(0.0, shape), "target": _payload(0.3, shape)}
+    payloads = {"context": _payload(payload_phase, shape), "target": _payload(payload_phase + 0.3, shape)}
     entries = tuple(
         AvailabilityObservationMeta(
             observation_id=identifier,
@@ -71,7 +73,7 @@ def _episode(
         (tmp_path / f"{identifier}.npy").write_bytes(payload)
     manifest = SparseAvailabilityManifest(
         entries,
-        manifest_id="m",
+        manifest_id=manifest_id,
         integrity_digests={identifier: hashlib.sha256(payload).hexdigest() for identifier, payload in payloads.items()},
     )
     assignment = EpisodeAssignment.create(
@@ -85,7 +87,15 @@ def _episode(
     return EpisodeLedger(manifest, assignment, tmp_path, split_registry=registry), assignment
 
 
-def _trainer(variant: str, seed: int = 7, trainer_config: TrainerConfig | None = None) -> T1CTrainer:
+def _trainer(
+    variant: str,
+    seed: int = 7,
+    trainer_config: TrainerConfig | None = None,
+    *,
+    manifest_hash: str = "",
+    split_registry_hash: str = "",
+    scheduled_assignment_hashes: tuple[str, ...] = (),
+) -> T1CTrainer:
     torch.manual_seed(seed)
     encoder = EvidenceEncoder(EncoderConfig(variant=variant))
     torch.manual_seed(seed + 10_000)
@@ -109,6 +119,30 @@ def _trainer(variant: str, seed: int = 7, trainer_config: TrainerConfig | None =
             modality_to_appearance_channel={"T2": 0},
         ),
         trainer_config=trainer_config,
+        matched_experiment_identity="a" * 64 if manifest_hash else "",
+        resolved_config_hash="b" * 64 if manifest_hash else "",
+        sampler_state_hash="c" * 64 if manifest_hash else "",
+        manifest_hash=manifest_hash,
+        split_registry_hash=split_registry_hash,
+        scheduled_assignment_hashes=scheduled_assignment_hashes,
+    )
+
+
+def _checkpoint_trainer(
+    variant: str,
+    ledger: EpisodeLedger,
+    assignments: tuple[EpisodeAssignment, ...],
+    *,
+    seed: int = 7,
+    trainer_config: TrainerConfig | None = None,
+) -> T1CTrainer:
+    return _trainer(
+        variant,
+        seed=seed,
+        trainer_config=trainer_config,
+        manifest_hash=ledger.manifest_hash,
+        split_registry_hash=ledger._split_registry.registry_hash,
+        scheduled_assignment_hashes=tuple(item.assignment_hash for item in assignments),
     )
 
 
@@ -184,11 +218,11 @@ def test_checkpoint_round_trip_binds_variant_configs_optimizer_and_step(tmp_path
     data_root = tmp_path / "data"
     data_root.mkdir()
     ledger, assignment = _episode(data_root)
-    trainer = _trainer("e1", seed=21)
+    trainer = _checkpoint_trainer("e1", ledger, (assignment,), seed=21)
     output = trainer.train_step(ledger=ledger, assignment=assignment, target_id="target")
     checkpoint = trainer.save_checkpoint(tmp_path / "checkpoint.pt")
     expected = module_state_hash(trainer.encoder, trainer.gaussian_head)
-    restored = _trainer("e1", seed=99)
+    restored = _checkpoint_trainer("e1", ledger, (assignment,), seed=99)
     restored.load_checkpoint(checkpoint)
     assert module_state_hash(restored.encoder, restored.gaussian_head) == expected
     assert restored.checkpoint_state()["step_index"] == output.report.step_index
@@ -275,19 +309,23 @@ def test_checkpoint_resume_matches_uninterrupted_execution_at_optimizer_boundary
     resumed_second_root = tmp_path / "resumed-second"
     for root in (first_root, second_root, resumed_first_root, resumed_second_root):
         root.mkdir()
-    uninterrupted = _trainer("e1", seed=71)
     first_ledger, first_assignment = _episode(first_root, episode_id="first")
     second_ledger, second_assignment = _episode(second_root, episode_id="second")
+    uninterrupted = _checkpoint_trainer("e1", first_ledger, (first_assignment, second_assignment), seed=71)
     uninterrupted.train_step(ledger=first_ledger, assignment=first_assignment, target_id="target")
     uninterrupted.train_step(ledger=second_ledger, assignment=second_assignment, target_id="target")
     expected = module_state_hash(uninterrupted.encoder, uninterrupted.gaussian_head)
-    resumable = _trainer("e1", seed=71)
     resumed_first_ledger, resumed_first_assignment = _episode(resumed_first_root, episode_id="first")
+    resumed_second_ledger, resumed_second_assignment = _episode(resumed_second_root, episode_id="second")
+    resumable = _checkpoint_trainer(
+        "e1", resumed_first_ledger, (resumed_first_assignment, resumed_second_assignment), seed=71
+    )
     resumable.train_step(ledger=resumed_first_ledger, assignment=resumed_first_assignment, target_id="target")
     checkpoint = resumable.save_checkpoint(tmp_path / "boundary.pt")
-    restored = _trainer("e1", seed=999)
+    restored = _checkpoint_trainer(
+        "e1", resumed_first_ledger, (resumed_first_assignment, resumed_second_assignment), seed=999
+    )
     restored.load_checkpoint(checkpoint)
-    resumed_second_ledger, resumed_second_assignment = _episode(resumed_second_root, episode_id="second")
     restored.train_step(ledger=resumed_second_ledger, assignment=resumed_second_assignment, target_id="target")
     assert module_state_hash(restored.encoder, restored.gaussian_head) == expected
 
@@ -296,7 +334,7 @@ def test_checkpoint_rejects_a_different_head_contract_with_compatible_shapes(tmp
     data_root = tmp_path / "data"
     data_root.mkdir()
     ledger, assignment = _episode(data_root)
-    trainer = _trainer("e1", seed=73)
+    trainer = _checkpoint_trainer("e1", ledger, (assignment,), seed=73)
     trainer.train_step(ledger=ledger, assignment=assignment, target_id="target")
     checkpoint = trainer.save_checkpoint(tmp_path / "head-contract.pt")
     changed_encoder = EvidenceEncoder(EncoderConfig(variant="e1"))
@@ -314,9 +352,55 @@ def test_checkpoint_rejects_a_different_head_contract_with_compatible_shapes(tmp
             reconstruction_loss=ReconstructionLossConfig(intensity="mse"),
             modality_to_appearance_channel={"T2": 0},
         ),
+        matched_experiment_identity="a" * 64,
+        resolved_config_hash="b" * 64,
+        sampler_state_hash="c" * 64,
+        manifest_hash=ledger.manifest_hash,
+        split_registry_hash=ledger._split_registry.registry_hash,
+        scheduled_assignment_hashes=(assignment.assignment_hash,),
     )
     with pytest.raises(ValueError, match="immutable T1-C binding"):
         incompatible.load_checkpoint(checkpoint)
+
+
+def test_checkpoint_rejects_missing_or_tampered_run_bindings(tmp_path) -> None:
+    ledger, assignment = _episode(tmp_path)
+    unbound = _trainer("e1")
+    unbound.train_step(ledger=ledger, assignment=assignment, target_id="target")
+    with pytest.raises(RuntimeError, match="complete immutable run"):
+        unbound.save_checkpoint(tmp_path / "unbound.pt")
+    bound_root = tmp_path / "bound"
+    bound_root.mkdir()
+    bound_ledger, bound_assignment = _episode(bound_root)
+    trainer = _checkpoint_trainer("e1", bound_ledger, (bound_assignment,), seed=91)
+    trainer.train_step(ledger=bound_ledger, assignment=bound_assignment, target_id="target")
+    checkpoint = trainer.save_checkpoint(tmp_path / "bound.pt")
+    tampered = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    tampered["last_manifest_hash"] = "f" * 64
+    tampered_path = tmp_path / "tampered.pt"
+    torch.save(tampered, tampered_path)
+    restored = _checkpoint_trainer("e1", bound_ledger, (bound_assignment,), seed=92)
+    with pytest.raises(ValueError, match="resume bindings"):
+        restored.load_checkpoint(tampered_path)
+
+
+def test_resumed_trainer_rejects_a_ledger_outside_manifest_and_schedule(tmp_path) -> None:
+    first_root = tmp_path / "first"
+    other_root = tmp_path / "other"
+    first_root.mkdir()
+    other_root.mkdir()
+    ledger, assignment = _episode(first_root, episode_id="first")
+    trainer = _checkpoint_trainer("e1", ledger, (assignment,), seed=93)
+    trainer.train_step(ledger=ledger, assignment=assignment, target_id="target")
+    checkpoint = trainer.save_checkpoint(tmp_path / "resume.pt")
+    other_ledger, other_assignment = _episode(
+        other_root, episode_id="other", payload_phase=1.0, manifest_id="different-manifest"
+    )
+    restored = _checkpoint_trainer("e1", ledger, (assignment,), seed=94)
+    restored.load_checkpoint(checkpoint)
+    with pytest.raises(ValueError, match="manifest"):
+        restored.train_step(ledger=other_ledger, assignment=other_assignment, target_id="target")
+    assert other_ledger.event_records == ()
 
 
 def test_target_is_never_encoded_or_cached_before_or_after_reveal(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:

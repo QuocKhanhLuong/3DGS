@@ -39,6 +39,11 @@
   config-driven run artifacts, typed objective stages, accumulation-safe exact
   resume, and expanded fairness/provenance bindings. It remains an
   implementation candidate under review, not a scientific validation result.
+- T1-C checkpoint resume now rejects mismatched or tampered run, manifest,
+  split, and schedule bindings; checkpoint cadence and selection are executed
+  from resolved configuration; provenance includes opened-file-ledger,
+  preprocessing, dependency, and artifact-digest bindings. This remains
+  software-contract evidence only.
 
 - T1-B teacher-free E0/E1/E2 encoder contracts with common structural,
   appearance, bounded-reliability, per-item geometry, and explicit topology

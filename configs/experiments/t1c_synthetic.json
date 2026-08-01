@@ -104,7 +104,7 @@
     "common_gaussian_head_hidden_dim": 32,
     "common_optimizer": "Adam",
     "common_steps": 1,
-    "checkpoint_selection_rule": "minimum declared development loss; never audit metrics",
+    "checkpoint_selection_rule": "last eligible optimizer-step checkpoint; never audit metrics",
     "hardware_class": "cpu",
     "precision": "float32",
     "amplitude_gauge": "fixed_gaussian_runtime_once",

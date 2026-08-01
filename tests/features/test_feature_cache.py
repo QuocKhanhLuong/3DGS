@@ -95,3 +95,13 @@ def test_input_identity_distinguishes_payload_and_mask_content() -> None:
         cache.get(replace(key, input_content_hash="b" * 64))
     with pytest.raises(FeatureCacheMismatchError):
         cache.get(replace(key, valid_feature_mask_hash="c" * 64))
+
+
+def test_cached_feature_value_mutation_fails_closed_without_detaching_values() -> None:
+    _, features, key = _features()
+    cache = FeatureCache()
+    cache.put(key, features)
+    with torch.no_grad():
+        features.structural.add_(1.0)
+    with pytest.raises(FeatureCacheMismatchError, match="values changed"):
+        cache.get(key)

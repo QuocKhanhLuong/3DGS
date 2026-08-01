@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict
+from datetime import datetime, timezone
 import hashlib
 from io import BytesIO
 import json
@@ -185,6 +186,7 @@ def _build_trainer(
     manifest_hash: str,
     split_registry_hash: str,
     schedule_hash: str,
+    scheduled_assignment_hashes: tuple[str, ...],
 ) -> tuple[T1CTrainer, str, str]:
     variant = config["selected_variant"]
     encoder_cfg = dict(config["encoder"])
@@ -257,6 +259,9 @@ def _build_trainer(
         matched_experiment_identity=identity.identity_hash,
         resolved_config_hash=resolved_config_hash,
         sampler_state_hash=schedule_hash,
+        manifest_hash=manifest_hash,
+        split_registry_hash=split_registry_hash,
+        scheduled_assignment_hashes=scheduled_assignment_hashes,
     )
     return trainer, encoder_initialization_hash, head_initialization_hash
 
@@ -318,38 +323,73 @@ def run_synthetic_training(
         manifest_hash=manifest.manifest_hash,
         split_registry_hash=split_registry.registry_hash,
         schedule_hash=schedule.schedule_hash,
+        scheduled_assignment_hashes=tuple(assignment.assignment_hash for assignment in schedule.assignments),
     )
     output = Path(output_dir) if output_dir is not None else None
     if output is not None:
         output.mkdir(parents=True, exist_ok=False)
         (output / "resolved_config.json").write_text(json.dumps(_jsonable(config), sort_keys=True, indent=2) + "\n", encoding="utf-8")
-    start_timestamp = time.time()
+    start_timestamp = datetime.now(timezone.utc).isoformat()
     start = time.perf_counter()
     reports = []
+    episode_ledger_records: list[dict[str, object]] = []
+    preprocessing_record_hashes: list[str] = []
+    checkpoint_path: Path | None = None
+    checkpoint_selection: dict[str, object] | None = None
     with tempfile.TemporaryDirectory(prefix="smagm-t1c-") as directory:
         root = Path(directory)
         for observation_id, payload in payloads.items():
             (root / f"{observation_id}.npy").write_bytes(payload)
         for assignment in schedule.assignments:
             ledger = EpisodeLedger(manifest, assignment, root, split_registry=split_registry)
-            reports.append(trainer.train_step(ledger=ledger, assignment=assignment, target_id=assignment.target_ids[0]).report)
+            step_output = trainer.train_step(ledger=ledger, assignment=assignment, target_id=assignment.target_ids[0])
+            reports.append(step_output.report)
+            preprocessing_record_hashes.append(step_output.step.preprocessing.record_hash)
+            episode_ledger_records.append(
+                {
+                    "assignment": assignment.to_canonical_dict(),
+                    "assignment_hash": assignment.assignment_hash,
+                    "audit_hash": ledger.audit_hash,
+                    "events": [event.to_canonical_dict() for event in ledger.event_records],
+                    "opened_files": [row.to_canonical_dict() for row in ledger.audit_records],
+                    "prediction_receipts": [record.to_canonical_dict() for record in ledger.prediction_records],
+                    "preprocessing_record_hash": step_output.step.preprocessing.record_hash,
+                }
+            )
+            if output is not None and bool(config["checkpointing"].get("enabled", False)):
+                interval = trainer.trainer_config.checkpoint_interval
+                if step_output.report.optimizer_updated and step_output.report.optimizer_step_index % interval == 0:
+                    checkpoint_path = trainer.save_checkpoint(output / "checkpoint.pt")
+                    checkpoint_selection = {
+                        "optimizer_step_index": step_output.report.optimizer_step_index,
+                        "rule": config["fairness"]["checkpoint_selection_rule"],
+                    }
     runtime_seconds = time.perf_counter() - start
-    end_timestamp = time.time()
+    end_timestamp = datetime.now(timezone.utc).isoformat()
     last = reports[-1]
-    checkpoint_path: Path | None = None
-    if output is not None and bool(config["checkpointing"].get("enabled", False)):
-        checkpoint_path = trainer.save_checkpoint(output / "checkpoint.pt")
+    if output is not None and bool(config["checkpointing"].get("enabled", False)) and checkpoint_path is None:
+        raise RuntimeError("checkpointing is enabled but no optimizer-step boundary met checkpoint_interval")
     if output is not None:
         with (output / "metrics.jsonl").open("w", encoding="utf-8") as handle:
             for report in reports:
                 handle.write(json.dumps(_jsonable(dict(report.__dict__)), sort_keys=True) + "\n")
+        (output / "episode_ledger.json").write_text(
+            json.dumps(episode_ledger_records, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+        )
     root = Path(repository_root) if repository_root is not None else _ROOT
     artifact_hashes = {}
     if output is not None:
-        for name in ("resolved_config.json", "metrics.jsonl", "checkpoint.pt"):
+        for name in ("resolved_config.json", "metrics.jsonl", "episode_ledger.json", "checkpoint.pt"):
             path = output / name
             if path.exists():
                 artifact_hashes[name] = _file_hash(path)
+    else:
+        artifact_hashes = {
+            "ephemeral/episode_ledger.json": _canonical_hash(episode_ledger_records),
+            "ephemeral/metrics.jsonl": _canonical_hash([_jsonable(dict(report.__dict__)) for report in reports]),
+            "ephemeral/resolved_config.json": _canonical_hash(config),
+            "ephemeral/checkpoint.pt": module_state_hash(trainer.encoder, trainer.gaussian_head),
+        }
     encoder = trainer.encoder
     head = trainer.gaussian_head
     episode_config = trainer.episode_config
@@ -367,36 +407,46 @@ def run_synthetic_training(
         allow_dirty=allow_dirty,
         modality_mapping_hash=episode_config.modality_mapping_hash,
         preprocessing_policy_hash=episode_config.normalization.config_hash,
+        preprocessing_record_hash=_canonical_hash(sorted(preprocessing_record_hashes)),
+        opened_file_ledger_hash=_canonical_hash(episode_ledger_records),
+        dependency_manifest_hash=_file_hash(root / "pyproject.toml"),
         encoder_variant=variant,
         encoder_config_hash=encoder.config.config_hash,
         encoder_state_hash=encoder.state_hash(),
         gaussian_head_initialization_hash=head_initialization_hash,
         renderer_config_hash=renderer_hash,
         amplitude_gauge_hash=gauge_hash,
+        frozen_patient_state_schema_version="smagm-frozen-patient-state-v1",
         device=str(next(head.parameters()).device),
         parameter_count=sum(parameter.numel() for parameter in list(encoder.parameters()) + list(head.parameters())),
-        run_started_at=str(start_timestamp),
-        run_ended_at=str(end_timestamp),
+        run_started_at=start_timestamp,
+        run_ended_at=end_timestamp,
     )
     report = {
         **_jsonable(dict(last.__dict__)),
         "adapter_operation_count": encoder.parameter_report.adapter_operation_count,
         "analytic_preprocessing_cost": (
-            shape_hw[0] * shape_hw[1] * encoder.parameter_report.analytic_channel_count
+            shape_hw[0]
+            * shape_hw[1]
+            * encoder.parameter_report.analytic_channel_count
+            * last.encoder_forward_passes
             if variant in ("e0", "e2")
             else 0
         ),
         "assignment_schedule_hash": schedule.schedule_hash,
+        "artifact_digests": dict(artifact_hashes),
         "cache_bytes": last.cache_bytes,
         "encoder_initialization_hash": encoder_initialization_hash,
         "encoder_parameter_count": encoder.parameter_count,
         "encoder_runtime_seconds": sum(item.encoder_runtime_seconds for item in reports) / len(reports),
+        "encoder_forward_passes": last.encoder_forward_passes,
         "end_to_end_step_runtime_seconds": runtime_seconds / len(reports),
         "head_initialization_hash": head_initialization_hash,
         "head_parameter_count": sum(parameter.numel() for parameter in head.parameters()),
         "manifest_hash": manifest.manifest_hash,
         "matched_experiment_identity": trainer.matched_experiment_identity,
         "matched_protocol_hash": config["matched_protocol_hash"],
+        "checkpoint_selection": checkpoint_selection,
         "resolved_config_hash": resolved_config_hash,
         "provenance_record_hash": provenance.record_hash,
         "reproducible": not provenance.dirty,
@@ -406,7 +456,15 @@ def run_synthetic_training(
     }
     if output is not None:
         (output / "provenance.json").write_text(json.dumps(_jsonable(asdict(provenance)), sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        report["artifact_digests"] = {
+            **artifact_hashes,
+            "provenance.json": _file_hash(output / "provenance.json"),
+        }
         (output / "summary.json").write_text(json.dumps(report, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        report["artifact_digests"]["summary.json"] = _file_hash(output / "summary.json")
+        (output / "artifact_digests.json").write_text(
+            json.dumps(report["artifact_digests"], sort_keys=True, indent=2) + "\n", encoding="utf-8"
+        )
     return report
 
 
