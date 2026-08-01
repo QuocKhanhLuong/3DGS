@@ -27,7 +27,37 @@ jobs:
         run: |
           python scripts/check_phase.py --list
           python -m pytest -q tests/quality --tb=short
-      - name: Compile sources and tests
-        run: python -m compileall -q src tests
+      - name: Run active automated phase evidence
+        run: |
+          python scripts/check_phase.py T1C --run --report-dir /tmp/smagm-quality-reports
+          python scripts/check_phase.py T2 --run --report-dir /tmp/smagm-quality-reports
+          python scripts/check_phase.py T3 --run --report-dir /tmp/smagm-quality-reports
+          python scripts/check_phase.py T5 --run --report-dir /tmp/smagm-quality-reports
+      - name: Validate public CLI contracts
+        run: |
+          python scripts/train.py --help
+          python scripts/reconstruct.py --help
+          python scripts/evaluate.py --help
+          python scripts/audit.py --help
+      - name: Run full static synthetic chain
+        run: |
+          python scripts/train.py \
+            --config configs/experiments/full_static_pipeline.json \
+            --variant full \
+            --steps 2 \
+            --output-dir /tmp/smagm-full-static-train
+          python scripts/reconstruct.py \
+            --config configs/experiments/full_static_pipeline.json \
+            --checkpoint /tmp/smagm-full-static-train/checkpoint.pt \
+            --manifest /tmp/smagm-full-static-train/eval_manifest.json \
+            --output-dir /tmp/smagm-full-static-reconstruction
+          python scripts/evaluate.py \
+            --plan configs/evaluation/full_static_eval.json \
+            --predictions /tmp/smagm-full-static-reconstruction \
+            --output-dir /tmp/smagm-full-static-report
+          python scripts/audit.py \
+            --package /tmp/smagm-full-static-reconstruction
+      - name: Compile sources, tests, and scripts
+        run: python -m compileall -q src tests scripts
       - name: Require a clean checkout after validation
         run: git diff --check && test -z "$(git status --porcelain)"

@@ -10,7 +10,7 @@ import math
 import torch
 
 from ..anchors import AnchorBatch
-from ..gaussians import RawGaussianParameters, gaussian_batch_from_raw
+from ..gaussians import AmplitudeGaugePolicy, restore_gauge_fixed_gaussian_batch
 from .contracts import GaussianMemory, GaussianMemoryBank, PrimitiveKind, gaussian_memory_hash
 from .observability import propagated_observability
 
@@ -66,6 +66,38 @@ def _transaction(**payload: object) -> PropagationTransaction:
     return PropagationTransaction(**payload, transaction_hash=digest)  # type: ignore[arg-type]
 
 
+def _append_gauge_preserving_children(
+    bank: GaussianMemoryBank,
+    *,
+    centers: torch.Tensor,
+    parent_indices: torch.Tensor,
+    child_ids: tuple[str, ...],
+):
+    """Append children without treating gauge-fixed amplitudes as raw values.
+
+    Existing bank amplitudes are already mean-centred by the canonical factory.
+    Zero-valued child log amplitudes preserve that gauge exactly and, crucially,
+    leave every pre-existing primitive unchanged.
+    """
+
+    existing = bank.gaussians
+    if existing.gauge_policy is AmplitudeGaugePolicy.LEGACY_RAW or existing.gauge_config_hash is None:
+        raise ValueError("propagation requires explicit Phase-1 amplitude-gauge provenance")
+    child_log_amplitude = existing.log_support_amplitude.new_zeros((len(child_ids), 1))
+    return restore_gauge_fixed_gaussian_batch(
+        centers_ras_mm=centers,
+        covariance_factor=torch.cat((existing.covariance_factor, existing.covariance_factor[parent_indices])),
+        log_support_amplitude=torch.cat((existing.log_support_amplitude, child_log_amplitude)),
+        appearance=torch.cat((existing.appearance, existing.appearance[parent_indices])),
+        appearance_valid=torch.cat((existing.appearance_valid, existing.appearance_valid[parent_indices])),
+        covariance_epsilon=existing.covariance_epsilon,
+        primitive_kind=(bank.kind.value,) * centers.shape[0],
+        primitive_id=tuple(existing.primitive_id or ()) + child_ids,
+        gauge_policy=existing.gauge_policy,
+        gauge_config_hash=existing.gauge_config_hash,
+    )
+
+
 def _propagate_bank(
     bank: GaussianMemoryBank, anchors: AnchorBatch, *, config: PropagationConfig,
     round_index: int, bounds_min: torch.Tensor, bounds_max: torch.Tensor, maximum_count: int,
@@ -108,18 +140,12 @@ def _propagate_bank(
         return bank, (), (rejected_bounds, rejected_unsupported, rejected_other)
     index = torch.tensor(parent_indices, dtype=torch.int64, device=existing.centers_ras_mm.device)
     new_centers = torch.cat((existing.centers_ras_mm, torch.stack(accepted_centers)))
-    raw = RawGaussianParameters(
-        centers_ras_mm=new_centers,
-        covariance_factor=torch.cat((existing.covariance_factor, existing.covariance_factor[index])),
-        raw_log_support_amplitude=torch.cat((existing.log_support_amplitude, existing.log_support_amplitude[index])),
-        appearance=torch.cat((existing.appearance, existing.appearance[index])),
-        appearance_valid=torch.cat((existing.appearance_valid, existing.appearance_valid[index])),
-        patient_state_index=torch.zeros(new_centers.shape[0], dtype=torch.int64, device=new_centers.device),
-        primitive_kind=(bank.kind.value,) * new_centers.shape[0],
-        primitive_id=tuple(existing.primitive_id or ()) + tuple(child_ids),
-        covariance_epsilon=existing.covariance_epsilon,
+    gaussians = _append_gauge_preserving_children(
+        bank,
+        centers=new_centers,
+        parent_indices=index,
+        child_ids=tuple(child_ids),
     )
-    gaussians = gaussian_batch_from_raw(raw)
     parent_ids = tuple(existing.primitive_id[i] for i in parent_indices)  # type: ignore[index]
     provenance = tuple(hashlib.sha256(f"propagate:{parent}:{round_index}:{config.config_hash}".encode()).hexdigest() for parent in parent_ids)
     parent_observation = bank.observability

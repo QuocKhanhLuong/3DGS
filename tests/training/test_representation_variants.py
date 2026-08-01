@@ -86,6 +86,95 @@ def _episode(tmp_path, suffix: str) -> tuple[EpisodeLedger, EpisodeAssignment]:
     return ledger, assignment
 
 
+def _multi_target_episode(tmp_path) -> tuple[EpisodeLedger, EpisodeAssignment]:
+    shape = (9, 9)
+    payloads = {
+        "context": _payload(0.0, shape),
+        "target-a": _payload(0.2, shape),
+        "target-b": _payload(0.4, shape),
+    }
+    entries = tuple(
+        AvailabilityObservationMeta(
+            observation_id=name,
+            patient_id="patient",
+            split="train",
+            relative_path=f"multi-{name}.npy",
+            modality_id="T2",
+            plane=_plane(name, float(index), shape),
+            is_synthetic=True,
+        )
+        for index, name in enumerate(payloads)
+    )
+    for name, payload in payloads.items():
+        (tmp_path / f"multi-{name}.npy").write_bytes(payload)
+    manifest = SparseAvailabilityManifest(
+        entries,
+        manifest_id="variants-multi-target",
+        integrity_digests={name: hashlib.sha256(payload).hexdigest() for name, payload in payloads.items()},
+    )
+    assignment = EpisodeAssignment.create(
+        manifest,
+        episode_id="episode-multi-target",
+        patient_id="patient",
+        context_ids=("context",),
+        target_ids=("target-a", "target-b"),
+    )
+    return (
+        EpisodeLedger(
+            manifest,
+            assignment,
+            tmp_path,
+            split_registry=PatientSplitRegistry.create((manifest,)),
+        ),
+        assignment,
+    )
+
+
+def _multimodal_episode(tmp_path) -> tuple[EpisodeLedger, EpisodeAssignment]:
+    shape = (9, 9)
+    specification = (
+        ("context-t1", "T1", 0.0),
+        ("context-t2", "T2", 0.3),
+        ("target-t2", "T2", 0.5),
+    )
+    payloads = {name: _payload(phase, shape) for name, _, phase in specification}
+    entries = tuple(
+        AvailabilityObservationMeta(
+            observation_id=name,
+            patient_id="patient",
+            split="train",
+            relative_path=f"mapped-{name}.npy",
+            modality_id=modality,
+            plane=_plane(name, float(index), shape),
+            is_synthetic=True,
+        )
+        for index, (name, modality, _) in enumerate(specification)
+    )
+    for name, payload in payloads.items():
+        (tmp_path / f"mapped-{name}.npy").write_bytes(payload)
+    manifest = SparseAvailabilityManifest(
+        entries,
+        manifest_id="variants-explicit-mapping",
+        integrity_digests={name: hashlib.sha256(payload).hexdigest() for name, payload in payloads.items()},
+    )
+    assignment = EpisodeAssignment.create(
+        manifest,
+        episode_id="episode-explicit-mapping",
+        patient_id="patient",
+        context_ids=("context-t1", "context-t2"),
+        target_ids=("target-t2",),
+    )
+    return (
+        EpisodeLedger(
+            manifest,
+            assignment,
+            tmp_path,
+            split_registry=PatientSplitRegistry.create((manifest,)),
+        ),
+        assignment,
+    )
+
+
 def _config() -> LegalEpisodeConfig:
     return LegalEpisodeConfig(
         supports=FixedSupportConfig(step_vu=(4, 4)),
@@ -95,10 +184,10 @@ def _config() -> LegalEpisodeConfig:
     )
 
 
-def _encoder_head() -> tuple[EvidenceEncoder, FixedGaussianHead]:
+def _encoder_head(*, appearance_channels: int = 1) -> tuple[EvidenceEncoder, FixedGaussianHead]:
     return (
         EvidenceEncoder(EncoderConfig(variant="e2")),
-        FixedGaussianHead(FixedGaussianHeadConfig(input_dim=25, appearance_channels=1)),
+        FixedGaussianHead(FixedGaussianHeadConfig(input_dim=25, appearance_channels=appearance_channels)),
     )
 
 
@@ -180,6 +269,32 @@ def test_anchor_representation_switches_build_only_the_selected_field(tmp_path, 
         assert any(float(value.abs().sum()) > 0 for value in gradients if value is not None)
 
 
+def test_static_memory_channel_order_follows_explicit_mapping_not_modality_sort(tmp_path) -> None:
+    torch.manual_seed(14)
+    ledger, assignment = _multimodal_episode(tmp_path)
+    encoder, head = _encoder_head(appearance_channels=2)
+    config = LegalEpisodeConfig(
+        supports=FixedSupportConfig(step_vu=(4, 4)),
+        renderer=RenderConfig(support_epsilon=1e-10),
+        reconstruction_loss=ReconstructionLossConfig(intensity="mse"),
+        modality_to_appearance_channel={"T2": 0, "T1": 1},
+    )
+    result = build_representation_episode_step(
+        ledger=ledger,
+        assignment=assignment,
+        target_id="target-t2",
+        representation_variant="r3",
+        config=config,
+        encoder=encoder,
+        gaussian_head=head,
+        bootstrap_config=AnchorBootstrapConfig(candidate=CandidateSelectionConfig(maximum_candidates=4)),
+        propagation_config=PropagationConfig(variant="p0"),
+    )
+    assert result.patient_state is not None
+    assert result.patient_state.memory.modality_ids == ("T2", "T1")
+    assert result.loss.status == "OK"
+
+
 def test_fixed_support_gaussian_switch_uses_the_maintained_t1c_path(tmp_path) -> None:
     torch.manual_seed(12)
     ledger, assignment = _episode(tmp_path, "r1")
@@ -210,6 +325,19 @@ def test_dispatcher_rejects_unused_modules_before_opening_context(tmp_path) -> N
             representation_variant="r0",
             encoder=encoder,
             gaussian_head=head,
+        )
+    assert ledger.event_records == ()
+
+
+def test_dispatcher_rejects_multi_target_assignment_before_opening_context(tmp_path) -> None:
+    ledger, assignment = _multi_target_episode(tmp_path)
+    with pytest.raises(ValueError, match="exactly one target"):
+        build_representation_episode_step(
+            ledger=ledger,
+            assignment=assignment,
+            target_id="target-a",
+            representation_variant="r0",
+            config=_config(),
         )
     assert ledger.event_records == ()
 

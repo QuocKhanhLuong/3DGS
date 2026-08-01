@@ -14,9 +14,10 @@ import time
 import torch
 
 from ..contracts.coordinates import TargetGrid
+from ..features.encoder import EncoderConfig, EvidenceEncoder
 from ..reconstruction import build_reconstruction_package, export_reconstruction_package, reconstruct_volume
 from ..renderer import RenderConfig
-from ..state import load_patient_state
+from ..state import PatientState, load_patient_state
 
 
 def _digest(value: str) -> str:
@@ -29,6 +30,18 @@ def _file_hash(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _field_state_hash(payload: object) -> str:
+    if not isinstance(payload, dict) or not payload:
+        raise ValueError("checkpoint field snapshot must be a non-empty tensor dictionary")
+    content = bytearray()
+    for name, value in payload.items():
+        if not isinstance(name, str) or not isinstance(value, torch.Tensor):
+            raise ValueError("checkpoint field snapshot contains an invalid entry")
+        content.extend(name.encode())
+        content.extend(value.detach().cpu().contiguous().numpy().tobytes())
+    return hashlib.sha256(bytes(content)).hexdigest()
 
 
 def _load_config(path: Path) -> tuple[dict[str, object], str]:
@@ -64,6 +77,34 @@ def _resolve_state_path(checkpoint_path: Path) -> tuple[Path, str, dict[str, obj
     return state_path, _file_hash(checkpoint_path), payload
 
 
+def _verify_checkpoint_state_binding(
+    checkpoint: dict[str, object],
+    state: PatientState,
+    config: dict[str, object],
+) -> str:
+    if checkpoint.get("patient_state_version") != state.state_version:
+        raise ValueError("checkpoint patient-state version does not match the serialized patient state")
+    field_hash = checkpoint.get("field_for_patient_state_hash")
+    if field_hash != state.field_model_hash or checkpoint.get("patient_state_field_model_hash") != state.field_model_hash:
+        raise ValueError("checkpoint field identity does not match the patient state")
+    if _field_state_hash(checkpoint.get("field")) != state.field_model_hash:
+        raise ValueError("checkpoint field tensor snapshot does not match its declared patient-state hash")
+    encoder_hash = checkpoint.get("encoder_for_patient_state_hash")
+    if not isinstance(encoder_hash, str) or len(encoder_hash) != 64:
+        raise ValueError("checkpoint encoder identity is missing or invalid")
+    encoder_payload = checkpoint.get("encoder")
+    if not isinstance(encoder_payload, dict):
+        raise ValueError("checkpoint encoder snapshot must be a tensor dictionary")
+    encoder = EvidenceEncoder(EncoderConfig(variant=str(config["encoder_variant"])))
+    encoder.load_state_dict(encoder_payload, strict=True)
+    if encoder.state_hash() != encoder_hash:
+        raise ValueError("checkpoint encoder tensor snapshot does not match its declared identity")
+    updates = checkpoint.get("post_snapshot_optimizer_updates")
+    if not isinstance(updates, int) or isinstance(updates, bool) or updates < 0:
+        raise ValueError("checkpoint must declare optimizer updates after the patient-state snapshot")
+    return encoder_hash
+
+
 def _load_manifest(path: Path, *, state_version: str, manifest_hash: str, patient_id: str) -> dict[str, object]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if payload.get("schema") != "smagm-static-reconstruction-manifest-v1":
@@ -92,6 +133,9 @@ def run(
     state = load_patient_state(state_path)
     if state.config_hash != config_hash:
         raise ValueError("reconstruction config hash disagrees with frozen patient state")
+    encoder_identity = checkpoint_hash
+    if checkpoint_metadata is not None:
+        encoder_identity = _verify_checkpoint_state_binding(checkpoint_metadata, state, config)
     manifest = _load_manifest(
         manifest_path,
         state_version=state.state_version,
@@ -146,7 +190,7 @@ def run(
     package = build_reconstruction_package(
         (volume,), repository_commit=commit, config_hash=state.config_hash,
         manifest_hash=state.manifest_hash, split_hash=str(manifest["split_hash"]), assignment_hash=str(manifest["assignment_hash"]),
-        encoder_identity=checkpoint_hash, field_identity=state.field_model_hash,
+        encoder_identity=encoder_identity, field_identity=state.field_model_hash,
         gaussian_identity=state.memory.memory_hash, propagation_identity=_digest(f"round:{state.update_round}:{config['propagation_variant']}"),
         environment_hash=_digest(json.dumps(environment_payload, sort_keys=True)),
         runtime_seconds=time.perf_counter() - start,
@@ -158,6 +202,8 @@ def run(
         "volume_artifact_hash": volume.artifact_hash,
         "runtime_seconds": time.perf_counter() - start,
         "repository_commit": commit,
+        "encoder_identity": encoder_identity,
+        "field_identity": state.field_model_hash,
         "training_repository_dirty": None if checkpoint_metadata is None else checkpoint_metadata["repository_dirty"],
         "training_repository_diff_hash": None if checkpoint_metadata is None else checkpoint_metadata["repository_diff_hash"],
     }

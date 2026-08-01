@@ -36,6 +36,36 @@ class StaticEpisodeResult:
     representation_plan: RepresentationPlan
 
 
+def _static_modality_order(
+    config: LegalEpisodeConfig,
+    gaussian_head: FixedGaussianHead,
+    context_modalities: set[str],
+) -> tuple[str, ...]:
+    """Return the exact memory-channel order declared by the episode mapping.
+
+    Static memory stores one compact appearance column per Gaussian-head output
+    channel.  Therefore the mapping must be a bijection onto ``0..M-1`` rather
+    than being reconstructed from sorted modality names.
+    """
+
+    mapping = dict(config.modality_to_appearance_channel or {})
+    ordered = tuple(name for name, _ in sorted(mapping.items(), key=lambda item: (item[1], item[0])))
+    channels = tuple(mapping[name] for name in ordered)
+    expected = tuple(range(gaussian_head.config.appearance_channels))
+    if channels != expected:
+        raise ValueError(
+            "static appearance mapping must cover every Gaussian-head channel exactly once and contiguously"
+        )
+    if not context_modalities or not context_modalities.issubset(mapping):
+        raise ValueError("every static context modality must have an explicit appearance-channel mapping")
+    for modality_id in context_modalities:
+        config.appearance_channel_for(
+            modality_id,
+            available_channels=gaussian_head.config.appearance_channels,
+        )
+    return ordered
+
+
 def build_static_episode_step(
     *, ledger: EpisodeLedger, assignment: EpisodeAssignment, target_id: str,
     encoder: EvidenceEncoder, gaussian_head: FixedGaussianHead,
@@ -59,6 +89,10 @@ def build_static_episode_step(
     trainable field is supplied by the caller and never registered in state.
     """
 
+    if target_id not in assignment.target_ids:
+        raise PermissionError("target_id must be assigned as a target")
+    if len(assignment.target_ids) != 1:
+        raise ValueError("the static reference supports exactly one target per episode")
     propagation_config = propagation_config or PropagationConfig(variant="p0")
     plan = resolve_representation_plan(
         representation_variant,
@@ -94,7 +128,8 @@ def build_static_episode_step(
         )
         for item in context_step.context_evidence
     )
-    modality_ids = tuple(sorted({item.modality_id for item in cached}))
+    context_modalities = {item.modality_id for item in cached}
+    modality_ids = _static_modality_order(config, gaussian_head, context_modalities)
     anchors = bootstrap_anchors(cached, patient_id=patient_id, modality_ids=modality_ids, config=bootstrap_config)
     field_values: torch.Tensor | None
     if plan.variant is RepresentationVariant.ANCHOR_FIELD:
@@ -141,14 +176,18 @@ def build_static_episode_step(
         state = apply_memory_update(state, propagated_memory)
     target_metadata = ledger.metadata(target_id)
     target_modality = target_metadata.modality_id
-    if target_modality not in modality_ids:
-        raise ValueError("static reference requires a legal context modality for the target")
+    if target_modality not in context_modalities:
+        raise ValueError("static reference requires a legal context observation for the target modality")
+    target_appearance_channel = config.appearance_channel_for(
+        target_modality,
+        available_channels=state.memory.structural.gaussians.appearance_channels,
+    )
     frozen = FrozenPatientState.create(ledger=ledger, gaussians=combined_memory_gaussians(state), upstream_state_hash=state.state_version)
     ledger.expose_target_metadata(target_id)
     commit = ledger.commit_target(target_id, frozen.state_version)
     prediction, receipt = EpisodeController().render_and_register(
         ledger=ledger, commit_capability=commit, frozen_state=frozen,
-        appearance_channel=modality_ids.index(target_modality), render_config=config.renderer,
+        appearance_channel=target_appearance_channel, render_config=config.renderer,
     )
     target_payload = ledger.reveal_target(target_id, receipt)
     from ..data.io import decode_observation
