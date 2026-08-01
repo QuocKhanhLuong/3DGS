@@ -1,6 +1,6 @@
 # T1-C Legal Episodic Trainer Handoff
 
-Status: `IMPLEMENTED SOFTWARE TRANCHE — HUMAN GATE PENDING`
+Status: `IMPLEMENTED CANDIDATE — IN REVIEW`
 
 T1-C connects the existing T0.5 legality contracts and T1-B fixed-topology
 evidence path into one legal context-to-target optimizer step. It is software
@@ -42,17 +42,24 @@ feature cache, support selection, Gaussian construction, or frozen state.
 
 ```text
 PYTHONPATH=src python -m smagm.cli.train --help
-PYTHONPATH=src python -m smagm.cli.train --variant e0
-PYTHONPATH=src python -m smagm.cli.train --variant e1
-PYTHONPATH=src python -m smagm.cli.train --variant e2
-python scripts/train.py --variant e2
+python scripts/train.py --config configs/experiments/t1c_synthetic.json --variant e0 --steps 2 --output-dir /tmp/smagm-t1c-e0
+python scripts/train.py --config configs/experiments/t1c_synthetic.json --variant e1 --steps 2 --output-dir /tmp/smagm-t1c-e1
+python scripts/train.py --config configs/experiments/t1c_synthetic.json --variant e2 --steps 2 --output-dir /tmp/smagm-t1c-e2
 python -m pytest -q tests/data/test_t1c_data.py tests/losses/test_reconstruction_losses.py tests/training --tb=short
 python scripts/check_phase.py T1C
 ```
 
-`--allow-dirty` is development-only. Exact gate evidence must run on a clean
-commit and records commit, dirty state, config, manifest, split, assignment
-schedule, seed, environment, checkpoint, receipt, state, and audit hashes.
+The command rejects a dirty checkout so a development run cannot be presented
+as final evidence. Exact gate evidence must run on a clean commit and records
+resolved config, manifest, split, assignment schedule, modality mapping,
+preprocessing, encoder/head, renderer/gauge, checkpoint, receipt, state,
+environment, opened-file ledger, and artifact hashes. A resumable checkpoint is
+accepted only when its immutable run identity, manifest, split registry, and
+scheduled assignment hashes match; it is never written mid-accumulation.
+
+When `--output-dir` is supplied, the run writes the declared resolved config,
+provenance, metrics, summary, checkpoint, serialized episode ledger, and an
+artifact-digest manifest. These artifacts document software execution only.
 
 ## Non-claims and boundary
 

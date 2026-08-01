@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import re
 
 import torch
 
@@ -12,6 +13,25 @@ from .contracts import EncoderFeatureMaps, FeatureGridToPlaneTransform
 
 class FeatureCacheMismatchError(KeyError):
     """Raised for a cache miss or any key mismatch."""
+
+
+def _feature_value_hash(features: EncoderFeatureMaps) -> str:
+    """Audit immutable cached values without detaching the live autograd path."""
+
+    digest = hashlib.sha256()
+    for name, tensor in (
+        ("structural", features.structural),
+        ("appearance", features.appearance),
+        ("reliability", features.reliability),
+        ("valid_feature_mask", features.valid_feature_mask),
+    ):
+        value = tensor.detach().cpu().contiguous()
+        digest.update(f"{name}:{value.dtype}:{tuple(value.shape)}".encode("utf-8"))
+        if value.dtype is torch.bool:
+            digest.update(value.to(dtype=torch.uint8).numpy().tobytes())
+        else:
+            digest.update(value.numpy().tobytes())
+    return digest.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -24,8 +44,10 @@ class FeatureCacheKey:
     encoder_configuration_hash: str
     encoder_state_hash: str
     input_preprocessing_hash: str
+    input_content_hash: str
     feature_grid_transform: FeatureGridToPlaneTransform
     valid_feature_mask_hash: str
+    output_stride: int
     dtype: str
     output_channel_contract: tuple[int, int, int]
 
@@ -37,11 +59,12 @@ class FeatureCacheKey:
             "encoder_configuration_hash",
             "encoder_state_hash",
             "input_preprocessing_hash",
+            "input_content_hash",
             "valid_feature_mask_hash",
         ):
             value = getattr(self, name)
-            if not isinstance(value, str) or not value:
-                raise ValueError(f"{name} must be a non-empty hash or identity")
+            if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                raise ValueError(f"{name} must be a SHA-256 digest")
         if not isinstance(self.feature_grid_transform, FeatureGridToPlaneTransform):
             raise TypeError("feature_grid_transform must be a FeatureGridToPlaneTransform")
         if self.feature_grid_transform.input_plane is None:
@@ -52,6 +75,10 @@ class FeatureCacheKey:
             raise ValueError("cache source-plane hash must match the transform-bound plane")
         if self.dtype not in ("torch.float32", "torch.float64"):
             raise ValueError("cache dtype must be torch.float32 or torch.float64")
+        if self.output_stride not in (1, 2, 4):
+            raise ValueError("cache output_stride must be one of 1, 2, or 4")
+        if self.feature_grid_transform.stride_vu != (self.output_stride, self.output_stride):
+            raise ValueError("cache output_stride must match the feature-grid transform")
         if len(self.output_channel_contract) != 3 or any(int(value) <= 0 for value in self.output_channel_contract):
             raise ValueError("output_channel_contract must contain three positive channel counts")
 
@@ -65,6 +92,7 @@ class FeatureCacheKey:
         encoder_configuration_hash: str,
         encoder_state_hash: str,
         input_preprocessing_hash: str,
+        input_content_hash: str,
     ) -> "FeatureCacheKey":
         if not 0 <= batch_index < features.batch_size:
             raise IndexError("batch_index is outside feature batch")
@@ -80,8 +108,10 @@ class FeatureCacheKey:
             encoder_configuration_hash=encoder_configuration_hash,
             encoder_state_hash=encoder_state_hash,
             input_preprocessing_hash=input_preprocessing_hash,
+            input_content_hash=input_content_hash,
             feature_grid_transform=transform,
             valid_feature_mask_hash=mask_hash,
+            output_stride=transform.stride_vu[0],
             dtype=str(features.structural.dtype),
             output_channel_contract=(features.structural.shape[1], features.appearance.shape[1], features.reliability.shape[1]),
         )
@@ -91,6 +121,7 @@ class FeatureCacheKey:
 class CachedFeatureMaps:
     key: FeatureCacheKey
     features: EncoderFeatureMaps
+    feature_value_hash: str
 
 
 class FeatureCache:
@@ -113,15 +144,23 @@ class FeatureCache:
             encoder_configuration_hash=key.encoder_configuration_hash,
             encoder_state_hash=key.encoder_state_hash,
             input_preprocessing_hash=key.input_preprocessing_hash,
+            input_content_hash=key.input_content_hash,
         )
         if actual != key:
             raise FeatureCacheMismatchError("cache key does not match feature provenance or output contract")
-        self._items[key] = CachedFeatureMaps(key=key, features=features)
+        self._items[key] = CachedFeatureMaps(
+            key=key,
+            features=features,
+            feature_value_hash=_feature_value_hash(features),
+        )
 
     def get(self, key: FeatureCacheKey) -> EncoderFeatureMaps:
         if key not in self._items:
             raise FeatureCacheMismatchError("no exact feature-cache entry exists for the requested key")
-        return self._items[key].features
+        cached = self._items[key]
+        if _feature_value_hash(cached.features) != cached.feature_value_hash:
+            raise FeatureCacheMismatchError("cached feature tensor values changed after insertion")
+        return cached.features
 
     def __len__(self) -> int:
         return len(self._items)
