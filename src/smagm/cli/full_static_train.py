@@ -34,6 +34,21 @@ def _digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def _frozen_state_dict(module: torch.nn.Module) -> dict[str, torch.Tensor]:
+    return {
+        name: value.detach().cpu().contiguous().clone()
+        for name, value in module.state_dict().items()
+    }
+
+
+def _model_state_hash(module: torch.nn.Module) -> str:
+    payload = b"".join(
+        name.encode() + value.detach().cpu().contiguous().numpy().tobytes()
+        for name, value in module.state_dict().items()
+    )
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _atomic_torch_save(payload: object, path: Path) -> None:
     with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".tmp", delete=False) as handle:
         temporary = Path(handle.name)
@@ -208,6 +223,10 @@ def run(*, config_path: Path, steps: int, output_dir: Path, seed: int | None = N
     ) for index, name in enumerate(payloads))
     manifest = SparseAvailabilityManifest(entries, manifest_id="full-static-synthetic-v1", integrity_digests={name: hashlib.sha256(payload).hexdigest() for name, payload in payloads.items()})
     registry = PatientSplitRegistry.create((manifest,)); reports = []; last_state = None
+    state_encoder_snapshot: dict[str, torch.Tensor] | None = None
+    state_field_snapshot: dict[str, torch.Tensor] | None = None
+    state_encoder_hash: str | None = None
+    state_field_hash: str | None = None
     start = time.perf_counter()
     last_assignment = None
     with tempfile.TemporaryDirectory(prefix="smagm-full-static-") as directory:
@@ -231,6 +250,12 @@ def run(*, config_path: Path, steps: int, output_dir: Path, seed: int | None = N
             field_grad = torch.sqrt(sum((parameter.grad.square().sum() for parameter in field.parameters() if parameter.grad is not None), torch.tensor(0.0)))
             if not bool(torch.isfinite(encoder_grad) and torch.isfinite(field_grad)) or float(encoder_grad) <= 0 or float(field_grad) <= 0:
                 raise FloatingPointError("full-static smoke requires finite non-zero encoder and field gradients")
+            state_encoder_snapshot = _frozen_state_dict(encoder)
+            state_field_snapshot = _frozen_state_dict(field)
+            state_encoder_hash = encoder.state_hash
+            state_field_hash = _model_state_hash(field)
+            if state_field_hash != result.patient_state.field_model_hash:
+                raise RuntimeError("patient state does not bind the exact field snapshot used to create it")
             optimizer.step(); last_state = result.patient_state
             memory_tensors = (
                 result.patient_state.memory.structural.gaussians.centers_ras_mm,
@@ -249,18 +274,33 @@ def run(*, config_path: Path, steps: int, output_dir: Path, seed: int | None = N
                 "patient_memory_tensor_bytes": sum(tensor.numel() * tensor.element_size() for tensor in memory_tensors),
                 "state_version": result.patient_state.state_version, "receipt_hash": result.receipt_hash,
                 "event_order": [event.event for event in ledger.event_records],
+                "encoder_state_hash": state_encoder_hash,
+                "field_model_hash": state_field_hash,
             })
     assert last_state is not None and last_assignment is not None
+    assert state_encoder_snapshot is not None and state_field_snapshot is not None
+    assert state_encoder_hash is not None and state_field_hash is not None
     output_dir.mkdir(parents=True, exist_ok=False)
     save_patient_state(last_state, output_dir / "patient_state.pt")
+    encoder_after_training = _frozen_state_dict(encoder)
+    field_after_training = _frozen_state_dict(field)
     _atomic_torch_save(
         {
             "schema": "smagm-full-static-checkpoint-v1",
-            "encoder": encoder.state_dict(),
-            "field": field.state_dict(),
+            "encoder": state_encoder_snapshot,
+            "field": state_field_snapshot,
+            "encoder_for_patient_state_hash": state_encoder_hash,
+            "field_for_patient_state_hash": state_field_hash,
+            "encoder_after_training": encoder_after_training,
+            "field_after_training": field_after_training,
+            "encoder_after_training_hash": encoder.state_hash,
+            "field_after_training_hash": _model_state_hash(field),
             "config_hash": config_hash,
             "patient_state_path": "patient_state.pt",
-            "patient_state_snapshot": "pre-target-reveal representation used for the final recorded prediction",
+            "patient_state_snapshot": "exact model parameters used before target commitment for the final recorded prediction",
+            "post_snapshot_optimizer_updates": 1,
+            "patient_state_version": last_state.state_version,
+            "patient_state_field_model_hash": last_state.field_model_hash,
             **git_metadata,
             "steps": steps,
         },
@@ -287,6 +327,9 @@ def run(*, config_path: Path, steps: int, output_dir: Path, seed: int | None = N
         "runtime_seconds": time.perf_counter() - start, "t4_routing": False,
         "representation_plan_hash": representation_plan.plan_hash,
         "active_modules": representation_plan.active_modules,
+        "patient_state_encoder_hash": state_encoder_hash,
+        "patient_state_field_model_hash": state_field_hash,
+        "post_snapshot_optimizer_updates": 1,
         **git_metadata,
     }
     _atomic_json(summary, output_dir / "summary.json")
