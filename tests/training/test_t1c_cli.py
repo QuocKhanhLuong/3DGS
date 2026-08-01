@@ -71,3 +71,13 @@ def test_config_file_drives_synthetic_cli_and_writes_resolved_artifacts(tmp_path
         "metrics.jsonl",
         "resolved_config.json",
     }
+
+
+def test_matched_protocol_hash_excludes_only_variant_and_output_location(tmp_path) -> None:
+    config_path = ROOT / "configs" / "experiments" / "t1c_synthetic.json"
+    resolved = [
+        load_resolved_config(config_path, variant=variant, steps=2, output_dir=tmp_path / variant)[0]
+        for variant in ("e0", "e1", "e2")
+    ]
+    assert len({item["matched_protocol_hash"] for item in resolved}) == 1
+    assert len({item["selected_variant"] for item in resolved}) == 3

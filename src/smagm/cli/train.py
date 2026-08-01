@@ -83,6 +83,19 @@ def _mapping(value: object, name: str) -> dict[str, Any]:
     return dict(value)
 
 
+def matched_protocol_hash(config: Mapping[str, Any]) -> str:
+    """Hash only conditions that must be identical across E0, E1, and E2.
+
+    The selected encoder variant and an output location are run-local details;
+    including either would turn one matched protocol into three identities.
+    """
+
+    shared = json.loads(json.dumps(config, sort_keys=True))
+    shared.pop("selected_variant", None)
+    shared.pop("output_dir", None)
+    return _canonical_hash(shared)
+
+
 def load_resolved_config(
     path: str | Path,
     *,
@@ -152,6 +165,7 @@ def load_resolved_config(
     if output_dir is not None:
         config["output_dir"] = str(Path(output_dir))
     config["source_config"] = str(source)
+    config["matched_protocol_hash"] = matched_protocol_hash(config)
     return config, _canonical_hash(config)
 
 
@@ -230,8 +244,8 @@ def _build_trainer(
             **fairness,
             "episode_config_hash": episode_cfg.config_hash,
             "head_config": asdict(head_cfg),
+            "matched_protocol_hash": config["matched_protocol_hash"],
             "renderer_version": episode_cfg.renderer.renderer_version,
-            "resolved_config_hash": resolved_config_hash,
         },
     )
     trainer = T1CTrainer(
@@ -382,6 +396,7 @@ def run_synthetic_training(
         "head_parameter_count": sum(parameter.numel() for parameter in head.parameters()),
         "manifest_hash": manifest.manifest_hash,
         "matched_experiment_identity": trainer.matched_experiment_identity,
+        "matched_protocol_hash": config["matched_protocol_hash"],
         "resolved_config_hash": resolved_config_hash,
         "provenance_record_hash": provenance.record_hash,
         "reproducible": not provenance.dirty,
