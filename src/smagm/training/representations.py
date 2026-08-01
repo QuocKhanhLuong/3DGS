@@ -37,6 +37,24 @@ def _hash(payload: object) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _direct_modality_order(
+    config: LegalEpisodeConfig,
+    context_modalities: set[str],
+) -> tuple[str, ...]:
+    """Resolve compact R0/R2 appearance slots from the explicit mapping."""
+
+    mapping = dict(config.modality_to_appearance_channel or {})
+    ordered = tuple(name for name, _ in sorted(mapping.items(), key=lambda item: (item[1], item[0])))
+    channels = tuple(mapping[name] for name in ordered)
+    if channels != tuple(range(len(ordered))):
+        raise ValueError(
+            "direct baseline appearance mapping must be unique and contiguous from zero"
+        )
+    if not context_modalities or not context_modalities.issubset(mapping):
+        raise ValueError("every direct-baseline context modality requires an explicit appearance mapping")
+    return ordered
+
+
 @dataclass(frozen=True)
 class ContextImageEvidence:
     """Preprocessed context payload without an encoder feature allocation."""
@@ -80,6 +98,10 @@ def _direct_context_baseline(
     plan: RepresentationPlan,
     interpolation_config: SparseInterpolationConfig | None,
 ) -> RepresentationEpisodeResult:
+    if target_id not in assignment.target_ids:
+        raise PermissionError("target_id must be assigned as a target")
+    if len(assignment.target_ids) != 1:
+        raise ValueError("the direct baseline reference supports exactly one target per episode")
     decoded_context = []
     for observation_id in assignment.context_ids:
         payload = ledger.open_context(observation_id)
@@ -95,10 +117,15 @@ def _direct_context_baseline(
             normalized.image.unsqueeze(0).to(dtype=torch.float32),
             normalized.valid_mask.unsqueeze(0),
         ))
-    modality_ids = tuple(sorted({item.modality_id for item in evidence}))
+    context_modalities = {item.modality_id for item in evidence}
+    modality_ids = _direct_modality_order(config, context_modalities)
     target_metadata = ledger.metadata(target_id)
-    if target_metadata.modality_id not in modality_ids:
+    if target_metadata.modality_id not in context_modalities:
         raise ValueError("baseline target modality requires legal same-modality context")
+    target_appearance_channel = config.appearance_channel_for(
+        target_metadata.modality_id,
+        available_channels=len(modality_ids),
+    )
     seed = construct_sparse_interpolation_gaussians(
         evidence,
         modality_ids=modality_ids,
@@ -128,7 +155,7 @@ def _direct_context_baseline(
         ledger=ledger,
         commit_capability=commit,
         frozen_state=frozen,
-        appearance_channel=modality_ids.index(target_metadata.modality_id),
+        appearance_channel=target_appearance_channel,
         render_config=config.renderer,
     )
     payload = ledger.reveal_target(target_id, receipt)
@@ -177,6 +204,8 @@ def build_representation_episode_step(
     plan = resolve_representation_plan(representation_variant, propagation_variant=propagation_variant)
     if target_id not in assignment.target_ids:
         raise PermissionError("target_id must be assigned as a target")
+    if len(assignment.target_ids) != 1:
+        raise ValueError("the representation dispatcher supports exactly one target per episode")
     if plan.variant in (RepresentationVariant.INTERPOLATION, RepresentationVariant.FREE_GAUSSIAN):
         if any(module is not None for module in (encoder, gaussian_head, local_field, global_field)):
             raise ValueError("R0/R2 reject encoder, Gaussian-head, anchor-field, and global-field modules")
