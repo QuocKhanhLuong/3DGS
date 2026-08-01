@@ -223,7 +223,7 @@ def main() -> None:
     result = run(
         checkpoint_path=args.checkpoint_path,
         config_path=args.config,
-        manifest_path=args.manifest_path,
+        manifest_path=args.manifest,
         output_dir=args.output_dir,
         modality_id=args.modality,
     )
