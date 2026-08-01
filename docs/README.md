@@ -36,10 +36,11 @@ Current strategy and execution addendum
 - [`plans/2026-08-01-t5-reconstruction-export-evaluation-plan.md`](plans/2026-08-01-t5-reconstruction-export-evaluation-plan.md) — plane/full-grid reconstruction, export, isolated evaluation, and statistics.
 - [`experiments/2026-08-01-consolidated-static-pipeline-evaluation-plan.md`](experiments/2026-08-01-consolidated-static-pipeline-evaluation-plan.md) — one final matched evidence, representation, propagation, medical-fidelity, and compute evaluation suite.
 
-### Software
+### Software and execution handoffs
 
 - [`CODEBASE.md`](../CODEBASE.md)
 - [`codex/README.md`](codex/README.md)
+- [`codex/FULL_STATIC_PIPELINE_FAST_TRACK.md`](codex/FULL_STATIC_PIPELINE_FAST_TRACK.md) — direct coding-agent handoff for the one-branch continuous implementation sprint.
 - [`codex/T1A_EXECUTABLE_REFERENCE.md`](codex/T1A_EXECUTABLE_REFERENCE.md)
 - [`codex/T1B_TEACHER_FREE_ENCODER.md`](codex/T1B_TEACHER_FREE_ENCODER.md)
 - [`codex/T1C_EPISODIC_TRAINER.md`](codex/T1C_EPISODIC_TRAINER.md)
