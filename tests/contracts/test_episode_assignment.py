@@ -250,12 +250,13 @@ def test_development_episode_rejects_sealed_lesion_and_final_audit_roles(tmp_pat
     assert (tmp_path / "sealed.bin").read_bytes() == b"SEALED-AUDIT-SENTINEL"
 
 
-def test_stage_two_does_not_add_t1_or_later_source_modules() -> None:
-    # T0.5 is an event/legality correction only.  This source-level contract
-    # prevents quietly starting T1-A or later phases under the same gate.
+def test_stage_two_episode_contract_remains_isolated_from_later_source_modules() -> None:
+    # Later separately authorized packages must not backflow into T0.5 ledger
+    # ownership or change the assignment capability surface.
     root = __import__("pathlib").Path(__file__).resolve().parents[2] / "src" / "smagm"
-    prohibited = ("features", "baselines", "losses", "training", "anchors", "propagation", "routing")
-    assert not [path for name in prohibited for path in root.rglob(f"*{name}*") if path.is_file()]
+    source = (root / "contracts" / "episode.py").read_text(encoding="utf-8")
+    prohibited_imports = ("..features", "..baselines", "..losses", "..training", "..anchors", "..memory", "..routing")
+    assert [name for name in prohibited_imports if name in source] == []
     assert "prediction_digest" not in inspect.signature(EpisodeAssignment.create).parameters
 
 

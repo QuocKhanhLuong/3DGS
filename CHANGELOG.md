@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased — 2026-08-01
+
+### Added
+
+- Active T2 implementation candidate with deterministic RAS-mm anchors,
+  explicit registration identity, cache-only evidence aggregation, shared
+  anchor-local StructuralField, matched global-field baseline, seed Gaussian
+  memory, and immutable patient state.
+- Active T3 P0/P1 implementation candidate with typed structural/volumetric
+  banks, bounded deterministic propagation, parent/depth provenance,
+  uncertainty growth, versioned transactions, and safe state round-trips.
+- Active T5 implementation candidate with arbitrary-plane and chunked
+  full-grid reconstruction, affine-preserving NIfTI/tensor export, immutable
+  package hashes, explicit unsupported regions, serialized-only audit targets,
+  metrics, patient statistics, and corruption checks.
+- One receipt-gated R0–R5/P0–P1 dispatcher, exact ablation module inventories,
+  full E2+R4+P1 synthetic train/reconstruct/evaluate/audit CLI chain, resolved
+  configs, checkpoint-to-state binding, and synthetic accounting diagnostics.
+
+T4 routing, adaptive acquisition, residual assimilation, and learned topology
+remain absent. All T1-C/T2/T3/T5 Human Gates remain pending; these additions do
+not establish reconstruction quality or clinical validity.
+
 ## Unreleased — 2026-07-31
 
 ### Governance and phase-gate synchronization

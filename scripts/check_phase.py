@@ -127,6 +127,9 @@ def _validate_catalog(data: dict[str, Any]) -> None:
                 isinstance(part, str) and part for part in command
             ):
                 raise CatalogError(f"{check_id} command must be a non-empty string list")
+            dirty_argument = check.get("development_allow_dirty_argument")
+            if dirty_argument is not None and (not isinstance(dirty_argument, str) or not dirty_argument):
+                raise CatalogError(f"{check_id} development_allow_dirty_argument must be a non-empty string")
         elif check["mode"] == "pytest":
             if not isinstance(check.get("target"), str) or not check["target"]:
                 raise CatalogError(f"{check_id} pytest check requires target")
@@ -332,7 +335,39 @@ def _build_report(
     before = _git_metadata()
     execution_blocked = run and before["dirty"] and not allow_dirty
     checks = list(catalog["global_checks"]) + list(phase["checks"])
-    results = [_evaluate_check(check, run=run, execution_blocked=execution_blocked) for check in checks]
+    if allow_dirty:
+        resolved_checks = []
+        for check in checks:
+            dirty_argument = check.get("development_allow_dirty_argument")
+            if check["mode"] == "command" and dirty_argument:
+                check = dict(check)
+                check["command"] = [*check["command"], dirty_argument]
+            resolved_checks.append(check)
+        checks = resolved_checks
+    results = []
+    execution_cache: dict[tuple[object, ...], dict[str, Any]] = {}
+    identity_keys = {"id", "category", "severity", "mode", "description"}
+    for check in checks:
+        cache_key: tuple[object, ...] | None = None
+        if check["mode"] == "pytest":
+            cache_key = ("pytest", check["target"])
+        elif check["mode"] == "command":
+            cache_key = ("command", *check["command"])
+        if cache_key is not None and cache_key in execution_cache:
+            shared = execution_cache[cache_key]
+            result = {
+                "id": check["id"],
+                "category": check["category"],
+                "severity": check["severity"],
+                "mode": check["mode"],
+                "description": check["description"],
+                **{key: value for key, value in shared.items() if key not in identity_keys},
+            }
+        else:
+            result = _evaluate_check(check, run=run, execution_blocked=execution_blocked)
+            if cache_key is not None:
+                execution_cache[cache_key] = result
+        results.append(result)
     if phase["human_gate_status"] in {"passed", "passed_with_conditions", "failed"}:
         for item in results:
             if item["status"] == "PENDING_HUMAN":

@@ -1,0 +1,25 @@
+{
+  "schema": "smagm-static-ablation-matrix-v1",
+  "claim_scope": "software-contract and final owner-review experiment matrix only",
+  "shared_config": "configs/experiments/full_static_pipeline.json",
+  "evidence_variants": ["e0", "e1", "e2"],
+  "representation_variants": [
+    "interpolation",
+    "fixed_support_gaussian",
+    "free_gaussian",
+    "direct_anchor_gaussian",
+    "anchor_field",
+    "global_field"
+  ],
+  "propagation_variants": ["p0", "p1"],
+  "full": {
+    "encoder_variant": "e2",
+    "representation_variant": "anchor_field",
+    "propagation_variant": "p1"
+  },
+  "constraints": {
+    "p1_allowed_representations": ["anchor_field"],
+    "t4_routing": false,
+    "privileged_supervision": false
+  }
+}

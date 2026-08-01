@@ -42,9 +42,9 @@ strategy/addendum → docs/reconstruction → CODEBASE.md → docs/codex → qua
 
 ## Current primary task
 
-**T1-C software is implemented under explicit authorization and its Human Gate
-is pending; T2 remains blocked pending T1-F/T1-R/T1-M evidence and a separate
-Human decision.**
+**T1-C software is implemented with its Human Gate pending. T2, bounded-static
+T3 P0/P1, and T5 are active implementation candidates under the 2026-08-01
+fast-track authorization; T4 remains blocked.**
 
 The main method learns from permanently sparse patient manifests. It does not require teacher distillation or complete-volume targets. Within a training episode, only context slices enter the patient state; acquired sparse target slices are revealed only after rendering. Fully sampled volumes, when available, are isolated for audit evaluation and privileged upper-bound ablations.
 
@@ -85,12 +85,15 @@ The main method learns from permanently sparse patient manifests. It does not re
 3. **T1-A — implemented software contract:** analytic evidence and fixed Gaussian reference.
 4. **T1-B — implemented software tranche; Human Gate passed:** teacher-free encoder, cache, structural objectives, and fixed-topology baseline.
 5. **T1-C — implemented software tranche; Human Gate pending:** legal episodic trainer and matched synthetic E0/E1/E2 diagnostics.
-6. **T2–T5 — blocked:** anchors, fields, memory, routing, reconstruction, and isolated evaluation.
+6. **T2 — active implementation candidate; Human Gate pending:** physical anchors, shared/local-global field attribution, and seed memory.
+7. **T3 P0/P1 — active implementation candidate; Human Gate pending:** bounded static propagation and immutable state updates.
+8. **T4 — blocked:** routing and adaptive acquisition.
+9. **T5 — active implementation candidate; Human Gate pending:** reconstruction, export, and isolated serialized evaluation.
 
 ## Status
 
 T0, T0.5, and T1-A are implemented software contracts. T1-B software is merged
-and its Human Gate is passed. T1-C software is implemented with its Human Gate
-pending; T2+ remain blocked. Software completion is not reconstruction
-success; the representation remains a hypothesis until the required matched
-evidence and Human Gate decisions exist.
+and its Human Gate is passed. T1-C is implemented; T2, T3 P0/P1, and T5 have
+active branch implementations under fast-track authorization. All four Human
+Gates remain pending, T4 remains blocked, and software execution is not
+reconstruction success.

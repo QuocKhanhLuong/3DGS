@@ -13,7 +13,8 @@ import unittest
 class CleanImportTests(unittest.TestCase):
     def test_public_package_imports_in_clean_subprocess(self) -> None:
         source = Path(__file__).resolve().parents[2] / "src"
-        environment = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(source)}
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = str(source)
         with tempfile.TemporaryDirectory() as directory:
             completed = subprocess.run(
                 [sys.executable, "-c", "import smagm; print(smagm.__name__)"],

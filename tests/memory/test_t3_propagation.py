@@ -1,0 +1,115 @@
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+
+import pytest
+import torch
+
+from smagm.anchors import AnchorBatch, AnchorGeometryBatch
+from smagm.anchors.contracts import anchor_evidence_hash
+from smagm.contracts.coordinates import PhysicalPlane
+from smagm.memory import PropagationConfig, initialize_seed_memory, propagate_memory
+from smagm.renderer import render_plane
+from smagm.state import apply_memory_update, build_initial_patient_state, load_patient_state, save_patient_state
+
+
+def _digest(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _anchors(*, requires_grad: bool = False) -> AnchorBatch:
+    centers = torch.tensor([[0.0, 0.0, 0.0]], requires_grad=requires_grad)
+    geometry = AnchorGeometryBatch(
+        ("a",), centers, torch.eye(3).unsqueeze(0), torch.tensor([[True, True, True]]),
+        torch.tensor([[4.0, 4.0, 4.0]]), torch.ones(1, 1), torch.zeros(1, 1),
+        (("obs",),), ((_digest("plane"),),), (_digest("anchor"),),
+    )
+    evidence = torch.ones(1, 4)
+    appearance = torch.tensor([[2.0]])
+    valid = torch.ones(1, 1, dtype=torch.bool)
+    observability = torch.tensor([[1.0, 0.8, 0.1]])
+    digest = anchor_evidence_hash(patient_id="p", geometry=geometry, evidence=evidence, appearance=appearance, appearance_valid=valid, observability=observability)
+    return AnchorBatch("p", geometry, evidence, appearance, valid, observability, ("t1",), digest)
+
+
+def _state():
+    return build_initial_patient_state(
+        patient_id="p", manifest_hash=_digest("manifest"), config_hash=_digest("config"),
+        context_observation_ids=("obs",), cache_key_hashes=(_digest("cache"),), anchors=_anchors(),
+        field_config_hash=_digest("field-config"), field_model_hash=_digest("field-model"),
+    )
+
+
+def test_p0_returns_exact_seed_state_and_no_transaction() -> None:
+    anchors = _anchors(); memory = initialize_seed_memory(anchors)
+    result, transactions = propagate_memory(
+        memory, anchors, config=PropagationConfig(variant="p0"),
+        bounds_min_ras_mm=torch.tensor([-5.0, -5.0, -5.0]), bounds_max_ras_mm=torch.tensor([5.0, 5.0, 5.0]),
+    )
+    assert result is memory
+    assert transactions == ()
+
+
+def test_p1_is_deterministic_bounded_and_uncertainty_monotone() -> None:
+    anchors = _anchors(); memory = initialize_seed_memory(anchors)
+    config = PropagationConfig(rounds=2, step_mm=1.0, maximum_structural_primitives=8, maximum_volumetric_primitives=8)
+    kwargs = dict(memory=memory, anchors=anchors, config=config, bounds_min_ras_mm=torch.tensor([-5.0] * 3), bounds_max_ras_mm=torch.tensor([5.0] * 3))
+    first, transactions = propagate_memory(**kwargs)
+    second, second_transactions = propagate_memory(**kwargs)
+    assert first.memory_hash == second.memory_hash
+    assert transactions == second_transactions
+    assert first.primitive_count <= 16
+    assert torch.all(first.structural.observability.uncertainty[first.structural.gaussians.count // 2 :] >= memory.structural.observability.uncertainty.min())
+    assert first.structural.observability.propagation_depth.max() >= 1
+    assert all(len(item.transaction_hash) == 64 for item in transactions)
+    assert torch.all(first.structural.gaussians.centers_ras_mm.abs() <= 5)
+
+
+def test_propagated_state_is_immutable_versioned_and_safe_round_trip(tmp_path) -> None:
+    state = _state()
+    propagated, _ = propagate_memory(
+        state.memory, state.anchors, config=PropagationConfig(rounds=1),
+        bounds_min_ras_mm=torch.tensor([-5.0] * 3), bounds_max_ras_mm=torch.tensor([5.0] * 3),
+    )
+    updated = apply_memory_update(state, propagated)
+    assert updated.parent_state_version == state.state_version
+    assert updated.state_version != state.state_version
+    path = save_patient_state(updated, tmp_path / "state.pt")
+    restored = load_patient_state(path)
+    assert restored.state_version == updated.state_version
+    assert restored.memory.memory_hash == updated.memory.memory_hash
+    assert torch.equal(restored.memory.structural.gaussians.centers_ras_mm, updated.memory.structural.gaussians.centers_ras_mm)
+
+
+def test_state_restore_rejects_tampered_amplitude_gauge(tmp_path) -> None:
+    path = save_patient_state(_state(), tmp_path / "state.pt")
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    payload["memory"]["structural"]["gaussian"]["log_support_amplitude"] += 1.0
+    tampered = tmp_path / "tampered.pt"
+    torch.save(payload, tampered)
+    with pytest.raises(ValueError, match="mean-centered gauge"):
+        load_patient_state(tampered)
+
+
+def test_p0_p1_tranche_has_no_adaptive_topology_or_anchor_move_api() -> None:
+    repository = Path(__file__).resolve().parents[2]
+    assert not (repository / "src" / "smagm" / "memory" / "topology.py").exists()
+    assert not (repository / "src" / "smagm" / "anchors" / "adaptation.py").exists()
+
+
+def test_propagated_bank_renders_and_backpropagates_to_patient_geometry() -> None:
+    anchors = _anchors(requires_grad=True)
+    memory = initialize_seed_memory(anchors)
+    propagated, _ = propagate_memory(
+        memory, anchors, config=PropagationConfig(rounds=1),
+        bounds_min_ras_mm=torch.tensor([-5.0] * 3), bounds_max_ras_mm=torch.tensor([5.0] * 3),
+    )
+    plane = PhysicalPlane(
+        pixel_center_origin_ras_mm=(-2.0, -2.0, 0.0), axis_u_ras=(1.0, 0.0, 0.0), axis_v_ras=(0.0, 1.0, 0.0),
+        spacing_uv_mm=(1.0, 1.0), thickness_mm=1.0, shape_hw=(5, 5), signed_normal_ras=(0.0, 0.0, 1.0),
+    )
+    result = render_plane(propagated.volumetric.gaussians, plane)
+    result.intensity[~result.unsupported_mask].sum().backward()
+    assert anchors.centers_ras_mm.grad is not None
+    assert torch.isfinite(anchors.centers_ras_mm.grad).all()

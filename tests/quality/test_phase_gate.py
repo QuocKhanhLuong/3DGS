@@ -44,11 +44,14 @@ def test_catalog_contains_all_phases_and_exact_status_pairs() -> None:
     assert catalog["phases"]["T1C"]["implementation_status"] == "active"
     assert catalog["phases"]["T1C"]["human_gate_status"] == "pending"
     assert all(check["mode"] != "planned" for check in catalog["phases"]["T1C"]["checks"])
-    for phase_name in ("T2", "T3", "T4", "T5"):
+    for phase_name in ("T2", "T3", "T5"):
         phase = catalog["phases"][phase_name]
-        assert phase["implementation_status"] == "planned"
-        assert phase["human_gate_status"] == "blocked"
-        assert any(check["mode"] == "planned" for check in phase["checks"])
+        assert phase["implementation_status"] == "active"
+        assert phase["human_gate_status"] == "pending"
+    t4 = catalog["phases"]["T4"]
+    assert t4["implementation_status"] == "planned"
+    assert t4["human_gate_status"] == "blocked"
+    assert any(check["mode"] == "planned" for check in t4["checks"])
 
 
 def test_status_and_verdict_vocabularies_are_separate_and_valid() -> None:
@@ -136,7 +139,7 @@ def test_t1b_automated_pass_respects_recorded_human_gate(monkeypatch: pytest.Mon
 def test_planned_phase_reports_blocked_without_claiming_failure() -> None:
     runner = _load_runner()
     catalog = runner._load_catalog(CATALOG)
-    report = runner._build_report(catalog, "T5", run=False)
+    report = runner._build_report(catalog, "T4", run=False)
     assert report["automated_verdict"] == "BLOCKED"
     assert report["phase_verdict"] == "BLOCKED"
     assert report["human_gate_status"] == "blocked"

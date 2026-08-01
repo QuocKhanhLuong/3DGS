@@ -16,7 +16,9 @@ in [`2026-07-29-isbi-realignment.md`](2026-07-29-isbi-realignment.md).
 - **T2, T3, and T5:** implementation is authorized for one continuous static-
   pipeline sprint under the
   [2026-08-01 fast-track decision](2026-08-01-full-static-pipeline-fast-track-authorization.md).
-  They remain scientifically unvalidated and are not Human-Gate passed.
+  Their branch implementations are active candidates with focused synthetic
+  software evidence. They are not yet merged, remain scientifically
+  unvalidated, and are not Human-Gate passed.
 - **T4:** blocked and excluded from the static-pipeline authorization.
 
 The fast-track decision permits continuous implementation and one consolidated
