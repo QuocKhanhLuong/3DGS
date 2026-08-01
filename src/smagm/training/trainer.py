@@ -266,6 +266,12 @@ class T1CTrainer:
         self._last_assignment_hash = assignment.assignment_hash
         self._last_manifest_hash, self._last_split_registry_hash = self._ledger_hashes(ledger)
 
+    @property
+    def schedule_cursor(self) -> int:
+        """Completed assignment count in the immutable episode schedule."""
+
+        return self._schedule_cursor
+
     def train_step(
         self,
         *,
@@ -386,6 +392,9 @@ class T1CTrainer:
             "last_manifest_hash": self._last_manifest_hash,
             "last_split_registry_hash": self._last_split_registry_hash,
             "schedule_cursor": self._schedule_cursor,
+            "step_index": self._step_index,
+            "optimizer_step_index": self._optimizer_step_index,
+            "accumulation_steps": self.trainer_config.accumulation_steps,
         }
         if not self.scheduled_assignment_hashes or any(not value for value in required_bindings.values()):
             raise RuntimeError("checkpoint requires complete immutable run, manifest, split, and schedule bindings")
@@ -420,6 +429,9 @@ class T1CTrainer:
             "last_manifest_hash": self._last_manifest_hash,
             "last_split_registry_hash": self._last_split_registry_hash,
             "schedule_cursor": self._schedule_cursor,
+            "step_index": self._step_index,
+            "optimizer_step_index": self._optimizer_step_index,
+            "accumulation_steps": self.trainer_config.accumulation_steps,
             "encoder": self.encoder.state_dict(),
             "gaussian_head": self.gaussian_head.state_dict(),
             "optimizer": self.optimizer.state_dict(),
@@ -475,16 +487,35 @@ class T1CTrainer:
             "last_manifest_hash": payload.get("last_manifest_hash", ""),
             "last_split_registry_hash": payload.get("last_split_registry_hash", ""),
             "schedule_cursor": payload.get("schedule_cursor", -1),
+            "step_index": payload.get("step_index", -1),
+            "optimizer_step_index": payload.get("optimizer_step_index", -1),
+            "accumulation_steps": self.trainer_config.accumulation_steps,
             "scheduled_assignment_hashes": self.scheduled_assignment_hashes,
         }
         if any(
             not isinstance(value, str) or len(value) != 64
             for name, value in resume_binding.items()
-            if name not in {"scheduled_assignment_hashes", "schedule_cursor"}
+            if name not in {
+                "scheduled_assignment_hashes",
+                "schedule_cursor",
+                "step_index",
+                "optimizer_step_index",
+                "accumulation_steps",
+            }
         ):
             raise ValueError("checkpoint contains incomplete resume bindings")
-        if not isinstance(resume_binding["schedule_cursor"], int) or not 0 <= resume_binding["schedule_cursor"] <= len(self.scheduled_assignment_hashes):
-            raise ValueError("checkpoint contains an invalid schedule cursor")
+        for name in ("schedule_cursor", "step_index", "optimizer_step_index", "accumulation_steps"):
+            if not isinstance(resume_binding[name], int):
+                raise ValueError("checkpoint contains non-integer optimizer or schedule state")
+        if (
+            not 0 <= resume_binding["schedule_cursor"] <= len(self.scheduled_assignment_hashes)
+            or resume_binding["accumulation_steps"] != self.trainer_config.accumulation_steps
+            or resume_binding["step_index"] != resume_binding["schedule_cursor"]
+            or resume_binding["step_index"] % resume_binding["accumulation_steps"] != 0
+            or resume_binding["optimizer_step_index"]
+            != resume_binding["step_index"] // resume_binding["accumulation_steps"]
+        ):
+            raise ValueError("checkpoint optimizer, step, and schedule cursor state are inconsistent")
         if (
             payload.get("checkpoint_binding_hash") != _hash(resume_binding)
             or payload["last_assignment_hash"] not in self.scheduled_assignment_hashes

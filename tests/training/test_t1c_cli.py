@@ -36,8 +36,11 @@ def test_config_file_drives_synthetic_cli_and_writes_resolved_artifacts(tmp_path
     assert persisted["training"]["steps"] == 2
     assert report["variant"] == "e1"
     assert report["checkpoint_selection"] == {
+        "assignment_hash": report["assignment_hash"],
         "optimizer_step_index": 2,
-        "rule": "last eligible optimizer-step checkpoint; never audit metrics",
+        "schedule_cursor": 2,
+        "training_step_budget": 2,
+        "rule": "last_eligible_optimizer_step_never_audit",
     }
     assert report["encoder_forward_passes"] == 2
     expected_dirty = bool(
@@ -51,7 +54,7 @@ def test_config_file_drives_synthetic_cli_and_writes_resolved_artifacts(tmp_path
     )
     assert report["reproducible"] is (not expected_dirty)
     assert {path.name for path in output.iterdir()} == {
-        "artifact_digests.json",
+        "artifact_manifest.json",
         "checkpoint.pt",
         "episode_ledger.json",
         "metrics.jsonl",
@@ -75,6 +78,7 @@ def test_config_file_drives_synthetic_cli_and_writes_resolved_artifacts(tmp_path
         "preprocessing_record_hash",
         "opened_file_ledger_hash",
         "dependency_manifest_hash",
+        "artifact_manifest_hash",
         "encoder_variant",
         "encoder_config_hash",
         "encoder_state_hash",
@@ -93,19 +97,20 @@ def test_config_file_drives_synthetic_cli_and_writes_resolved_artifacts(tmp_path
     assert required <= set(provenance)
     assert {name for name, _ in provenance["artifact_hashes"]} == {
         "checkpoint.pt",
+        "artifact_manifest.json",
         "episode_ledger.json",
         "metrics.jsonl",
         "resolved_config.json",
     }
-    artifact_digests = json.loads((output / "artifact_digests.json").read_text(encoding="utf-8"))
-    assert set(artifact_digests) == {
+    artifact_manifest = json.loads((output / "artifact_manifest.json").read_text(encoding="utf-8"))
+    assert artifact_manifest["schema"] == "smagm-artifact-manifest-v1"
+    assert set(artifact_manifest["artifacts"]) == {
         "checkpoint.pt",
         "episode_ledger.json",
         "metrics.jsonl",
-        "provenance.json",
         "resolved_config.json",
-        "summary.json",
     }
+    assert report == json.loads((output / "summary.json").read_text(encoding="utf-8"))
 
 
 def test_matched_protocol_hash_excludes_only_variant_and_output_location(tmp_path) -> None:
@@ -128,6 +133,7 @@ def test_ephemeral_quality_run_still_binds_nonpersistent_artifact_digests() -> N
         allow_dirty=True,
     )
     assert set(report["artifact_digests"]) == {
+        "ephemeral/artifact_manifest.json",
         "ephemeral/checkpoint.pt",
         "ephemeral/episode_ledger.json",
         "ephemeral/metrics.jsonl",
@@ -175,6 +181,11 @@ def test_matched_variant_runs_execute_the_same_downstream_protocol(tmp_path) -> 
         "support_topology_hash",
     ):
         assert len({report[field] for report in reports}) == 1
-    assert {report["checkpoint_selection"]["rule"] for report in reports} == {
-        "last eligible optimizer-step checkpoint; never audit metrics"
+    assert len({json.dumps(report["checkpoint_selection"], sort_keys=True) for report in reports}) == 1
+    assert reports[0]["checkpoint_selection"] == {
+        "assignment_hash": reports[0]["assignment_hash"],
+        "optimizer_step_index": 2,
+        "schedule_cursor": 2,
+        "training_step_budget": 2,
+        "rule": "last_eligible_optimizer_step_never_audit",
     }

@@ -40,6 +40,7 @@ from ..training.trainer import T1CTrainer, TrainerConfig
 
 _ROOT = Path(__file__).resolve().parents[3]
 _DEFAULT_CONFIG = _ROOT / "configs" / "experiments" / "t1c_synthetic.json"
+_CHECKPOINT_SELECTION_RULE = "last_eligible_optimizer_step_never_audit"
 
 
 def _canonical_hash(payload: object) -> str:
@@ -156,6 +157,8 @@ def load_resolved_config(
         raise ValueError("episode.modality_to_appearance_channel must be a non-empty mapping")
     if any(not isinstance(name, str) or not name or not isinstance(channel, int) or channel < 0 for name, channel in mapping.items()):
         raise ValueError("modality_to_appearance_channel values must be non-negative integers")
+    if config["fairness"].get("checkpoint_selection_rule") != _CHECKPOINT_SELECTION_RULE:
+        raise ValueError(f"the T1-C reference supports only checkpoint_selection_rule={_CHECKPOINT_SELECTION_RULE!r}")
     weights = config["objective"].get("structural_weights")
     if (
         not isinstance(weights, list)
@@ -361,7 +364,10 @@ def run_synthetic_training(
                 if step_output.report.optimizer_updated and step_output.report.optimizer_step_index % interval == 0:
                     checkpoint_path = trainer.save_checkpoint(output / "checkpoint.pt")
                     checkpoint_selection = {
+                        "assignment_hash": assignment.assignment_hash,
                         "optimizer_step_index": step_output.report.optimizer_step_index,
+                        "schedule_cursor": trainer.schedule_cursor,
+                        "training_step_budget": int(config["training"]["steps"]),
                         "rule": config["fairness"]["checkpoint_selection_rule"],
                     }
     runtime_seconds = time.perf_counter() - start
@@ -390,6 +396,16 @@ def run_synthetic_training(
             "ephemeral/resolved_config.json": _canonical_hash(config),
             "ephemeral/checkpoint.pt": module_state_hash(trainer.encoder, trainer.gaussian_head),
         }
+    artifact_manifest_payload = {"artifacts": artifact_hashes, "schema": "smagm-artifact-manifest-v1"}
+    if output is not None:
+        (output / "artifact_manifest.json").write_text(
+            json.dumps(artifact_manifest_payload, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+        )
+        artifact_manifest_hash = _file_hash(output / "artifact_manifest.json")
+        artifact_hashes["artifact_manifest.json"] = artifact_manifest_hash
+    else:
+        artifact_manifest_hash = _canonical_hash(artifact_manifest_payload)
+        artifact_hashes["ephemeral/artifact_manifest.json"] = artifact_manifest_hash
     encoder = trainer.encoder
     head = trainer.gaussian_head
     episode_config = trainer.episode_config
@@ -410,6 +426,7 @@ def run_synthetic_training(
         preprocessing_record_hash=_canonical_hash(sorted(preprocessing_record_hashes)),
         opened_file_ledger_hash=_canonical_hash(episode_ledger_records),
         dependency_manifest_hash=_file_hash(root / "pyproject.toml"),
+        artifact_manifest_hash=artifact_manifest_hash,
         encoder_variant=variant,
         encoder_config_hash=encoder.config.config_hash,
         encoder_state_hash=encoder.state_hash(),
@@ -435,6 +452,7 @@ def run_synthetic_training(
         ),
         "assignment_schedule_hash": schedule.schedule_hash,
         "artifact_digests": dict(artifact_hashes),
+        "artifact_manifest_hash": artifact_manifest_hash,
         "cache_bytes": last.cache_bytes,
         "encoder_initialization_hash": encoder_initialization_hash,
         "encoder_parameter_count": encoder.parameter_count,
@@ -456,15 +474,7 @@ def run_synthetic_training(
     }
     if output is not None:
         (output / "provenance.json").write_text(json.dumps(_jsonable(asdict(provenance)), sort_keys=True, indent=2) + "\n", encoding="utf-8")
-        report["artifact_digests"] = {
-            **artifact_hashes,
-            "provenance.json": _file_hash(output / "provenance.json"),
-        }
         (output / "summary.json").write_text(json.dumps(report, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-        report["artifact_digests"]["summary.json"] = _file_hash(output / "summary.json")
-        (output / "artifact_digests.json").write_text(
-            json.dumps(report["artifact_digests"], sort_keys=True, indent=2) + "\n", encoding="utf-8"
-        )
     return report
 
 

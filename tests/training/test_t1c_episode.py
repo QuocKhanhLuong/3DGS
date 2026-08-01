@@ -382,6 +382,12 @@ def test_checkpoint_rejects_missing_or_tampered_run_bindings(tmp_path) -> None:
     restored = _checkpoint_trainer("e1", bound_ledger, (bound_assignment,), seed=92)
     with pytest.raises(ValueError, match="resume bindings"):
         restored.load_checkpoint(tampered_path)
+    tampered_cursor = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    tampered_cursor["step_index"] = 99
+    tampered_cursor_path = tmp_path / "tampered-cursor.pt"
+    torch.save(tampered_cursor, tampered_cursor_path)
+    with pytest.raises(ValueError, match="inconsistent"):
+        restored.load_checkpoint(tampered_cursor_path)
 
 
 def test_resumed_trainer_rejects_a_ledger_outside_manifest_and_schedule(tmp_path) -> None:
@@ -436,4 +442,4 @@ def test_matched_experiment_config_locks_common_downstream_opportunity() -> None
     assert fairness["common_feature_channels"] == [16, 8, 1]
     assert fairness["common_gaussian_head_hidden_dim"] == 32
     assert fairness["hardware_class"] == "cpu"
-    assert "never audit" in fairness["checkpoint_selection_rule"]
+    assert "never_audit" in fairness["checkpoint_selection_rule"]

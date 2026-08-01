@@ -45,6 +45,7 @@ class RunProvenance:
     preprocessing_record_hash: str
     opened_file_ledger_hash: str
     dependency_manifest_hash: str
+    artifact_manifest_hash: str
     encoder_variant: str
     encoder_config_hash: str
     encoder_state_hash: str
@@ -59,8 +60,13 @@ class RunProvenance:
     artifact_hashes: tuple[tuple[str, str], ...]
 
     def __post_init__(self) -> None:
-        if not self.commit or not isinstance(self.dirty, bool) or not isinstance(self.seed, int):
-            raise ValueError("provenance requires commit, bool dirty state, and integer seed")
+        if (
+            re.fullmatch(r"[0-9a-f]{40}", self.commit) is None
+            or len(set(self.commit)) == 1
+            or not isinstance(self.dirty, bool)
+            or not isinstance(self.seed, int)
+        ):
+            raise ValueError("provenance requires an exact 40-character commit SHA, bool dirty state, and integer seed")
         for name in (
             "config_hash",
             "manifest_hash",
@@ -73,6 +79,7 @@ class RunProvenance:
             "preprocessing_record_hash",
             "opened_file_ledger_hash",
             "dependency_manifest_hash",
+            "artifact_manifest_hash",
             "encoder_config_hash",
             "encoder_state_hash",
             "gaussian_head_initialization_hash",
@@ -80,7 +87,7 @@ class RunProvenance:
             "amplitude_gauge_hash",
         ):
             value = getattr(self, name)
-            if re.fullmatch(r"[0-9a-f]{64}", value) is None or value == "0" * 64:
+            if re.fullmatch(r"[0-9a-f]{64}", value) is None or len(set(value)) == 1:
                 raise ValueError(f"{name} must be a non-placeholder SHA-256 digest")
         if not self.environment or any(not key or not value for key, value in self.environment):
             raise ValueError("environment provenance must be explicit and non-empty")
@@ -119,6 +126,7 @@ def capture_run_provenance(
     preprocessing_record_hash: str,
     opened_file_ledger_hash: str,
     dependency_manifest_hash: str,
+    artifact_manifest_hash: str,
     encoder_variant: str,
     encoder_config_hash: str,
     encoder_state_hash: str,
@@ -177,6 +185,7 @@ def capture_run_provenance(
         preprocessing_record_hash=preprocessing_record_hash,
         opened_file_ledger_hash=opened_file_ledger_hash,
         dependency_manifest_hash=dependency_manifest_hash,
+        artifact_manifest_hash=artifact_manifest_hash,
         encoder_variant=encoder_variant,
         encoder_config_hash=encoder_config_hash,
         encoder_state_hash=encoder_state_hash,
