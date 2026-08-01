@@ -252,7 +252,7 @@ def run(*, config_path: Path, steps: int, output_dir: Path, seed: int | None = N
                 raise FloatingPointError("full-static smoke requires finite non-zero encoder and field gradients")
             state_encoder_snapshot = _frozen_state_dict(encoder)
             state_field_snapshot = _frozen_state_dict(field)
-            state_encoder_hash = encoder.state_hash
+            state_encoder_hash = encoder.state_hash()
             state_field_hash = _model_state_hash(field)
             if state_field_hash != result.patient_state.field_model_hash:
                 raise RuntimeError("patient state does not bind the exact field snapshot used to create it")
@@ -293,7 +293,7 @@ def run(*, config_path: Path, steps: int, output_dir: Path, seed: int | None = N
             "field_for_patient_state_hash": state_field_hash,
             "encoder_after_training": encoder_after_training,
             "field_after_training": field_after_training,
-            "encoder_after_training_hash": encoder.state_hash,
+            "encoder_after_training_hash": encoder.state_hash(),
             "field_after_training_hash": _model_state_hash(field),
             "config_hash": config_hash,
             "patient_state_path": "patient_state.pt",
