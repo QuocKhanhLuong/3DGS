@@ -54,7 +54,9 @@ the time of this instruction update:
 - T1-B code is merged on `main` as an implemented software tranche; its Human
   Gate is passed by the committed 2026-07-31 decision record;
 - T1-C is an implemented candidate in review with its Human Gate pending;
-- T2+ remain blocked.
+- T2, bounded-static T3 P0/P1, and T5 are active implementation candidates on
+  the explicitly authorized full-static branch; their Human Gates are pending;
+- T4, routing, adaptive acquisition, and learned topology remain blocked.
 
 Do not describe T1-B as a validated reconstruction result. Its CLI and tests are
 software-contract diagnostics only.
@@ -106,6 +108,12 @@ Prefer these narrow entry points instead of scanning the package:
 - teacher-free structural objectives: `src/smagm/losses/structural.py`;
 - synthetic T1-B executable: `src/smagm/cli/t1b.py`;
 - physical-plane renderer: `src/smagm/renderer.py`.
+- physical anchors and cache-only aggregation: `src/smagm/anchors/`;
+- local/global structural-field attribution: `src/smagm/fields/`;
+- seed memory and bounded P0/P1 propagation: `src/smagm/memory/`;
+- immutable patient state: `src/smagm/state/`;
+- plane/full-grid reconstruction and export: `src/smagm/reconstruction/`;
+- isolated serialized evaluation: `src/smagm/evaluation/`.
 
 Read the corresponding focused tests before changing an established contract.
 
@@ -142,14 +150,13 @@ Before changing code, determine:
 Implement only the named tranche. Do not create placeholder modules, APIs,
 configs, or abstractions for blocked future phases.
 
-Unless the current authoritative status and the user's request explicitly
-permit it, do not implement:
+The current fast-track authorization permits only the bounded T2 anchor/field,
+T3 P0/P1 static propagation, and T5 reconstruction/evaluation responsibilities
+listed above. Do not implement:
 
-- T2 support-anchor bootstrap or anchor-local fields;
-- T3 anchor-Gaussian propagation or adaptive topology;
-- learned Gaussian birth, split, merge, or prune operations;
+- residual assimilation or learned Gaussian birth, split, merge, or prune;
 - T4 routing, learned utility, multi-wave planning, or adaptive acquisition;
-- T5 full-volume export or isolated audit evaluation.
+- any patient-state construction from isolated audit targets.
 
 Stop at Human Gates. A local test pass is software evidence, not authorization
 to continue to the next stage.
@@ -221,7 +228,8 @@ For T1-C work, preserve these locked behaviors:
   finite Gaussian-head gradients;
 - checkpoints and run records bind configuration, manifest, split, assignment,
   seed, environment, state, and artifact provenance;
-- T1-C remains fixed-topology and introduces no T2+ package or placeholder.
+- the maintained T1-C episode path remains fixed-topology and imports no T2+
+  package; later authorized tranches compose around it through separate owners.
 
 ## Implementation rules
 

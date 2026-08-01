@@ -428,10 +428,19 @@ def test_target_is_never_encoded_or_cached_before_or_after_reveal(tmp_path, monk
     assert output.step.target_id not in output.step.context_ids
 
 
-def test_t1c_does_not_create_blocked_t2_or_later_packages() -> None:
-    root = __import__("pathlib").Path(__file__).resolve().parents[2] / "src" / "smagm"
-    blocked = ("anchors", "fields", "memory", "state", "routing", "reconstruction", "evaluation")
-    assert [name for name in blocked if (root / name).exists()] == []
+def test_t1c_episode_contract_remains_isolated_from_later_static_packages() -> None:
+    """Later authorized tranches must not alter the maintained T1-C path."""
+
+    root = __import__("pathlib").Path(__file__).resolve().parents[2] / "src" / "smagm" / "training"
+    source = (root / "episode.py").read_text(encoding="utf-8")
+    forbidden_imports = (
+        "from ..anchors",
+        "from ..fields",
+        "from ..memory",
+        "from ..state",
+        "from ..evaluation",
+    )
+    assert [name for name in forbidden_imports if name in source] == []
 
 
 def test_matched_experiment_config_locks_common_downstream_opportunity() -> None:

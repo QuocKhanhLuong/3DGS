@@ -28,6 +28,7 @@ from .episode import (
     TargetCommitCapability,
     prediction_digest_from_render_result,
 )
+from .outputs import PlaneReconstruction, ReconstructionPackage, VolumeReconstruction
 
 __all__ = [
     "AccessLevel",
@@ -44,6 +45,7 @@ __all__ = [
     "ObservationLedger",
     "ObservationMeta",
     "PhysicalPlane",
+    "PlaneReconstruction",
     "PatientSplitRegistry",
     "PredictionReceiptCapability",
     "PredictionReceiptRecord",
@@ -52,7 +54,9 @@ __all__ = [
     "SourceConvention",
     "SparseManifest",
     "SparseAvailabilityManifest",
+    "ReconstructionPackage",
     "TargetGrid",
+    "VolumeReconstruction",
     "TRAINING_LEDGER_SPLITS",
     "TargetCommitCapability",
     "prediction_digest_from_render_result",

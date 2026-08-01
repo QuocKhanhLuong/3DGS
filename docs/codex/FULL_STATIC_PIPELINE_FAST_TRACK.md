@@ -1,8 +1,13 @@
 # Codex Handoff — Full Static Pipeline Fast-Track
 
-Status: **AUTHORIZED EXECUTION HANDOFF**  
+Status: **ACTIVE IMPLEMENTATION CANDIDATE — DEVELOPMENT AUTOMATED EVIDENCE PASS**
 Target branch: `feature/full-static-reconstruction-pipeline`  
 Excluded phase: T4 routing
+
+Current branch evidence: S0–S10 have executable CPU contracts and the synthetic
+train → reconstruct → evaluate → audit chain passes. S11 real-data evaluation,
+all Human Gate decisions, and merge acceptance remain pending. The evaluator's
+default self-target smoke plan is explicitly unsealed and diagnostic-only.
 
 ## Mission
 

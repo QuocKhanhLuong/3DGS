@@ -479,6 +479,11 @@ def run_synthetic_training(
 
 
 def main() -> None:
+    import sys
+    if "--variant" in sys.argv and sys.argv[sys.argv.index("--variant") + 1] == "full":
+        from .full_static_train import main as full_static_main
+        full_static_main()
+        return
     parser = argparse.ArgumentParser(description="Run a config-driven legal synthetic T1-C optimizer path")
     parser.add_argument("--config", type=Path, default=_DEFAULT_CONFIG)
     parser.add_argument("--variant", choices=("e0", "e1", "e2"))
@@ -486,6 +491,7 @@ def main() -> None:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--steps", type=int)
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--allow-dirty", action="store_true", help="development-only provenance; never use for gate evidence")
     parser.add_argument("--json", action="store_true", help="emit one JSON summary for quality checks")
     args = parser.parse_args()
     resolved, resolved_hash = load_resolved_config(
@@ -496,7 +502,12 @@ def main() -> None:
         steps=args.steps,
         output_dir=args.output_dir,
     )
-    report = run_synthetic_training(config=resolved, resolved_config_hash=resolved_hash, output_dir=args.output_dir)
+    report = run_synthetic_training(
+        config=resolved,
+        resolved_config_hash=resolved_hash,
+        output_dir=args.output_dir,
+        allow_dirty=args.allow_dirty,
+    )
     if args.json:
         print(json.dumps(report, sort_keys=True))
     else:

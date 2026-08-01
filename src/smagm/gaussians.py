@@ -233,3 +233,49 @@ def gaussian_batch_from_raw(raw: RawGaussianParameters) -> GaussianBatch:
         gauge_config_hash=fixed.config_hash,
         _factory_token=_GAUGE_FACTORY_TOKEN,
     )
+
+
+def restore_gauge_fixed_gaussian_batch(
+    *,
+    centers_ras_mm: torch.Tensor,
+    covariance_factor: torch.Tensor,
+    log_support_amplitude: torch.Tensor,
+    appearance: torch.Tensor,
+    appearance_valid: torch.Tensor,
+    covariance_epsilon: float,
+    primitive_kind: tuple[str, ...] | None,
+    primitive_id: tuple[str, ...] | None,
+    gauge_policy: AmplitudeGaugePolicy,
+    gauge_config_hash: str,
+) -> GaussianBatch:
+    """Restore an already gauge-fixed safe tensor payload.
+
+    This is intentionally separate from raw-parameter construction: state
+    serialization must preserve the exact gauge-fixed values instead of
+    applying a second normalization during a round trip.
+    """
+
+    if AmplitudeGaugePolicy(gauge_policy) is AmplitudeGaugePolicy.LEGACY_RAW:
+        raise ValueError("serialized patient state requires explicit gauge provenance")
+    if (
+        not isinstance(log_support_amplitude, torch.Tensor)
+        or log_support_amplitude.ndim != 2
+        or log_support_amplitude.dtype not in (torch.float32, torch.float64)
+    ):
+        raise ValueError("restored log amplitude must be a tensor with shape [N,1]")
+    tolerance = torch.finfo(log_support_amplitude.dtype).eps * max(16, log_support_amplitude.shape[0] * 4)
+    if float(log_support_amplitude.mean().abs()) > tolerance:
+        raise ValueError("restored patient-state log amplitude violates the mean-centered gauge")
+    return GaussianBatch(
+        centers_ras_mm=centers_ras_mm,
+        covariance_factor=covariance_factor,
+        log_support_amplitude=log_support_amplitude,
+        appearance=appearance,
+        appearance_valid=appearance_valid,
+        covariance_epsilon=covariance_epsilon,
+        primitive_kind=primitive_kind,
+        primitive_id=primitive_id,
+        gauge_policy=AmplitudeGaugePolicy(gauge_policy),
+        gauge_config_hash=gauge_config_hash,
+        _factory_token=_GAUGE_FACTORY_TOKEN,
+    )

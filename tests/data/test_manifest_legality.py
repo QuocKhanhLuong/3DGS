@@ -124,12 +124,17 @@ class ManifestLegalityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as outside_directory:
             outside = Path(outside_directory) / "outside.bin"
             outside.write_bytes(b"outside")
-            (self.root / "escape.bin").symlink_to(outside)
-            escape_manifest = _manifest(
-                (_entry("escape", level=AccessLevel.CONTEXT, path="escape.bin"),)
-            )
-            with self.assertRaises(PermissionError):
-                ObservationLedger(escape_manifest, self.root).open_context("escape")
+            try:
+                (self.root / "escape.bin").symlink_to(outside)
+            except OSError as error:
+                if getattr(error, "winerror", None) != 1314:
+                    raise
+            else:
+                escape_manifest = _manifest(
+                    (_entry("escape", level=AccessLevel.CONTEXT, path="escape.bin"),)
+                )
+                with self.assertRaises(PermissionError):
+                    ObservationLedger(escape_manifest, self.root).open_context("escape")
 
         (self.root / "context.bin").write_bytes(b"mutated-after-manifest")
         ledger = self._ledger()

@@ -694,7 +694,20 @@ deterministic matched episode schedules, supported-mask reconstruction
 objectives, receipt-gated legal optimizer steps, checkpoint/provenance
 contracts, and the synthetic `smagm.cli.train` diagnostic. Its Human Gate and
 T1-F/T1-R/T1-M scientific evidence remain pending. No T2 package, anchor,
-field, propagation, routing, or full-volume implementation exists.
+field, propagation, routing, or full-volume implementation was part of the
+T1-C tranche itself.
+
+### 13.2 Active full-static branch delta — 2026-08-01
+
+The separately authorized full-static branch composes around the unchanged
+T1-C episode path. It owns typed physical anchors and cache-only aggregation in
+`anchors/`, shared local and matched global fields in `fields/`, dual-bank seed
+memory plus bounded P0/P1 propagation in `memory/`, immutable versioned state
+in `state/`, R0–R5 causal switches in `baselines/` and `training/`, and T5
+reconstruction/export plus serialized-only audit evaluation in
+`reconstruction/` and `evaluation/`. These are active implementation
+candidates, not merged software or scientific gate passes. No `routing/`
+package or T4 acquisition controller exists.
 
 ## 14. Phase-to-code implementation map
 

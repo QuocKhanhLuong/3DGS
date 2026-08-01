@@ -1,0 +1,76 @@
+{
+  "schema": "smagm-full-static-pipeline-v1",
+  "claim_scope": "software-contract diagnostic only",
+  "encoder_variant": "e2",
+  "representation_variant": "anchor_field",
+  "propagation_variant": "p1",
+  "t4_routing": false,
+  "seed": 17,
+  "precision": "float32",
+  "device": "cpu",
+  "modalities": ["synthetic-mri"],
+  "training": {
+    "learning_rate": 0.001,
+    "synthetic_shape_hw": [17, 15],
+    "fixed_support_step_vu": [4, 4],
+    "fixed_support_border_vu": [1, 1],
+    "gaussian_head_input_dim": 25,
+    "gaussian_head_hidden_dim": 32,
+    "reconstruction_intensity": "mse"
+  },
+  "renderer": {
+    "support_epsilon": 1e-10,
+    "minimum_supported_psf_mass": 0.999,
+    "pixel_chunk_size": null,
+    "gaussian_chunk_size": null,
+    "profile": "delta"
+  },
+  "anchor": {
+    "maximum_candidates": 8,
+    "minimum_score": 0.0,
+    "structural_weight": 1.0,
+    "reliability_weight": 0.25,
+    "nms_radius_mm": 0.75,
+    "merge_radius_mm": 1.5,
+    "maximum_component_diameter_mm": 3.0,
+    "support_scale_mm": 4.0,
+    "maximum_plane_distance_mm": 4.0,
+    "distance_sigma_mm": 2.0,
+    "minimum_total_weight": 1e-6,
+    "registration_id": "manifest-canonical-ras-v1"
+  },
+  "field": {
+    "evidence_dim": 52,
+    "hidden_width": 16,
+    "hidden_layers": 2,
+    "activation": "silu",
+    "maximum_neighbors": 8
+  },
+  "memory": {
+    "structural_tangent_fraction": 0.7,
+    "structural_normal_fraction": 0.15,
+    "volumetric_scale_fraction": 0.9,
+    "initial_uncertainty": 1.0,
+    "field_center_offset_fraction": 0.05
+  },
+  "propagation": {
+    "variant": "p1",
+    "rounds": 2,
+    "step_mm": 0.75,
+    "children_per_parent_per_round": 1,
+    "duplicate_radius_mm": 0.25,
+    "uncertainty_growth_per_mm": 0.1,
+    "maximum_structural_primitives": 64,
+    "maximum_volumetric_primitives": 64
+  },
+  "reconstruction": {
+    "depth_chunk_size": 2,
+    "grid_shape_dhw": [5, 9, 9],
+    "index_to_ras_mm": [[1.0, 0.0, 0.0, -4.0], [0.0, 1.0, 0.0, -4.0], [0.0, 0.0, 1.0, -2.0], [0.0, 0.0, 0.0, 1.0]]
+  },
+  "non_claims": [
+    "Synthetic smoke does not establish reconstruction quality.",
+    "Support uncertainty is not calibrated predictive uncertainty.",
+    "No T4 routing or active acquisition is implemented."
+  ]
+}

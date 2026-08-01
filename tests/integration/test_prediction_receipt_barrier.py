@@ -365,7 +365,12 @@ def test_symlink_escape_and_content_mutation_fail_without_successful_open_audit(
     outside.write_bytes(b"context tensor bytes")
     try:
         context_path.unlink()
-        context_path.symlink_to(outside)
+        try:
+            context_path.symlink_to(outside)
+        except OSError as error:
+            if getattr(error, "winerror", None) == 1314:
+                pytest.skip("Windows symlink privilege is unavailable")
+            raise
         with pytest.raises(PermissionError, match="escapes provider root"):
             ledger.open_context("context")
         assert ledger.audit_records == ()
