@@ -17,6 +17,7 @@ Current strategy and execution addendum
 - [`strategies/2026-07-31-execution-status-addendum.md`](strategies/2026-07-31-execution-status-addendum.md)
 - [`strategies/2026-07-31-t1b-human-gate-decision.md`](strategies/2026-07-31-t1b-human-gate-decision.md)
 - [`strategies/2026-07-31-t1c-implementation-authorization.md`](strategies/2026-07-31-t1c-implementation-authorization.md)
+- [`strategies/2026-08-01-full-static-pipeline-fast-track-authorization.md`](strategies/2026-08-01-full-static-pipeline-fast-track-authorization.md) — authorizes one continuous T1-C hardening → T2 → T3 → T5 implementation sprint; T4 remains blocked and all scientific gates remain pending.
 
 ### Theory
 
@@ -27,8 +28,13 @@ Current strategy and execution addendum
 
 ### Active plans and designs
 
-- [`plans/2026-07-31-t1c-legal-episodic-trainer-plan.md`](plans/2026-07-31-t1c-legal-episodic-trainer-plan.md) — implemented software plan; Human Gate and T1-F/T1-R/T1-M evidence remain pending.
-- [`designs/2026-07-31-t2-anchor-local-field-plan.md`](designs/2026-07-31-t2-anchor-local-field-plan.md) — pre-authorization architecture; implementation remains blocked by T1-F/T1-R/T1-M evidence and an explicit T2 decision.
+- [`plans/2026-07-31-t1c-legal-episodic-trainer-plan.md`](plans/2026-07-31-t1c-legal-episodic-trainer-plan.md) — merged T1-C software plan; Human Gate and scientific attribution remain pending.
+- [`plans/2026-08-01-full-static-pipeline-implementation-plan.md`](plans/2026-08-01-full-static-pipeline-implementation-plan.md) — master continuous implementation roadmap from T1-C hardening through T5.
+- [`designs/2026-07-31-t2-anchor-local-field-plan.md`](designs/2026-07-31-t2-anchor-local-field-plan.md) — detailed T2 architecture.
+- [`designs/2026-08-01-t2-fast-track-addendum.md`](designs/2026-08-01-t2-fast-track-addendum.md) — supersedes only the earlier T2 implementation block; scientific validation remains deferred.
+- [`plans/2026-08-01-t3-anchor-gaussian-propagation-plan.md`](plans/2026-08-01-t3-anchor-gaussian-propagation-plan.md) — bounded static propagation, provenance, uncertainty growth, and optional topology ablations.
+- [`plans/2026-08-01-t5-reconstruction-export-evaluation-plan.md`](plans/2026-08-01-t5-reconstruction-export-evaluation-plan.md) — plane/full-grid reconstruction, export, isolated evaluation, and statistics.
+- [`experiments/2026-08-01-consolidated-static-pipeline-evaluation-plan.md`](experiments/2026-08-01-consolidated-static-pipeline-evaluation-plan.md) — one final matched evidence, representation, propagation, medical-fidelity, and compute evaluation suite.
 
 ### Software
 
