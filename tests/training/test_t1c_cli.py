@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 
 from smagm.cli.train import load_resolved_config, run_synthetic_training
 
@@ -31,7 +32,16 @@ def test_config_file_drives_synthetic_cli_and_writes_resolved_artifacts(tmp_path
     assert persisted["seed"] == 43
     assert persisted["training"]["steps"] == 2
     assert report["variant"] == "e1"
-    assert report["reproducible"] is False  # test runs from a development-dirty checkout
+    expected_dirty = bool(
+        subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
+    assert report["reproducible"] is (not expected_dirty)
     assert {path.name for path in output.iterdir()} == {
         "checkpoint.pt",
         "metrics.jsonl",
@@ -42,6 +52,7 @@ def test_config_file_drives_synthetic_cli_and_writes_resolved_artifacts(tmp_path
     metrics = (output / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(metrics) == 2
     provenance = json.loads((output / "provenance.json").read_text(encoding="utf-8"))
+    assert provenance["dirty"] is expected_dirty
     required = {
         "commit",
         "dirty",
