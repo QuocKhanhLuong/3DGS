@@ -40,6 +40,23 @@ validated.
 | T4 | Legal active sequence-slice trajectory | BLOCKED | not available |
 | T5 | Plane/full-grid reconstruction, export, isolated evaluation, and statistics | ACTIVE IMPLEMENTATION CANDIDATE — HUMAN GATE PENDING | `python scripts/reconstruct.py --help` |
 
+The S11 real-data smoke is a separate one-patient diagnostic entry point on
+this static boundary:
+
+```text
+python scripts/data/inspect_brats21.py --root data/preprocessed/BraTS21 --limit 5 --allow-invalid
+python scripts/data/prepare_brats21_smoke.py --root data/preprocessed/BraTS21 \
+  --output-dir experiments/runs/brats21-smoke-data
+python scripts/brats21_smoke.py --prepared-dir experiments/runs/brats21-smoke-data \
+  --output-dir experiments/runs/brats21-real-smoke-next --allow-cpu-fallback \
+  --wandb-mode online --steps 2
+```
+
+Use a new or empty output directory for each run; existing non-empty output is
+rejected to protect prior artifacts. It is a retrospective sparse derivative
+execution smoke only. It does not
+advance T2/T3/T5 Human Gates, produce a scientific PASS, or implement T4.
+
 ## Current implementation program
 
 The repository owner has authorized one continuous static-pipeline sprint:

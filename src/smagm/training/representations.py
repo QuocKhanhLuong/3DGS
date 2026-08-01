@@ -87,6 +87,8 @@ class RepresentationEpisodeResult:
     context_ids: tuple[str, ...]
     receipt_hash: str
     audit_hash: str
+    preprocessing_record_hash: str | None = None
+    primitive_count: int | None = None
 
 
 def _direct_context_baseline(
@@ -176,6 +178,8 @@ def _direct_context_baseline(
         assignment.context_ids,
         _hash(ledger.prediction_records[-1].to_canonical_dict()),
         ledger.audit_hash,
+        preprocessing.record_hash,
+        seed.count,
     )
 
 
@@ -242,6 +246,8 @@ def build_representation_episode_step(
             result.context_ids,
             result.receipt_record_hash,
             result.audit_hash,
+            result.preprocessing.record_hash,
+            result.support_count,
         )
     if propagation_config is None:
         propagation_config = PropagationConfig(variant=propagation_variant)
@@ -279,6 +285,8 @@ def build_representation_episode_step(
         static.context_step.context_ids,
         static.receipt_hash,
         static.audit_hash,
+        static.context_step.preprocessing.record_hash,
+        static.patient_state.memory.primitive_count,
     )
 
 

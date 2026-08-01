@@ -1,0 +1,20 @@
+{
+  "schema": "smagm-brats21-data-v1",
+  "source_kind": "PRIVILEGED_OR_SIMULATED_REAL_DATA_SMOKE",
+  "modalities": ["t1", "t1ce", "t2", "flair"],
+  "segmentation_modality": "seg",
+  "plane_orientation": "axial",
+  "plane_index_order": ["u", "v", "slice"],
+  "payload_tensor_order": ["v", "u"],
+  "inplane_stride_vu": [4, 4],
+  "patient_selection": "first_valid_patient_by_id",
+  "context_roles": ["t1", "t1ce", "t2", "flair"],
+  "target_role": "flair",
+  "target_payload_policy": "evaluator_only",
+  "source_root_not_copied": true,
+  "non_claims": [
+    "Retrospective sparse planes do not establish permanently sparse acquisition.",
+    "A one-patient smoke does not establish scientific reconstruction quality.",
+    "Segmentation is evaluator-only and is never used for state construction or training."
+  ]
+}

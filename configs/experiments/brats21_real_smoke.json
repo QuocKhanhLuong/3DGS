@@ -1,0 +1,103 @@
+{
+  "schema": "smagm-brats21-real-smoke-v1",
+  "claim_scope": "software-and-execution-smoke-only",
+  "source_kind": "PRIVILEGED_OR_SIMULATED_REAL_DATA_SMOKE",
+  "encoder_variant": "e2",
+  "representation_variant": "anchor_field",
+  "propagation_variant": "p0",
+  "t4_routing": false,
+  "seed": 17,
+  "device": "cuda",
+  "precision": "float32",
+  "modalities": ["t1", "t1ce", "t2", "flair"],
+  "target_modality": "flair",
+  "training": {
+    "learning_rate": 0.001,
+    "steps": 3,
+    "fixed_support_step_vu": [4, 4],
+    "fixed_support_border_vu": [1, 1],
+    "fixed_support_max_points": 64,
+    "gaussian_head_input_dim": 25,
+    "gaussian_head_hidden_dim": 16,
+    "reconstruction_intensity": "mse",
+    "allow_cpu_fallback": false
+  },
+  "renderer": {
+    "support_epsilon": 1e-10,
+    "minimum_supported_psf_mass": 0.999,
+    "pixel_chunk_size": 1024,
+    "gaussian_chunk_size": 128,
+    "profile": "delta"
+  },
+  "anchor": {
+    "maximum_candidates": 8,
+    "minimum_score": 0.0,
+    "structural_weight": 1.0,
+    "reliability_weight": 0.25,
+    "nms_radius_mm": 0.75,
+    "merge_radius_mm": 1.5,
+    "maximum_component_diameter_mm": 3.0,
+    "support_scale_mm": 4.0,
+    "maximum_plane_distance_mm": 8.0,
+    "distance_sigma_mm": 2.0,
+    "minimum_total_weight": 1e-6,
+    "registration_id": "brats21-source-affine-v1"
+  },
+  "field": {
+    "evidence_dim": 52,
+    "hidden_width": 16,
+    "hidden_layers": 2,
+    "activation": "silu",
+    "maximum_neighbors": 8
+  },
+  "memory": {
+    "structural_tangent_fraction": 0.7,
+    "structural_normal_fraction": 0.15,
+    "volumetric_scale_fraction": 0.9,
+    "initial_uncertainty": 1.0,
+    "field_center_offset_fraction": 0.05
+  },
+  "propagation": {
+    "variant": "p0",
+    "rounds": 0,
+    "step_mm": 0.75,
+    "children_per_parent_per_round": 1,
+    "duplicate_radius_mm": 0.25,
+    "uncertainty_growth_per_mm": 0.1,
+    "maximum_structural_primitives": 128,
+    "maximum_volumetric_primitives": 128
+  },
+  "interpolation": {
+    "stride_vu": [4, 4],
+    "tangent_scale_fraction": 0.75,
+    "normal_scale_fraction": 8.0,
+    "maximum_points": 128
+  },
+  "normalization": {
+    "policy": "zscore",
+    "epsilon": 1e-6,
+    "minimum_context_scale": 1e-3,
+    "degenerate_scale_policy": "identity_scale",
+    "unseen_modality_policy": "reject"
+  },
+  "reconstruction": {
+    "target_grid": "held_out_target_plane",
+    "depth_chunk_size": 1,
+    "write_nifti": false
+  },
+  "wandb": {
+    "enabled": true,
+    "mode": "online",
+    "project": "smagm-brats21",
+    "entity": null,
+    "group": "brats21-real-smoke",
+    "job_type": "real-data-smoke",
+    "tags": ["brats21", "real-data", "s11", "smoke"],
+    "log_artifacts": false
+  },
+  "non_claims": [
+    "This is a retrospective sparse derivative and not evidence for permanently sparse acquisition.",
+    "This one-patient execution smoke does not establish reconstruction quality, superiority, or clinical validity.",
+    "No scientific PASS, Human Gate decision, or T4 routing evidence is produced automatically."
+  ]
+}

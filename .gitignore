@@ -20,3 +20,4 @@ dist/
 .agenteam/runs/
 experiments/runs/
 .agenteam/state/
+/data/preprocessed/

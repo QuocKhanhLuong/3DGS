@@ -31,10 +31,15 @@ def lift_candidates(candidates: StructuralCandidateBatch) -> LiftedCandidateBatc
     centers = candidates.transform.ras_mm_from_feature_vu(indices[:, 0], indices[:, 1])
     plane = candidates.transform.input_plane
     assert plane is not None
-    axis = torch.as_tensor(
-        [plane.axis_u_ras, plane.axis_v_ras, plane.signed_normal_ras],
-        dtype=centers.dtype, device=centers.device,
-    ).transpose(0, 1)
+    axis_u = torch.as_tensor(plane.axis_u_ras, dtype=centers.dtype, device=centers.device)
+    axis_v = torch.as_tensor(plane.axis_v_ras, dtype=centers.dtype, device=centers.device)
+    # NIfTI tensor order is [v, u] while the source slice normal is retained
+    # independently for provenance.  Anchor frames are a geometric basis and
+    # must be right-handed; the cross-product normal is equivalent for the
+    # covariance/support contract and avoids rejecting valid L/P/S affines.
+    normal = torch.linalg.cross(axis_u, axis_v)
+    normal = normal / torch.linalg.vector_norm(normal)
+    axis = torch.stack((axis_u, axis_v, normal), dim=1)
     axes = axis.unsqueeze(0).expand(centers.shape[0], -1, -1).clone()
     plane_hash = candidates.transform.source_plane_hash
     return LiftedCandidateBatch(

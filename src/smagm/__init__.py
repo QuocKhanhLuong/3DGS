@@ -1,5 +1,9 @@
 """Executable sparse-MRI Gaussian reconstruction research scaffold."""
 
+from ._torch_compat import ensure_eager_optimizer_compatibility
+
+ensure_eager_optimizer_compatibility()
+
 from .baselines.fixed_gaussian import (
     FixedGaussianHead,
     FixedGaussianHeadConfig,
