@@ -25,7 +25,7 @@ from ..data.normalization import apply_preprocessing, fit_preprocessing
 from ..features.encoder import EvidenceEncoder
 from ..fields import GlobalStructuralField, SharedStructuralField
 from ..losses.reconstruction import ReconstructionLossResult, reconstruction_loss
-from ..memory import PropagationConfig, SeedMemoryConfig
+from ..memory import PropagationConfig, PropagationTransaction, SeedMemoryConfig
 from ..renderer import RenderResult
 from ..state import PatientState
 from .episode import LegalEpisodeConfig, build_legal_episode_step
@@ -89,6 +89,7 @@ class RepresentationEpisodeResult:
     audit_hash: str
     preprocessing_record_hash: str | None = None
     primitive_count: int | None = None
+    propagation_transactions: tuple[PropagationTransaction, ...] = ()
 
 
 def _direct_context_baseline(
@@ -201,6 +202,11 @@ def build_representation_episode_step(
     seed_memory_config: SeedMemoryConfig | None = None,
     propagation_config: PropagationConfig | None = None,
     interpolation_config: SparseInterpolationConfig | None = None,
+    patient_bounds_min_ras_mm: torch.Tensor | None = None,
+    patient_bounds_max_ras_mm: torch.Tensor | None = None,
+    source_affine_ras_from_index: torch.Tensor | None = None,
+    source_shape_xyz: tuple[int, int, int] | None = None,
+    gaussian_head_input_adapter: str = "anchor_evidence_prefix",
 ) -> RepresentationEpisodeResult:
     """Run one receipt-gated episode while constructing only selected modules."""
 
@@ -272,6 +278,11 @@ def build_representation_episode_step(
         bootstrap_config=bootstrap_config,
         seed_memory_config=seed_memory_config,
         propagation_config=propagation_config,
+        patient_bounds_min_ras_mm=patient_bounds_min_ras_mm,
+        patient_bounds_max_ras_mm=patient_bounds_max_ras_mm,
+        source_affine_ras_from_index=source_affine_ras_from_index,
+        source_shape_xyz=source_shape_xyz,
+        gaussian_head_input_adapter=gaussian_head_input_adapter,
     )
     return RepresentationEpisodeResult(
         plan,
@@ -287,6 +298,7 @@ def build_representation_episode_step(
         static.audit_hash,
         static.context_step.preprocessing.record_hash,
         static.patient_state.memory.primitive_count,
+        static.propagation_transactions,
     )
 
 

@@ -1,5 +1,22 @@
 # CODEBASE — Final Research Software Blueprint
 
+## Product-readiness clarification — 2026-08-02
+
+The active BraTS21 product path is a simulated sparse-acquisition task using
+`scripts/data/inspect_brats21.py`, `scripts/data/prepare_brats21.py`, and the
+GPU-only `scripts/train_brats21.py` controller. It uses physical-quantile
+aligned axial context sampling and an exact physical gap-midpoint target
+(fractional source-index interpolation is deferred until receipt), context-only
+robust percentile normalization, E2 + R4, and bounded P0/P1. Structural and
+volumetric Gaussian banks remain
+distinct; propagation uses local anchor frames rather than global z. T4
+routing is absent and blocked. The implementation is an active candidate with
+T2/T3/T5 Human Gates pending; inventory and full-run W&B results are execution
+evidence only. Training patients carry global encoder,
+Gaussian-head, StructuralField, and optimizer state through an atomic,
+target-free cohort checkpoint; patient Gaussian state remains separate and
+validation never promotes updates.
+
 ## 1. Purpose
 
 This document is the software blueprint for the complete sparse multi-sequence
@@ -89,6 +106,9 @@ The complete path must preserve two separations:
 ## 5. Status legend
 
 - **IMPLEMENTED** — executable code and focused tests exist on `main`.
+- **IMPLEMENTED CANDIDATE** — executable code and focused contract tests exist,
+  but the authorized real-data Human Gate or product execution evidence is
+  still pending.
 - **PARTIAL** — an interface or subset exists, but the final responsibility is
   not complete.
 - **PLANNED** — required by the final method but not yet implemented.
@@ -238,7 +258,7 @@ an optimizer.
 
 | File | Status | Responsibility |
 |---|---|---|
-| `structural.py` | PARTIAL | Structural consistency, appearance sensitivity, reliability regularization, variance-floor, and registered cross-modality comparison. Final scope includes explicit spatial equivariance, covariance penalty, and local differential preservation. |
+| `structural.py` | IMPLEMENTED SOFTWARE CONTRACT | Teacher-free structural consistency, appearance sensitivity, reliability regularization, variance-floor, and registered cross-modality comparison. Scientific scope remains phase-gated. |
 | `reconstruction.py` | IMPLEMENTED | Supported-mask-aware intensity losses and optional gradient/frequency-sensitive target-plane losses with typed empty-mask behavior. |
 | `field.py` | PLANNED | Field overlap, gradient regularity, Eikonal/sign/level-set terms when scientifically authorized. |
 | `gaussian.py` | PLANNED | Scale, displacement, coverage, overlap, complexity, and topology acceptance regularizers. |
@@ -255,14 +275,14 @@ Gaussians.
 
 | File | Status | Responsibility |
 |---|---|---|
-| `contracts.py` | PLANNED | Anchor centers, partial/full frames, support scales, evidence, confidence, observability, contributing-plane references, and topology status. |
-| `candidates.py` | PLANNED | Sparse structural candidate scoring and physical non-maximum suppression on observed feature maps. |
-| `bootstrap.py` | PLANNED | Lift candidates into RAS-mm provisional anchors and perform the initial bootstrap in both differentiable training and frozen-weight inference modes. |
-| `consolidation.py` | PLANNED | Cross-plane merge, duplicate suppression, conflict preservation, and disconnected-region coverage. |
-| `aggregation.py` | PLANNED | Geometry-, modality-, distance-, registration-, and reliability-aware aggregation into compact anchor evidence. |
-| `frames.py` | PLANNED | Partial initial frames, field-derived normals, tangent construction, and uncertainty-aware frame validation. |
-| `index.py` | PLANNED | Spatial indexing and bounded anchor-neighborhood queries. |
-| `adaptation.py` | PLANNED | Patient-state move, birth, split, merge, and prune proposals. Acceptance belongs to the update controller, not this file alone. |
+| `contracts.py` | IMPLEMENTED CANDIDATE | Anchor centers, partial/full frames, support scales, evidence, confidence, observability, and contributing-plane references. |
+| `candidates.py` | IMPLEMENTED CANDIDATE | Sparse structural candidate scoring and physical non-maximum suppression on observed feature maps. |
+| `bootstrap.py` | IMPLEMENTED CANDIDATE | Lift candidates into RAS-mm provisional anchors and perform context-only bootstrap. |
+| `consolidation.py` | IMPLEMENTED CANDIDATE | Cross-plane merge, duplicate suppression, conflict preservation, and disconnected-region coverage. |
+| `aggregation.py` | IMPLEMENTED CANDIDATE | Geometry-, modality-, distance-, registration-, and reliability-aware aggregation into compact anchor evidence. |
+| `frames.py` | IMPLEMENTED CANDIDATE | Local tangent/normal construction and frame validation. |
+| `index.py` | IMPLEMENTED CANDIDATE | Spatial indexing and bounded anchor-neighborhood queries. |
+| `adaptation.py` | ABSENT/BLOCKED | Move, birth, split, merge, and prune proposals are outside the authorized static tranche. |
 
 Anchor code samples the feature cache. It must not rerun the encoder during
 patient inference.
@@ -274,11 +294,11 @@ own evidence alignment, routing, or appearance reconstruction.
 
 | File | Status | Responsibility |
 |---|---|---|
-| `contracts.py` | PLANNED | Local coordinates, field-query batches, field outputs, support weights, and field-status terminology. |
-| `local.py` | PLANNED | One shared low-capacity MLP mapping local coordinate plus compact anchor evidence to a scalar structural-field value. |
-| `blend.py` | PLANNED | Stable differentiable partition-of-unity or compact-support blending into a patient field. |
-| `query.py` | PLANNED | Batch nearby-anchor lookup, local-coordinate construction, local evaluation, and blending. |
-| `regularization.py` | PLANNED | Overlap consistency and optional gradient/Eikonal diagnostics. |
+| `contracts.py` | IMPLEMENTED CANDIDATE | Local coordinates, field-query batches, field outputs, support weights, and field-status terminology. |
+| `local.py` | IMPLEMENTED CANDIDATE | One shared low-capacity MLP mapping local coordinate plus compact anchor evidence to a scalar structural-field value. |
+| `blend.py` | IMPLEMENTED CANDIDATE | Stable compact-support blending into a patient field. |
+| `query.py` | IMPLEMENTED CANDIDATE | Batch nearby-anchor lookup, local-coordinate construction, local evaluation, and blending. |
+| `regularization.py` | IMPLEMENTED CANDIDATE | Field support and diagnostic regularization helpers; scientific use remains phase-gated. |
 
 Until signed-distance behavior is demonstrated, public APIs and outputs use
 `structural_field` or `level_set_field`, not unconditional `sdf` naming.
@@ -302,14 +322,14 @@ observability, initialization, assimilation, topology, and spatial lookup.
 
 | File | Status | Responsibility |
 |---|---|---|
-| `contracts.py` | PLANNED | Structural bank, volumetric bank, primitive type, observability, uncertainty, provenance, and memory summaries. |
-| `initialize.py` | PLANNED | Initialize thin field-aligned structural Gaussians and interior volumetric appearance Gaussians from anchors and evidence. |
-| `appearance.py` | PLANNED | Per-modality direct appearance slots or authorized compact codes and missing-modality uncertainty. |
-| `observability.py` | PLANNED | Evidence counts, coverage, disagreement, residual history, propagation depth, and update-round tracking. |
-| `assimilate.py` | PLANNED | Local appearance-first and conservative-geometry updates from a legally observed residual. |
-| `topology.py` | PLANNED | Birth, split, merge, and prune proposals plus shared reconstruction/complexity acceptance energy. |
-| `propagation.py` | PLANNED | Bounded anchor–Gaussian propagation with uncertainty growth and parent provenance. |
-| `index.py` | PLANNED | Bounded-support spatial culling for plane and volume queries. |
+| `contracts.py` | IMPLEMENTED CANDIDATE | Structural bank, volumetric bank, primitive type, observability, uncertainty, provenance, and memory summaries. |
+| `initialize.py` | IMPLEMENTED CANDIDATE | Initialize thin field-aligned structural Gaussians and interior volumetric appearance Gaussians from anchors and evidence. |
+| `appearance.py` | IMPLEMENTED CANDIDATE | Per-modality direct appearance slots and missing-modality validity. |
+| `observability.py` | IMPLEMENTED CANDIDATE | Evidence counts, coverage, disagreement, uncertainty, propagation depth, and update-round tracking. |
+| `assimilate.py` | ABSENT/BLOCKED | Residual assimilation is outside the authorized static tranche. |
+| `topology.py` | ABSENT/BLOCKED | Birth, split, merge, and prune proposals are outside the authorized static tranche. |
+| `propagation.py` | IMPLEMENTED CANDIDATE | Bounded local-frame P0/P1 propagation with uncertainty growth and parent provenance. |
+| `index.py` | IMPLEMENTED CANDIDATE | Bounded-support spatial culling for plane and volume queries. |
 
 No topology operation may inspect an unqueried image or hidden target before the
 legal reveal point.
@@ -338,11 +358,11 @@ never become persistent global parameters.
 
 | File | Status | Responsibility |
 |---|---|---|
-| `patient.py` | PLANNED | `PatientState`: observation ledger reference, evidence cache, anchors, local fields, Gaussian memory, observability, uncertainty, residual history, and trajectory history. |
-| `builder.py` | PLANNED | Construct a state from legal context or bootstrap observations using stable module interfaces. |
-| `versioning.py` | PLANNED | Canonical hashes and immutable snapshots binding all scientific inputs without target pixels. |
-| `update.py` | PLANNED | Apply an accepted local update transaction and emit state-change diagnostics. |
-| `serialization.py` | PLANNED | Safe state checkpoint schema, version migration, and artifact hashes. |
+| `patient.py` | IMPLEMENTED CANDIDATE | `PatientState`: observation ledger reference, evidence cache, anchors, local fields, Gaussian memory, observability, uncertainty, residual history, and trajectory history. Real-data product execution remains unverified. |
+| `builder.py` | IMPLEMENTED CANDIDATE | Construct a state from legal context or bootstrap observations using stable module interfaces. |
+| `versioning.py` | IMPLEMENTED CANDIDATE | Canonical hashes and immutable snapshots binding all scientific inputs without target pixels. |
+| `update.py` | IMPLEMENTED CANDIDATE | Apply an accepted local update transaction and emit state-change diagnostics. |
+| `serialization.py` | IMPLEMENTED CANDIDATE | Safe state checkpoint schema, version migration, and artifact hashes. |
 
 `state/` orchestrates patient state but does not implement encoder, field,
 Gaussian, or router internals.
@@ -361,7 +381,7 @@ Lower-level packages must not import `training/`.
 | `schedule.py` | IMPLEMENTED/PARTIAL | Typed structural warm-up, joint reconstruction, and reconstruction-dominant refinement policy without phase-shaped model APIs. |
 | `sampling.py` | IMPLEMENTED | Deterministic matched episode/target schedules across E0/E1/E2. |
 | `metrics.py` | IMPLEMENTED/PARTIAL | Gradient health and parameter diagnostics; full experiment-level collapse, latency, and memory aggregation remains pending real experiments. |
-| `provenance.py` | IMPLEMENTED/PARTIAL | Commit, dirty state, config, manifest, split, assignment, seed, environment, checkpoint, and artifact bindings. Full immutable experiment-directory serialization remains pending real runs. |
+| `provenance.py` | IMPLEMENTED/PARTIAL | Commit, dirty state, config, manifest, split, assignment, seed, environment, checkpoint, and artifact bindings. New source/config text is hashed directly; generated and binary payload paths are recorded without rereading them. Full immutable experiment-directory serialization remains pending real runs. |
 
 A final legal training step is:
 
@@ -407,12 +427,12 @@ reconstruction outputs.
 
 | File | Status | Responsibility |
 |---|---|---|
-| `plane.py` | PLANNED | Render a requested modality and physical plane from structural and volumetric banks, returning support and uncertainty diagnostics. |
-| `volume.py` | PLANNED | Chunked full-grid reconstruction with spatial culling and preserved affine/orientation. |
-| `field.py` | PLANNED | Structural field, gradients, normals, support, and optional surface extraction. |
-| `uncertainty.py` | PLANNED | Compose distance, coverage, missing-modality, disagreement, residual, propagation, and calibrated components. |
-| `package.py` | PLANNED | Build an immutable final reconstruction package with status, budget, state hashes, and trajectory. |
-| `export.py` | PLANNED | NIfTI/JSON/tensor export without losing physical metadata or scientific provenance. |
+| `plane.py` | IMPLEMENTED CANDIDATE | Render a requested modality and physical plane from structural and volumetric banks, returning support and uncertainty diagnostics. |
+| `volume.py` | IMPLEMENTED CANDIDATE | Chunked full-grid reconstruction with spatial culling and preserved affine/orientation. |
+| `field.py` | IMPLEMENTED CANDIDATE | Structural field, gradients, normals, and support queries. |
+| `uncertainty.py` | IMPLEMENTED CANDIDATE | Compose support-derived uncertainty; calibrated uncertainty remains explicitly unavailable. |
+| `package.py` | IMPLEMENTED CANDIDATE | Build an immutable reconstruction package with status, state hashes, and artifact provenance. |
+| `export.py` | IMPLEMENTED CANDIDATE | NIfTI/JSON/tensor export without losing physical metadata or scientific provenance. |
 
 This package generates predictions only. It must not load audit ground truth.
 
@@ -424,12 +444,12 @@ cohort.
 
 | File | Status | Responsibility |
 |---|---|---|
-| `metrics.py` | PLANNED | MAE, NMSE, PSNR, SSIM, NCC, gradient, frequency, edge, and local-contrast metrics. |
-| `medical_fidelity.py` | PLANNED | Lesion/ROI/boundary metrics and frozen downstream-model fidelity. |
-| `budget.py` | PLANNED | Quality-budget, quality-latency, AUC, and target-quality slice count. |
-| `uncertainty.py` | PLANNED | Calibration, coverage-risk, unsupported-region, and error-stratification analysis. |
-| `audit.py` | PLANNED | Isolated loading of dense targets and labels after artifact serialization. |
-| `statistics.py` | PLANNED | Patient-level paired summaries, confidence intervals, seed aggregation, and declared tests. |
+| `metrics.py` | IMPLEMENTED CANDIDATE | MAE, NMSE, PSNR, SSIM, NCC, gradient, frequency, edge, local-contrast, support, gap, and observability metrics. |
+| `medical_fidelity.py` | IMPLEMENTED CANDIDATE | Evaluator-only lesion/ROI/boundary metrics. |
+| `budget.py` | IMPLEMENTED CANDIDATE | Quality-budget and quality-latency summaries where declared. |
+| `uncertainty.py` | IMPLEMENTED CANDIDATE | Explicit support-derived uncertainty diagnostics; calibration remains skipped unless semantically declared. |
+| `audit.py` | IMPLEMENTED CANDIDATE | Isolated loading of serialized targets and evaluator-only labels after prediction serialization. |
+| `statistics.py` | IMPLEMENTED CANDIDATE | Patient-level paired summaries and bootstrap confidence intervals. |
 
 ### 7.15 `src/smagm/baselines/`
 
@@ -439,8 +459,8 @@ Owns matched alternatives used for attribution, not the main method.
 |---|---|---|
 | `fixed_support.py` | IMPLEMENTED | Deterministic, value-independent, aligned supports shared across E0/E1/E2. |
 | `fixed_gaussian.py` | IMPLEMENTED | Safe fixed-topology feature-to-Gaussian bridge for attribution. |
-| `interpolation.py` | PLANNED | Sparse-slice interpolation floors under the same physical grid. |
-| `free_gaussian.py` | PLANNED | Gaussian representation without anchor/field constraints. |
+| `interpolation.py` | IMPLEMENTED CANDIDATE | Sparse-slice interpolation floor under the same physical grid. |
+| `free_gaussian.py` | IMPLEMENTED CANDIDATE | Gaussian representation without anchor/field constraints. |
 | `selection.py` | PLANNED | Uniform, random, and metadata-balanced observation selection. |
 | `dense_reconstruction.py` | PLANNED | Declared dense voxel/convolutional comparator under matched observation access. |
 
@@ -456,11 +476,13 @@ Final CLIs are thin orchestration layers. Scientific logic belongs in packages.
 | `cli/t1a.py` | DIAGNOSTIC | Synthetic analytic-to-fixed-Gaussian contract check. Retain as a bounded diagnostic or later move under `cli/debug/`; do not treat it as final architecture. |
 | `cli/t1b.py` | DIAGNOSTIC | Synthetic E0/E1/E2 render/backward contract check. It is not the legal joint trainer. |
 | `cli/train.py` | DIAGNOSTIC | Bounded synthetic legal E0/E1/E2 optimizer path with provenance. Final real-data config resolution remains experiment work. |
-| `cli/reconstruct.py` | PLANNED | Build/update patient state and serialize a reconstruction package. |
-| `cli/evaluate.py` | PLANNED | Evaluate serialized predictions on a declared non-sealed or sealed cohort. |
-| `cli/audit.py` | PLANNED | Verify hashes, opened-file ledgers, environment, and claim evidence. |
+| `cli/brats21_product.py` | IMPLEMENTED CANDIDATE | GPU-only streamed BraTS21 product controller with atomic patient-boundary resume, global target-free checkpoint promotion, and explicit no-CPU-fallback policy. |
+| `cli/brats21_smoke.py` | IMPLEMENTED CANDIDATE | Internal per-patient R0/R4 execution engine used by the single full product controller, with prediction-package serialization and evaluator handoff; real CUDA execution remains unverified. |
+| `cli/reconstruct.py` | IMPLEMENTED CANDIDATE | Build/update patient state and serialize a reconstruction package. |
+| `cli/evaluate.py` | IMPLEMENTED CANDIDATE | Evaluate serialized predictions on a declared non-sealed or sealed cohort. |
+| `cli/audit.py` | IMPLEMENTED CANDIDATE | Verify hashes, opened-file ledgers, environment, and claim evidence. |
 | `scripts/train.py` | IMPLEMENTED | Thin source-checkout wrapper for the T1-C diagnostic; contains no model logic. |
-| other `scripts/*.py` | PLANNED | Minimal executable wrappers only; no duplicate training or model logic. |
+| `scripts/train_brats21_full.sh`, `scripts/train_brats21.py`, `scripts/data/*`, `scripts/select_free_gpu.py` | IMPLEMENTED CANDIDATE | Single full-run shell entry point plus thin inventory, metadata-preparation, GPU preflight, and product-launch wrappers; they contain no duplicate model logic. |
 
 ### 7.17 Quality and phase-gate governance infrastructure
 
@@ -707,7 +729,13 @@ in `state/`, R0–R5 causal switches in `baselines/` and `training/`, and T5
 reconstruction/export plus serialized-only audit evaluation in
 `reconstruction/` and `evaluation/`. These are active implementation
 candidates, not merged software or scientific gate passes. No `routing/`
-package or T4 acquisition controller exists.
+package or T4 acquisition controller exists. The current executable candidate
+includes a GPU-only streamed BraTS21 controller: successful training patients
+promote only target-free encoder/Gaussian-head/StructuralField/optimizer state
+through an atomic global checkpoint, while patient Gaussian state remains
+separate and validation never promotes updates. T5 exposes the maintained
+held-out-plane query plus an explicit affine-preserving, chunked full-source-
+grid query/export mode; CUDA and real-data evidence remain unverified.
 
 ## 14. Phase-to-code implementation map
 
@@ -719,7 +747,7 @@ This mapping controls sequencing only.
 | T0.5 | observation, manifest, episode, receipt, cost, split, and legality tests |
 | T1 | `features/`, `losses/`, fixed baselines, legal `training/`, matched configs and evaluation |
 | T2 | `anchors/`, `fields/`, memory initialization, state builder |
-| T3 | memory propagation, assimilation, topology, observability, state updates |
+| T3 | bounded static P0/P1 propagation, observability, and immutable state updates; residual assimilation and learned topology remain blocked |
 | T4 | `routing/`, active controller, stopping, quality-budget experiments |
 | T5 | `reconstruction/`, serialization/export, isolated `evaluation/` and audit |
 

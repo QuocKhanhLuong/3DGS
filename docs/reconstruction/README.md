@@ -22,9 +22,33 @@ current status addendum is
 
 The repository currently contains implemented software contracts for T0, T0.5,
 and T1-A, plus the implemented T1-B software tranche with its Human Gate
-passed. T1-C software is implemented with its Human Gate pending; T2+ remain
-blocked. Merged software is not scientific
-validation or Human Gate approval.
+passed. T1-C software is implemented with its Human Gate pending. T2,
+bounded-static T3 P0/P1, and T5 are active implementation candidates with
+Human Gates pending under the 2026-08-01 fast-track authorization. T4 remains
+absent and blocked. Merged software is not scientific validation or Human Gate
+approval.
+
+### Canonical method clarification — 2026-08-02
+
+The active method is **Structure-Constrained Interior Gaussian Propagation**;
+see [`STRUCTURE_CONSTRAINED_INTERIOR_PROPAGATION.md`](STRUCTURE_CONSTRAINED_INTERIOR_PROPAGATION.md).
+BraTS21 is a simulated sparse-acquisition task. Context planes are selected by
+physical quantiles from source geometry, with one target at the exact physical
+midpoint of a legal context gap; fractional source-index intensity
+interpolation is receipt-gated. Local anchor frames, a shared anchor-local StructuralField, distinct
+structural/volumetric Gaussian banks, bounded P0/P1 propagation, and explicit
+support/unsupported outputs are the active contracts. Older wording that
+describes global-z propagation, every pixel as an anchor, or unbounded child
+recursion is superseded.
+
+The current product controller streams patients with a target-free global
+encoder/Gaussian-head/StructuralField/optimizer checkpoint and separate
+immutable patient state. Its default query is the held-out target plane; an
+explicit full-source-grid mode derives the physical `[d,h,w]` grid from source
+geometry and serializes support-aware predictions without using target bytes.
+These are executable implementation contracts and remain unvalidated research
+evidence until the CUDA full run and Human Gates are completed. The retired
+smoke/pilot launch stages are not prerequisites for the full run.
 
 ### Decisions currently locked
 
@@ -36,9 +60,10 @@ validation or Human Gate approval.
    roles are temporary, and target pixels require a renderer-minted prediction
    receipt before reveal.
 6. **Local field decoder:** one shared tiny MLP with the smallest possible role.
-7. **Static representation thesis:** physical supports, a shared tiny
-   anchor-local structural field, anchored Gaussian birth and propagation form
-   the T2–T3 hypothesis; they are not yet implemented.
+7. **Static representation thesis:** physical supports, local anchor frames, a
+   shared tiny anchor-local StructuralField, distinct structural and
+   volumetric Gaussian banks, and bounded anchored propagation form the T2–T3
+   hypothesis; current software is an implementation candidate, not a result.
 8. **Inference:** model weights are frozen; only patient-specific state is
    updated once those future tranches are authorized.
 
@@ -67,9 +92,12 @@ is scientifically better.
 - whether geometry is represented by a true SDF, a local SDF bundle, or a structural level-set field;
 - exact protocol used to train or audit active routing under permanently sparse supervision.
 
-The following remain incomplete or planned: modality conditioning, real-data
-training, matched attribution experiments, support anchors, local fields,
-propagation, routing, and T5 reconstruction/export/evaluation.
+The following remain incomplete or planned: full GPU real-data execution,
+matched attribution experiments, CUDA resource evidence, uncertainty
+calibration, and scientific Human Gates. The serialized evaluator now exposes
+support-conditioned, geometry/observability, and evaluator-only ROI/boundary
+metrics, but those metrics are not a scientific result until a reviewed CUDA
+run is available. T4 routing remains absent and blocked.
 
 The downstream phase interfaces remain stable while these decisions are experimentally compared.
 

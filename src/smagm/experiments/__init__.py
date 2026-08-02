@@ -8,6 +8,7 @@ from .wandb import (
     sanitize_config,
     sanitize_metadata,
 )
+from .complexity import parameter_counts, profile_training_step
 
 __all__ = [
     "FinishMetadata",
@@ -16,4 +17,6 @@ __all__ = [
     "redact_absolute_paths",
     "sanitize_config",
     "sanitize_metadata",
+    "parameter_counts",
+    "profile_training_step",
 ]

@@ -1,0 +1,45 @@
+{
+  "schema": "smagm-brats21-product-evaluation-v1",
+  "claim_scope": "isolated-serialized-prediction-diagnostic-only",
+  "plan_schema": "smagm-full-static-evaluation-v1",
+  "target_mode": "external_tensor_file",
+  "sealed_audit": false,
+  "diagnostic_only": true,
+  "unsupported_policy": "report_explicitly; never zero-fill",
+  "metric_scope": "support_conditioned",
+  "complete_metric_policy": "compute_only_when_all_declared_target_voxels_are_supported; otherwise_report_nan_with_status",
+  "metric_config": {
+    "data_range": 1.0,
+    "ssim_window_policy": "global",
+    "edge_threshold": 0.05
+  },
+  "metrics": [
+    "mae", "rmse", "psnr", "ssim", "ncc", "gradient_mae", "gradient_rmse",
+    "edge_f1", "local_contrast_error", "supported_fraction", "unsupported_fraction",
+    "metric_scope", "complete_metric_status", "complete_mae", "complete_rmse",
+    "complete_psnr", "complete_ssim", "complete_ncc", "complete_gradient_mae",
+    "complete_gradient_rmse", "complete_edge_f1", "complete_local_contrast_error",
+    "complete_frequency_error", "distance_to_context_plane_status",
+    "distance_to_context_plane_mean_mm", "distance_to_context_plane_max_mm",
+    "distance_to_context_plane_strata", "context_gap_status", "context_gap_mm",
+    "error_vs_context_gap_mae", "local_observability_status", "local_observability_mean",
+    "error_vs_local_observability_strata", "roi_status", "roi_voxels",
+    "supported_roi_fraction", "roi_mae", "boundary_band_voxels",
+    "supported_boundary_band_fraction", "boundary_band_mae", "tumor_mae",
+    "non_tumor_mae", "roi_contrast_error"
+  ],
+  "roi_metrics": "evaluator-only-when-segmentation-is-present",
+  "uncertainty_metrics": "skip-unless-semantic-uncertainty-is-declared",
+  "aggregation": {
+    "scope": "unweighted_patient_macro",
+    "missing_policy": "omit_non_finite_with_count",
+    "bootstrap_samples": 1000,
+    "confidence": 0.95,
+    "bootstrap_seed": 20260802
+  },
+  "resource_metrics": [
+    "training_wall_time", "inference_wall_time", "per_plane_latency", "full_grid_latency",
+    "peak_cuda_allocated", "peak_cuda_reserved", "anchor_count", "structural_gaussian_count",
+    "volumetric_gaussian_count", "propagation_child_count", "cache_size", "checkpoint_size"
+  ]
+}

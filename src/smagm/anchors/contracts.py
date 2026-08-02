@@ -19,6 +19,37 @@ def _tensor_hash(value: torch.Tensor) -> str:
     return digest.hexdigest()
 
 
+def _geometry_hash_payload(geometry: "AnchorGeometryBatch") -> dict[str, object]:
+    """Bind all physical frame and provenance fields into the anchor digest."""
+
+    return {
+        "anchor_ids": geometry.anchor_ids,
+        "centers_ras_mm": _tensor_hash(geometry.centers_ras_mm),
+        "frame_axes_ras": _tensor_hash(geometry.frame_axes_ras),
+        "frame_validity": _tensor_hash(geometry.frame_validity),
+        "support_scales_mm": _tensor_hash(geometry.support_scales_mm),
+        "geometry_confidence": _tensor_hash(geometry.geometry_confidence),
+        "disagreement": _tensor_hash(geometry.disagreement),
+        "contributing_observation_ids": geometry.contributing_observation_ids,
+        "contributing_plane_hashes": geometry.contributing_plane_hashes,
+        "provenance_hashes": geometry.provenance_hashes,
+    }
+
+
+def _anchor_hash_payload(
+    *, patient_id: str, geometry: "AnchorGeometryBatch", evidence: torch.Tensor,
+    appearance: torch.Tensor, appearance_valid: torch.Tensor, observability: torch.Tensor,
+) -> dict[str, object]:
+    return {
+        "appearance": _tensor_hash(appearance),
+        "appearance_valid": _tensor_hash(appearance_valid),
+        "evidence": _tensor_hash(evidence),
+        "geometry": _geometry_hash_payload(geometry),
+        "observability": _tensor_hash(observability),
+        "patient_id": patient_id,
+    }
+
+
 @dataclass(frozen=True)
 class StructuralCandidateBatch:
     """Sparse candidates on one legal context feature grid.
@@ -163,14 +194,11 @@ class AnchorBatch:
                 raise ValueError("anchor evidence tensors must be finite")
         if len(self.modality_ids) != self.appearance.shape[1] or len(set(self.modality_ids)) != len(self.modality_ids):
             raise ValueError("modality_ids must identify each appearance channel")
-        actual = hashlib.sha256(json.dumps({
-            "appearance": _tensor_hash(self.appearance),
-            "appearance_valid": _tensor_hash(self.appearance_valid),
-            "evidence": _tensor_hash(self.evidence),
-            "observability": _tensor_hash(self.observability),
-            "patient_id": self.patient_id,
-            "provenance": self.geometry.provenance_hashes,
-        }, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        actual = hashlib.sha256(json.dumps(_anchor_hash_payload(
+            patient_id=self.patient_id, geometry=self.geometry, evidence=self.evidence,
+            appearance=self.appearance, appearance_valid=self.appearance_valid,
+            observability=self.observability,
+        ), sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
         if self.evidence_hash != actual:
             raise ValueError("evidence_hash does not bind the exact anchor evidence")
 
@@ -199,9 +227,9 @@ def anchor_evidence_hash(
     *, patient_id: str, geometry: AnchorGeometryBatch, evidence: torch.Tensor,
     appearance: torch.Tensor, appearance_valid: torch.Tensor, observability: torch.Tensor,
 ) -> str:
-    payload = {
-        "appearance": _tensor_hash(appearance), "appearance_valid": _tensor_hash(appearance_valid),
-        "evidence": _tensor_hash(evidence), "observability": _tensor_hash(observability),
-        "patient_id": patient_id, "provenance": geometry.provenance_hashes,
-    }
+    payload = _anchor_hash_payload(
+        patient_id=patient_id, geometry=geometry, evidence=evidence,
+        appearance=appearance, appearance_valid=appearance_valid,
+        observability=observability,
+    )
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()

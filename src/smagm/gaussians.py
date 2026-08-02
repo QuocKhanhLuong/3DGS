@@ -264,7 +264,7 @@ def restore_gauge_fixed_gaussian_batch(
     ):
         raise ValueError("restored log amplitude must be a tensor with shape [N,1]")
     tolerance = torch.finfo(log_support_amplitude.dtype).eps * max(16, log_support_amplitude.shape[0] * 4)
-    if float(log_support_amplitude.mean().abs()) > tolerance:
+    if float(log_support_amplitude.mean().abs().detach()) > tolerance:
         raise ValueError("restored patient-state log amplitude violates the mean-centered gauge")
     return GaussianBatch(
         centers_ras_mm=centers_ras_mm,

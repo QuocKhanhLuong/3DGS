@@ -1,0 +1,132 @@
+{
+  "schema": "smagm-brats21-product-train-v1",
+  "claim_scope": "software-and-execution-evidence-only",
+  "source_kind": "SIMULATED_SPARSE_ACQUISITION",
+  "encoder_variant": "e2",
+  "representation_variant": "anchor_field",
+  "propagation_variant": "p1",
+  "t4_routing": false,
+  "seed": 20260802,
+  "device": "cuda",
+  "precision": "float32",
+  "training_backend": {
+    "name": "native",
+    "accelerator": "gpu",
+    "devices": 1,
+    "strategy": "single",
+    "precision": "32-true",
+    "accumulate_grad_batches": 1,
+    "activation_checkpointing": false
+  },
+  "training": {
+    "learning_rate": 0.001,
+    "steps": 3,
+    "fixed_support_step_vu": [4, 4],
+    "fixed_support_border_vu": [1, 1],
+    "fixed_support_max_points": 64,
+    "gaussian_head_input_dim": 25,
+    "gaussian_head_input_adapter": "anchor_evidence_prefix",
+    "gaussian_head_hidden_dim": 16,
+    "reconstruction_intensity": "mse",
+    "allow_cpu_fallback": false
+  },
+  "optimizer": {
+    "name": "adam",
+    "learning_rate": 0.001,
+    "weight_decay": 0.0
+  },
+  "cohort_training": {
+    "global_model_scope": ["encoder", "gaussian_head", "structural_field", "optimizer"],
+    "patient_state_scope": "immutable_patient_specific_gaussian_state",
+    "global_checkpoint": "global_model_checkpoint.pt",
+    "promotion_boundary": "successful_training_patient_boundary",
+    "validation_updates_global_model": false,
+    "target_payload_not_in_global_checkpoint": true
+  },
+  "schedule": {
+    "name": "constant",
+    "warmup_steps": 0,
+    "validation_cadence_steps": 10
+  },
+  "checkpointing": {
+    "interval_steps": 10,
+    "keep_last": 2,
+    "resume_policy": "auto",
+    "atomic": true,
+    "refuse_overwrite_success": true
+  },
+  "validation": {
+    "target_reveal_after_prediction": true
+  },
+  "renderer": {
+    "support_epsilon": 1e-10,
+    "minimum_supported_psf_mass": 0.999,
+    "pixel_chunk_size": 1024,
+    "gaussian_chunk_size": 128,
+    "profile": "delta"
+  },
+  "anchor": {
+    "maximum_candidates": 8,
+    "minimum_score": 0.0,
+    "structural_weight": 1.0,
+    "reliability_weight": 0.25,
+    "nms_radius_mm": 0.75,
+    "merge_radius_mm": 1.5,
+    "maximum_component_diameter_mm": 3.0,
+    "support_scale_mm": 4.0,
+    "maximum_plane_distance_mm": 8.0,
+    "distance_sigma_mm": 2.0,
+    "minimum_total_weight": 1e-6,
+    "registration_id": "brats21-source-affine-v1"
+  },
+  "field": {
+    "evidence_dim": 52,
+    "hidden_width": 16,
+    "hidden_layers": 2,
+    "activation": "silu",
+    "maximum_neighbors": 8
+  },
+  "memory": {
+    "structural_tangent_fraction": 0.7,
+    "structural_normal_fraction": 0.15,
+    "volumetric_scale_fraction": 0.9,
+    "initial_uncertainty": 1.0,
+    "field_center_offset_fraction": 0.05
+  },
+  "propagation": {
+    "variant": "p1",
+    "rounds": 1,
+    "step_mm": 0.75,
+    "children_per_parent_per_round": 1,
+    "duplicate_radius_mm": 0.25,
+    "uncertainty_growth_per_mm": 0.1,
+    "maximum_structural_primitives": 128,
+    "maximum_volumetric_primitives": 128,
+    "maximum_children_per_anchor": 8,
+    "maximum_patient_primitives": 256,
+    "maximum_uncertainty": 4.0,
+    "minimum_evidence_gain": 0.05,
+    "minimum_cross_modality_agreement": 0.25
+  },
+  "interpolation": {
+    "stride_vu": [4, 4],
+    "tangent_scale_fraction": 0.75,
+    "normal_scale_fraction": 8.0,
+    "maximum_points": 128
+  },
+  "wandb": {
+    "enabled": true,
+    "mode": "offline",
+    "project": "smagm-brats21",
+    "entity": null,
+    "group": "structure-propagation-full",
+    "job_type": "product-training",
+    "tags": ["brats21", "simulated-sparse-acquisition", "e2", "r4", "p1"],
+    "log_artifacts": false
+  },
+  "non_claims": [
+    "BraTS21 is used to construct a simulated sparse-acquisition reconstruction task.",
+    "Execution evidence is not reconstruction superiority, clinical validity, or scanner acceleration.",
+    "Segmentation remains evaluator-only and T4 routing remains absent."
+  ]
+}

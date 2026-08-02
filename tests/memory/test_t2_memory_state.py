@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 
+import pytest
 import torch
 
 from smagm.anchors import AnchorBatch, AnchorGeometryBatch
 from smagm.anchors.contracts import anchor_evidence_hash
-from smagm.memory import PrimitiveKind, initialize_seed_memory
+from smagm.memory import GaussianMemory, GaussianMemoryBank, PrimitiveKind, PrimitiveObservability, initialize_seed_memory
 from smagm.state import build_initial_patient_state
 
 
@@ -50,3 +51,43 @@ def test_initial_patient_state_binds_context_anchor_field_and_memory_without_tar
     assert state.parent_state_version is None
     assert len(state.state_version) == 64
     assert "target" not in state.__dict__
+
+
+def test_anchor_and_memory_hashes_bind_geometry_and_observability() -> None:
+    anchors = _anchors()
+    with pytest.raises(ValueError, match="evidence_hash"):
+        AnchorBatch(
+            anchors.patient_id,
+            AnchorGeometryBatch(
+                anchors.geometry.anchor_ids,
+                anchors.geometry.centers_ras_mm + torch.tensor([[1.0, 0.0, 0.0]]),
+                anchors.geometry.frame_axes_ras,
+                anchors.geometry.frame_validity,
+                anchors.geometry.support_scales_mm,
+                anchors.geometry.geometry_confidence,
+                anchors.geometry.disagreement,
+                anchors.geometry.contributing_observation_ids,
+                anchors.geometry.contributing_plane_hashes,
+                anchors.geometry.provenance_hashes,
+            ),
+            anchors.evidence, anchors.appearance, anchors.appearance_valid,
+            anchors.observability, anchors.modality_ids, anchors.evidence_hash,
+        )
+    memory = initialize_seed_memory(anchors)
+    changed_observability = PrimitiveObservability(
+        evidence_count=memory.structural.observability.evidence_count + 1.0,
+        coverage=memory.structural.observability.coverage,
+        disagreement=memory.structural.observability.disagreement,
+        uncertainty=memory.structural.observability.uncertainty,
+        propagation_depth=memory.structural.observability.propagation_depth,
+        update_round=memory.structural.observability.update_round,
+    )
+    changed_structural = GaussianMemoryBank(
+        memory.structural.kind, memory.structural.gaussians,
+        memory.structural.anchor_ids, memory.structural.parent_primitive_ids,
+        memory.structural.provenance_hashes, changed_observability,
+    )
+    with pytest.raises(ValueError, match="memory_hash"):
+        GaussianMemory(
+            changed_structural, memory.volumetric, memory.modality_ids, memory.memory_hash,
+        )

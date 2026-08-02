@@ -40,22 +40,35 @@ validated.
 | T4 | Legal active sequence-slice trajectory | BLOCKED | not available |
 | T5 | Plane/full-grid reconstruction, export, isolated evaluation, and statistics | ACTIVE IMPLEMENTATION CANDIDATE — HUMAN GATE PENDING | `python scripts/reconstruct.py --help` |
 
-The S11 real-data smoke is a separate one-patient diagnostic entry point on
-this static boundary:
+The BraTS21 product controller has one maintained GPU-only launch path on this
+static boundary. It never enables CPU fallback and records patient pseudonyms,
+hashes, state, global target-free checkpoints, and per-patient checkpoints:
 
 ```text
-python scripts/data/inspect_brats21.py --root data/preprocessed/BraTS21 --limit 5 --allow-invalid
-python scripts/data/prepare_brats21_smoke.py --root data/preprocessed/BraTS21 \
-  --output-dir experiments/runs/brats21-smoke-data
-python scripts/brats21_smoke.py --prepared-dir experiments/runs/brats21-smoke-data \
-  --output-dir experiments/runs/brats21-real-smoke-next --allow-cpu-fallback \
-  --wandb-mode online --steps 2
+python scripts/data/inspect_brats21.py --root data/preprocessed/BraTS21 \
+  --output experiments/reports/brats21_dataset_inventory.json
+bash scripts/train_brats21_full.sh
 ```
 
-Use a new or empty output directory for each run; existing non-empty output is
-rejected to protect prior artifacts. It is a retrospective sparse derivative
-execution smoke only. It does not
-advance T2/T3/T5 Human Gates, produce a scientific PASS, or implement T4.
+Completed product stages also emit `patient_metrics.csv` and
+`aggregate_metrics.json` beside the run state. These are isolated evaluation
+summaries: patient macro-statistics, deterministic patient-bootstrap intervals,
+and pooled support counts are reported, while unsupported pixels are never
+treated as zero-error observations. Non-finite metrics are omitted with an
+explicit count. Rows also retain complete-plane metrics when legal and an
+explicit status when unsupported voxels make those metrics unavailable.
+
+Use a new output directory for a fresh run. To resume an interrupted run, set
+`RUN_DIR` to that directory and invoke the same script again. A non-empty
+directory is accepted only when its product state, config, cohort, split, W&B
+mode, and target-free checkpoint bindings match; a successful completion
+marker is never overwritten. The inventory command above is data preparation,
+not a training stage. Product training is full-only; the retired smoke/pilot
+launches and readiness gate are no longer part of the active path. Execution
+evidence remains retrospective sparse-derivative evidence only: it does not
+advance T2/T3/T5 Human Gates, produce a scientific PASS, or implement T4. The
+former `--allow-cpu-fallback` smoke flag is intentionally not part of the
+product path.
 
 ## Current implementation program
 

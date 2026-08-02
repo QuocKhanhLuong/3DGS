@@ -45,6 +45,7 @@ from .brats21 import (
     discover_patient,
     discover_patients,
     extract_axial_plane,
+    extract_axial_plane_at_position,
     npy_bytes,
     plane_from_nifti,
     validate_patient,
@@ -55,7 +56,15 @@ from .brats21_prepare import (
     PREPARED_SCHEMA,
     PreparedBraTS21,
     load_prepared_bundle,
+    prepare_brats21_product_patient,
     prepare_brats21_smoke,
+)
+from .brats21_sampling import (
+    BraTS21EpisodeSamplingPlan,
+    BraTS21PlaneSelection,
+    BraTS21SamplingConfig,
+    build_sampling_plan,
+    physical_slice_positions,
 )
 
 __all__ = [
@@ -99,6 +108,7 @@ __all__ = [
     "discover_patient",
     "discover_patients",
     "extract_axial_plane",
+    "extract_axial_plane_at_position",
     "npy_bytes",
     "plane_from_nifti",
     "validate_patient",
@@ -108,4 +118,10 @@ __all__ = [
     "PreparedBraTS21",
     "load_prepared_bundle",
     "prepare_brats21_smoke",
+    "prepare_brats21_product_patient",
+    "BraTS21EpisodeSamplingPlan",
+    "BraTS21PlaneSelection",
+    "BraTS21SamplingConfig",
+    "build_sampling_plan",
+    "physical_slice_positions",
 ]

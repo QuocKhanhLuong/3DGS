@@ -2,10 +2,20 @@
 
 Date: 2026-08-01  
 Status: **AUTHORIZED FOR ONE CONTINUOUS IMPLEMENTATION SPRINT**  
-Branch target: `feature/full-static-reconstruction-pipeline`  
+Branch target: `feature/structure-constrained-brats-full-pipeline`
 Final review: one consolidated owner review after implementation and evaluation
 
 ## 1. Goal
+
+### Product-readiness clarification — 2026-08-02
+
+The final integrated path is now explicitly BraTS21-backed and physical:
+geometry-only five-plane aligned sampling, one legal interior target,
+context-only robust normalization, physical local-frame anchors, shared local
+StructuralField, distinct structural/volumetric Gaussian banks, bounded P0/P1,
+serialized support-aware evaluation, and a native CUDA product controller.
+`main` remains the safe working tree when managed Git ref creation is
+unavailable; the intended branch is recorded rather than forcing a ref write.
 
 Implement the full static method from the merged T1-C trainer through T2
 anchors/field, T3 propagation, and T5 reconstruction/evaluation without pausing
@@ -408,7 +418,11 @@ Every stage must add focused CPU tests for:
 
 Do not require large dataset experiments in unit CI.
 
-## 15. Stage 11 — Synthetic end-to-end smoke
+## 15. Stage 11 — Synthetic end-to-end regression (historical)
+
+This bounded CPU command remains a developer regression recipe only. It is not
+an operational BraTS21 launch stage; the active product uses the single
+full-training script and does not require a smoke or pilot run.
 
 Required command:
 

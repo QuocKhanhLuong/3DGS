@@ -33,7 +33,13 @@ def _plane(observation_id: str) -> PhysicalPlane:
     )
 
 
-def _episode(tmp_path, *, episode_id: str = "episode-a", extra_context: bool = False) -> tuple[EpisodeLedger, EpisodeAssignment]:
+def _episode(
+    tmp_path,
+    *,
+    episode_id: str = "episode-a",
+    extra_context: bool = False,
+    deferred_target_reader=None,
+) -> tuple[EpisodeLedger, EpisodeAssignment]:
     payloads = {"context": b"context tensor bytes", "target": b"TARGET-SENTINEL-MUST-NOT-LEAK"}
     if extra_context:
         payloads["context-extra"] = b"later context bytes"
@@ -54,7 +60,14 @@ def _episode(tmp_path, *, episode_id: str = "episode-a", extra_context: bool = F
     manifest = SparseAvailabilityManifest(entries, integrity_digests={key: hashlib.sha256(value).hexdigest() for key, value in payloads.items()})
     context_ids = ("context", "context-extra") if extra_context else ("context",)
     assignment = EpisodeAssignment.create(manifest, episode_id=episode_id, patient_id="patient-a", context_ids=context_ids, target_ids=("target",))
-    return EpisodeLedger(manifest, assignment, tmp_path, split_registry=PatientSplitRegistry.create((manifest,))), assignment
+    readers = {"target": deferred_target_reader} if deferred_target_reader is not None else None
+    return EpisodeLedger(
+        manifest,
+        assignment,
+        tmp_path,
+        split_registry=PatientSplitRegistry.create((manifest,)),
+        deferred_target_readers=readers,
+    ), assignment
 
 
 def _batch(*, requires_grad: bool = False) -> GaussianBatch:
@@ -92,6 +105,30 @@ def _frozen(ledger: EpisodeLedger, *, upstream_state_hash: str = "upstream", req
         gaussians=_runtime_batch(requires_grad=requires_grad),
         upstream_state_hash=_hash(upstream_state_hash),
     )
+
+
+def test_deferred_target_reader_is_unreachable_until_prediction_receipt(tmp_path) -> None:
+    calls: list[str] = []
+
+    def reader() -> bytes:
+        calls.append("read")
+        return b"TARGET-SENTINEL-MUST-NOT-LEAK"
+
+    ledger, _ = _episode(tmp_path, deferred_target_reader=reader)
+    (tmp_path / "target.bin").unlink()
+    assert ledger.open_context("context") == b"context tensor bytes"
+    frozen = _frozen(ledger, upstream_state_hash="deferred-state")
+    commit = ledger.commit_target("target", frozen.state_version)
+    assert calls == []
+    _, receipt = EpisodeController().render_and_register(
+        ledger=ledger,
+        commit_capability=commit,
+        frozen_state=frozen,
+        render_config=RenderConfig(),
+    )
+    assert calls == []
+    assert ledger.reveal_target("target", receipt) == b"TARGET-SENTINEL-MUST-NOT-LEAK"
+    assert calls == ["read"]
 
 
 def test_commit_alone_never_reveals_and_successful_flow_is_context_commit_receipt_reveal(tmp_path) -> None:

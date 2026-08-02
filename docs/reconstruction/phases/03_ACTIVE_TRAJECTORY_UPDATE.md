@@ -1,5 +1,10 @@
 # Phase 3 — Active Trajectory and Incremental Update
 
+Current status (2026-08-02): T4 routing and adaptive acquisition are absent and
+blocked. The maintained executable subset is bounded static P0/P1 propagation
+owned by `src/smagm/memory/`; it does not select new observations, inspect
+hidden target values, or implement learned topology.
+
 ## 1. Objective
 
 Select the next sequence–slice observations that most improve 3D reconstruction, then update only the affected portion of the patient-specific representation.

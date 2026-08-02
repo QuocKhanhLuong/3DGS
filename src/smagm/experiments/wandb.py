@@ -441,6 +441,57 @@ class WandbLogger:
 
         return self.log(scalars, step=step)
 
+    def update_summary(self, values: Mapping[str, Any]) -> WandbLogger:
+        """Add path-redacted, JSON-safe provenance to the W&B summary."""
+
+        sanitized = sanitize_metadata(values)
+        self._ensure_started()
+        if self._run is None or self._active_mode is WandbMode.DISABLED:
+            return self
+        try:
+            summary = getattr(self._run, "summary", None)
+            if summary is not None and hasattr(summary, "update"):
+                summary.update(sanitized)
+            else:
+                self._update_run_config({"summary": sanitized})
+        except Exception as error:
+            self._record_runtime_failure(error)
+        return self
+
+    def log_images(self, images: Mapping[str, Any], *, step: int | None = None) -> WandbLogger:
+        """Log only explicitly supplied derived images when the client supports images.
+
+        Callers own the privacy boundary: the runner supplies normalized
+        prediction/target/error/support/uncertainty maps, never source volumes
+        or identifiers.  A client without ``Image`` support is a no-op.
+        """
+
+        if not isinstance(images, Mapping):
+            raise TypeError("W&B images must be a mapping")
+        if step is not None and (isinstance(step, bool) or not isinstance(step, numbers.Integral) or int(step) < 0):
+            raise ValueError("W&B step must be a non-negative integer or None")
+        self._ensure_started()
+        if not images or self._run is None or self._active_mode is WandbMode.DISABLED:
+            return self
+        image_factory = getattr(self._wandb_module, "Image", None)
+        if not callable(image_factory):
+            return self
+        payload: dict[str, Any] = {}
+        for name, value in images.items():
+            if not isinstance(name, str) or not name:
+                raise TypeError("W&B image names must be non-empty strings")
+            prepared = value.detach().cpu() if hasattr(value, "detach") else value
+            if hasattr(prepared, "nan_to_num"):
+                prepared = prepared.nan_to_num()
+            if hasattr(prepared, "numpy"):
+                prepared = prepared.numpy()
+            payload[redact_absolute_paths(name)] = image_factory(prepared)
+        try:
+            self._run.log(payload, step=None if step is None else int(step))
+        except Exception as error:
+            self._record_runtime_failure(error)
+        return self
+
     def _finish_summary(self, status: str, failure_reason: str | None) -> None:
         if self._run is None:
             return

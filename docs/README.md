@@ -23,6 +23,7 @@ Current strategy and execution addendum
 
 - [`reconstruction/README.md`](reconstruction/README.md)
 - [`reconstruction/FULL_FLOW.md`](reconstruction/FULL_FLOW.md)
+- [`reconstruction/STRUCTURE_CONSTRAINED_INTERIOR_PROPAGATION.md`](reconstruction/STRUCTURE_CONSTRAINED_INTERIOR_PROPAGATION.md) — canonical physical, dual-bank, bounded-propagation method contract.
 - [`reconstruction/phases/`](reconstruction/phases/)
 - [`reconstruction/modules/`](reconstruction/modules/)
 
@@ -44,6 +45,7 @@ Current strategy and execution addendum
 - [`codex/T1A_EXECUTABLE_REFERENCE.md`](codex/T1A_EXECUTABLE_REFERENCE.md)
 - [`codex/T1B_TEACHER_FREE_ENCODER.md`](codex/T1B_TEACHER_FREE_ENCODER.md)
 - [`codex/T1C_EPISODIC_TRAINER.md`](codex/T1C_EPISODIC_TRAINER.md)
+- `scripts/train_brats21_full.sh` with `configs/experiments/brats21_product_full.json` — the single GPU-only streamed product launch; execution evidence remains non-scientific.
 
 ### Research
 

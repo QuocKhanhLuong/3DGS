@@ -1,0 +1,14 @@
+{
+  "schema": "smagm-brats21-product-ablations-v1",
+  "first_run": "aligned-axial-sparse-5",
+  "t4_routing": false,
+  "protocols": [
+    {"name": "sparse-3", "context_planes_per_modality": 3, "modality_alignment": "aligned"},
+    {"name": "sparse-5", "context_planes_per_modality": 5, "modality_alignment": "aligned"},
+    {"name": "sparse-7", "context_planes_per_modality": 7, "modality_alignment": "aligned"},
+    {"name": "sparse-9", "context_planes_per_modality": 9, "modality_alignment": "aligned"},
+    {"name": "staggered-5", "context_planes_per_modality": 5, "modality_alignment": "staggered"},
+    {"name": "axial-only", "orientation": "axial", "context_planes_per_modality": 5, "modality_alignment": "aligned"}
+  ],
+  "blocked_protocols": ["tri-planar", "adaptive-acquisition", "learned-routing", "T4"]
+}

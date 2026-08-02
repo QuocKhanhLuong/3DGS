@@ -39,3 +39,14 @@ required automated evidence and Human Gate questions, use
 No Human Gate is recorded as `PASS` or `PASS_WITH_CONDITIONS` for T0, T0.5,
 T1-A, T1-C, T2, T3, or T5. Implementation authorization is not a gate pass. The
 committed T1-B decision above remains the explicit passed exception.
+## Product-readiness clarification — 2026-08-02
+
+The current executable boundary is unchanged: T1-C remains pending its Human
+Gate; T2, bounded-static T3 P0/P1, and T5 are active implementation candidates
+with Human Gates pending; T4 is absent and blocked. The BraTS21 product path is
+now specified as a simulated sparse-acquisition task with geometry-only
+physical sampling, context-only preprocessing, local-frame dual-bank state,
+bounded propagation, and isolated serialized evaluation. CUDA full-run and
+checkpoint/resume evidence are environment gates, not implied by code presence.
+The active launch has one full-training script; the former separate smoke and
+pilot stages are retired and are not prerequisites.

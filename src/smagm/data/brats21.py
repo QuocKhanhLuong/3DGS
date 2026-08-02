@@ -357,6 +357,7 @@ def plane_from_nifti(
     *,
     observation_id: str,
     inplane_stride_vu: tuple[int, int] = (1, 1),
+    slice_position_index: float | None = None,
 ) -> PhysicalPlane:
     """Build an axial physical plane while preserving the source affine.
 
@@ -368,11 +369,17 @@ def plane_from_nifti(
     matrix = np.asarray(tuple(tuple(float(value) for value in row) for row in affine), dtype=np.float64)
     shape = tuple(int(value) for value in shape_xyz)
     stride_v, stride_u = (int(inplane_stride_vu[0]), int(inplane_stride_vu[1]))
-    if matrix.shape != (4, 4) or len(shape) != 3 or not 0 <= int(slice_index) < shape[2]:
+    sample_index = float(slice_index if slice_position_index is None else slice_position_index)
+    if (
+        matrix.shape != (4, 4)
+        or len(shape) != 3
+        or not np.isfinite(sample_index)
+        or not 0.0 <= sample_index <= float(shape[2] - 1)
+    ):
         raise ValueError("invalid NIfTI affine, shape, or axial slice index")
     if stride_v <= 0 or stride_u <= 0:
         raise ValueError("inplane_stride_vu must be positive")
-    origin = matrix @ np.asarray((0.0, 0.0, float(slice_index), 1.0))
+    origin = matrix @ np.asarray((0.0, 0.0, sample_index, 1.0))
     source = matrix.copy()
     source[:3, 3] = origin[:3]
     source[:3, 0] = matrix[:3, 1] * stride_u
@@ -396,14 +403,57 @@ def plane_from_nifti(
 
 
 def extract_axial_plane(path: str | Path, slice_index: int, *, inplane_stride_vu: tuple[int, int] = (1, 1)) -> np.ndarray:
-    """Read one bounded axial plane as finite float32 payload data."""
+    """Read one bounded nearest-neighbor axial plane as finite float32 data."""
+
+    return extract_axial_plane_at_position(
+        path,
+        float(slice_index),
+        inplane_stride_vu=inplane_stride_vu,
+        interpolation="nearest",
+    )
+
+
+def extract_axial_plane_at_position(
+    path: str | Path,
+    slice_position_index: float,
+    *,
+    inplane_stride_vu: tuple[int, int] = (1, 1),
+    interpolation: str = "nearest",
+) -> np.ndarray:
+    """Read one bounded axial plane at an integer or fractional source index.
+
+    ``linear`` interpolation is reserved for hidden intensity targets and is
+    invoked only by the receipt-gated reader. Evaluator label planes use
+    ``nearest`` so discrete segmentation values are never interpolated.
+    """
 
     image = _nibabel().load(str(Path(path)), mmap=True)
-    data = np.asanyarray(image.dataobj)
-    if data.ndim != 3 or not 0 <= int(slice_index) < data.shape[2]:
+    data = image.dataobj
+    if (
+        getattr(data, "ndim", None) != 3
+        or not np.isfinite(float(slice_position_index))
+        or not 0.0 <= float(slice_position_index) <= float(data.shape[2] - 1)
+        or interpolation not in ("linear", "nearest")
+    ):
         raise BraTS21ValidationError("requested axial slice is outside a valid 3D NIfTI volume")
+    position = float(slice_position_index)
+    lower = int(np.floor(position))
+    upper = min(lower + 1, int(data.shape[2] - 1))
+    if interpolation == "nearest":
+        source = int(np.floor(position + 0.5))
+        plane_source = np.asanyarray(data[:, :, source])
+    else:
+        lower_plane = np.asarray(data[:, :, lower], dtype=np.float32)
+        if upper == lower:
+            plane_source = lower_plane
+        else:
+            upper_plane = np.asarray(data[:, :, upper], dtype=np.float32)
+            weight = np.float32(position - lower)
+            plane_source = (np.float32(1.0) - weight) * lower_plane + weight * upper_plane
     stride_v, stride_u = inplane_stride_vu
-    plane = np.asarray(data[:, :, int(slice_index)][::stride_v, ::stride_u], dtype=np.float32)
+    if stride_v <= 0 or stride_u <= 0:
+        raise BraTS21ValidationError("inplane_stride_vu must be positive")
+    plane = np.asarray(plane_source[::stride_v, ::stride_u], dtype=np.float32)
     if not np.isfinite(plane).all():
         raise BraTS21ValidationError("extracted plane contains non-finite values")
     return np.ascontiguousarray(plane)
@@ -436,6 +486,7 @@ __all__ = [
     "discover_patient",
     "discover_patients",
     "extract_axial_plane",
+    "extract_axial_plane_at_position",
     "json_hash",
     "npy_bytes",
     "plane_from_nifti",

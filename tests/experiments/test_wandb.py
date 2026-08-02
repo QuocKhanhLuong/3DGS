@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from smagm.experiments import FinishMetadata, WandbLogger, sanitize_config
 import smagm.experiments.wandb as wandb_support
@@ -52,8 +53,13 @@ class FakeWandb:
         self.network_calls.append("sync")
 
 
+class FakeImage:
+    def __init__(self, value: object) -> None:
+        self.value = value
+
+
 def _fake_module(fake: FakeWandb) -> SimpleNamespace:
-    return SimpleNamespace(init=fake.init, login=fake.login, sync=fake.sync)
+    return SimpleNamespace(init=fake.init, login=fake.login, sync=fake.sync, Image=FakeImage)
 
 
 def test_disabled_does_not_import_or_call_wandb(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -235,3 +241,40 @@ def test_config_and_scalar_validation_is_strict(tmp_path: Path) -> None:
         logger.log({"loss": float("nan")})
     with pytest.raises(TypeError, match="finite number"):
         logger.log({"loss": "0.5"})
+
+
+def test_derived_images_and_summary_are_safe_and_network_free(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = FakeWandb()
+    monkeypatch.setitem(sys.modules, "wandb", _fake_module(fake))
+    logger = WandbLogger(
+        {},
+        "derived-image-run",
+        tmp_path,
+        {},
+        mode="offline",
+    )
+
+    logger.start()
+    logger.log_images(
+        {
+            "prediction/target": torch.tensor([[float("nan"), 1.0]]),
+            "support/mask": torch.tensor([[0.0, 1.0]]),
+        },
+        step=4,
+    )
+    logger.update_summary({
+        "artifacts/checkpoint": "/home/researcher/private/checkpoint.pt",
+        "artifacts/evaluation": "r4/evaluation/evaluation.json",
+    })
+    logger.finish()
+
+    assert len(fake.runs[0].logged) == 1
+    image_payload, step = fake.runs[0].logged[0]
+    assert step == 4
+    assert isinstance(image_payload["prediction/target"], FakeImage)
+    assert image_payload["prediction/target"].value.tolist() == [[0.0, 1.0]]
+    assert fake.runs[0].summary["artifacts/checkpoint"] == "<redacted-absolute-path>"
+    assert fake.runs[0].summary["artifacts/evaluation"] == "r4/evaluation/evaluation.json"
+    assert fake.network_calls == []

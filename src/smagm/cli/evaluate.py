@@ -11,6 +11,7 @@ import tempfile
 from ..evaluation import (
     AuditTarget,
     FreezeRecord,
+    ReconstructionMetricConfig,
     evaluate_audit_targets,
     open_serialized_audit_targets,
     open_serialized_predictions,
@@ -97,7 +98,15 @@ def run(
         True,
         True,
     )
-    metrics = evaluate_audit_targets(predictions, targets, freeze_record=freeze)
+    raw_metric_config = plan.get("metric_config", {})
+    if not isinstance(raw_metric_config, dict):
+        raise ValueError("metric_config must be an object when present")
+    metric_config = ReconstructionMetricConfig(
+        data_range=None if raw_metric_config.get("data_range") is None else float(raw_metric_config["data_range"]),
+        ssim_window_policy=str(raw_metric_config.get("ssim_window_policy", "global")),
+        edge_threshold=float(raw_metric_config.get("edge_threshold", 0.05)),
+    )
+    metrics = evaluate_audit_targets(predictions, targets, freeze_record=freeze, metric_config=metric_config)
     output_dir.mkdir(parents=True, exist_ok=False)
     report = {
         "package_hash": predictions.package.package_hash,

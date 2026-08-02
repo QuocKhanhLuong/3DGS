@@ -46,16 +46,20 @@ class FrozenPopulationStatistic:
 
 @dataclass(frozen=True)
 class NormalizationConfig:
-    policy: Literal["zscore", "identity"] = "zscore"
+    policy: Literal["zscore", "identity", "robust_percentile"] = "zscore"
     epsilon: float = 1e-6
     minimum_context_scale: float = 1e-3
     degenerate_scale_policy: Literal["reject_episode", "identity_scale", "frozen_population_scale"] = "identity_scale"
     frozen_population_statistics: Mapping[str, FrozenPopulationStatistic] = field(default_factory=dict)
     unseen_modality_policy: Literal["reject"] = "reject"
+    lower_percentile: float = 1.0
+    upper_percentile: float = 99.0
+    output_min: float = 0.0
+    output_max: float = 1.0
 
     def __post_init__(self) -> None:
-        if self.policy not in ("zscore", "identity"):
-            raise ValueError("normalization policy must be zscore or identity")
+        if self.policy not in ("zscore", "identity", "robust_percentile"):
+            raise ValueError("normalization policy must be zscore, identity, or robust_percentile")
         for name in ("epsilon", "minimum_context_scale"):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0.0:
@@ -64,6 +68,12 @@ class NormalizationConfig:
             raise ValueError("unknown degenerate_scale_policy")
         if self.unseen_modality_policy != "reject":
             raise ValueError("the T1-C reference rejects unseen target modalities")
+        if not (0.0 <= self.lower_percentile < self.upper_percentile <= 100.0):
+            raise ValueError("percentiles must satisfy 0 <= lower < upper <= 100")
+        if not all(math.isfinite(float(value)) for value in (self.lower_percentile, self.upper_percentile, self.output_min, self.output_max)):
+            raise ValueError("percentile and output bounds must be finite")
+        if self.output_min >= self.output_max:
+            raise ValueError("output_min must be smaller than output_max")
         statistics = dict(self.frozen_population_statistics)
         for modality, statistic in statistics.items():
             if not isinstance(modality, str) or not modality or not isinstance(statistic, FrozenPopulationStatistic):
@@ -76,7 +86,11 @@ class NormalizationConfig:
             "epsilon": self.epsilon,
             "frozen_population_statistics": {key: value.to_dict() for key, value in self.frozen_population_statistics.items()},
             "minimum_context_scale": self.minimum_context_scale,
+            "lower_percentile": self.lower_percentile,
+            "output_max": self.output_max,
+            "output_min": self.output_min,
             "policy": self.policy,
+            "upper_percentile": self.upper_percentile,
             "unseen_modality_policy": self.unseen_modality_policy,
         }
 
@@ -94,6 +108,10 @@ class ModalityNormalization:
     fallback_reason: str | None
     minimum_context_scale: float
     source_statistic_hash: str | None = None
+    clip_low: float | None = None
+    clip_high: float | None = None
+    output_min: float | None = None
+    output_max: float | None = None
 
     @property
     def mean(self) -> float:
@@ -109,15 +127,32 @@ class ModalityNormalization:
             len(self.source_statistic_hash) != 64 or any(char not in "0123456789abcdef" for char in self.source_statistic_hash)
         ):
             raise ValueError("source_statistic_hash must be a SHA-256 digest when present")
+        clip_values = (self.clip_low, self.clip_high, self.output_min, self.output_max)
+        if any(value is not None and not math.isfinite(float(value)) for value in clip_values):
+            raise ValueError("robust normalization bounds must be finite when present")
+        if (self.clip_low is None) != (self.clip_high is None):
+            raise ValueError("clip_low and clip_high must be provided together")
+        if self.clip_low is not None and (self.output_min is None or self.output_max is None):
+            raise ValueError("robust clipping requires declared output_min and output_max")
+        if self.clip_low is not None and not self.clip_low < self.clip_high:  # type: ignore[operator]
+            raise ValueError("clip_low must be smaller than clip_high")
+        if (self.output_min is None) != (self.output_max is None):
+            raise ValueError("output_min and output_max must be provided together")
+        if self.output_min is not None and not self.output_min < self.output_max:  # type: ignore[operator]
+            raise ValueError("output_min must be smaller than output_max")
 
     def to_dict(self) -> dict[str, object]:
         return {
             "center": self.center,
             "fallback_reason": self.fallback_reason,
+            "clip_high": self.clip_high,
+            "clip_low": self.clip_low,
             "minimum_context_scale": self.minimum_context_scale,
             "modality_id": self.modality_id,
             "scale": self.scale,
             "source_statistic_hash": self.source_statistic_hash,
+            "output_max": self.output_max,
+            "output_min": self.output_min,
             "valid_pixel_count": self.valid_pixel_count,
         }
 
@@ -134,7 +169,7 @@ class PreprocessingRecord:
     minimum_context_scale: float
 
     def __post_init__(self) -> None:
-        if self.policy_id not in ("zscore", "identity"):
+        if self.policy_id not in ("zscore", "identity", "robust_percentile"):
             raise ValueError("unknown preprocessing policy_id")
         if not self.fitted_from_context_ids or len(set(self.fitted_from_context_ids)) != len(self.fitted_from_context_ids):
             raise ValueError("preprocessing must bind unique context observations")
@@ -239,16 +274,37 @@ def fit_preprocessing(
         )
         if values.numel() == 0 or not bool(torch.isfinite(values).all()):
             raise ValueError("context normalization received no finite legal values")
-        center = float(values.mean().cpu())
-        scale = float(values.std(unbiased=False).cpu())
-        parameters.append(
-            _resolve_degenerate_scale(
-                modality_id=modality_id,
-                center=center,
-                observed_scale=scale,
-                valid_pixel_count=int(values.numel()),
-                config=config,
+        if config.policy == "robust_percentile":
+            center = float(torch.quantile(values, values.new_tensor(config.lower_percentile / 100.0)).cpu())
+            upper = float(torch.quantile(values, values.new_tensor(config.upper_percentile / 100.0)).cpu())
+            scale = upper - center
+        else:
+            center = float(values.mean().cpu())
+            scale = float(values.std(unbiased=False).cpu())
+            upper = None
+        resolved_parameter = _resolve_degenerate_scale(
+            modality_id=modality_id,
+            center=center,
+            observed_scale=scale,
+            valid_pixel_count=int(values.numel()),
+            config=config,
+        )
+        if config.policy == "robust_percentile" and upper is not None and resolved_parameter.fallback_reason is None:
+            resolved_parameter = ModalityNormalization(
+                modality_id=resolved_parameter.modality_id,
+                center=resolved_parameter.center,
+                scale=resolved_parameter.scale,
+                valid_pixel_count=resolved_parameter.valid_pixel_count,
+                fallback_reason=resolved_parameter.fallback_reason,
+                minimum_context_scale=resolved_parameter.minimum_context_scale,
+                source_statistic_hash=resolved_parameter.source_statistic_hash,
+                clip_low=center,
+                clip_high=upper,
+                output_min=config.output_min,
+                output_max=config.output_max,
             )
+        parameters.append(
+            resolved_parameter
         )
     canonical = [item.to_dict() for item in parameters]
     return PreprocessingRecord(
@@ -271,7 +327,15 @@ def apply_preprocessing(record: PreprocessingRecord, observation: DecodedObserva
     parameter = next((item for item in record.modality_parameters if item.modality_id == observation.modality_id), None)
     if parameter is None:
         raise ValueError("target modality has no context-derived normalization record")
-    image = (observation.image - observation.image.new_tensor(parameter.center)) / observation.image.new_tensor(parameter.scale)
+    if parameter.clip_low is not None and parameter.clip_high is not None:
+        low = observation.image.new_tensor(parameter.clip_low)
+        high = observation.image.new_tensor(parameter.clip_high)
+        output_min = observation.image.new_tensor(parameter.output_min)
+        output_max = observation.image.new_tensor(parameter.output_max)
+        image = (observation.image.clamp(low, high) - low) / (high - low)
+        image = image * (output_max - output_min) + output_min
+    else:
+        image = (observation.image - observation.image.new_tensor(parameter.center)) / observation.image.new_tensor(parameter.scale)
     image = torch.where(observation.valid_mask, image, torch.zeros_like(image))
     preprocessing_hash = record.record_hash
     input_content_hash = _hash(

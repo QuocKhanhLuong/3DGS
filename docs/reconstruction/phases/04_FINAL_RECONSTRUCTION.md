@@ -1,5 +1,10 @@
 # Phase 4 — Final 3D Reconstruction
 
+Current status (2026-08-02): T5 is an active implementation candidate with its
+Human Gate pending. Product output is a physical-volume query package with
+explicit support/unsupported masks and isolated serialized evaluation. No
+scientific or clinical pass is implied by export or metric execution.
+
 ## 1. Objective
 
 Convert the converged or budget-limited patient-specific representation into complete registered 3D MRI volumes, arbitrary physical slices, structural fields, and uncertainty maps.

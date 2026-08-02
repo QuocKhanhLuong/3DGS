@@ -5,6 +5,12 @@ Status: **IMPLEMENTATION AUTHORIZED — SCIENTIFIC VALIDATION DEFERRED**
 Depends on: executable T1-C contracts and software-valid T2 anchors, field, seed
 Gaussians, and initial patient state
 
+Product alignment (2026-08-02): the maintained P0/P1 path proposes bounded
+offsets in each anchor's `(t1,t2,n)` RAS-mm frame. It enforces per-anchor,
+per-round, per-bank, and patient primitive budgets, explicit StructuralField
+support, uncertainty and duplicate rejection, and immutable transactions.
+P2/P3 adaptive topology is optional; T4 routing is not in scope.
+
 ## 1. Purpose
 
 T3 tests the second central representation mechanism:
@@ -128,6 +134,12 @@ It must not use:
 
 The reference implementation uses deterministic local directions and a maximum
 physical step in RAS millimetres.
+
+The physical-volume check has two layers: an RAS AABB is used for a cheap early
+reject, then (when source geometry is declared) the proposal is transformed by
+the inverse source affine and checked against the oriented voxel-center extent.
+This distinction is required for rotated or oblique affines; an AABB alone is
+not a valid source-volume containment contract.
 
 ## 6. Child support proposal
 

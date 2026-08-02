@@ -260,6 +260,7 @@ def test_anchor_representation_switches_build_only_the_selected_field(tmp_path, 
     )
     assert result.patient_state is not None
     assert result.patient_state.memory.primitive_count > 0
+    assert result.propagation_transactions == ()
     assert result.representation_plan.variant is RepresentationVariant(variant.replace("r3", "direct_anchor_gaussian").replace("r4", "anchor_field").replace("r5", "global_field"))
     result.loss.total.backward()
     selected_field = local if local is not None else global_field
@@ -267,6 +268,30 @@ def test_anchor_representation_switches_build_only_the_selected_field(tmp_path, 
         gradients = [parameter.grad for parameter in selected_field.parameters()]
         assert all(value is not None and bool(torch.isfinite(value).all()) for value in gradients)
         assert any(float(value.abs().sum()) > 0 for value in gradients if value is not None)
+
+
+def test_anchor_representation_dispatcher_preserves_p1_transactions(tmp_path) -> None:
+    torch.manual_seed(23)
+    ledger, assignment = _episode(tmp_path, "r4-p1")
+    encoder, head = _encoder_head()
+    field = SharedStructuralField(StructuralFieldConfig(evidence_dim=52, hidden_width=16))
+    result = build_representation_episode_step(
+        ledger=ledger,
+        assignment=assignment,
+        target_id="target",
+        representation_variant="r4",
+        propagation_variant="p1",
+        config=_config(),
+        encoder=encoder,
+        gaussian_head=head,
+        local_field=field,
+        bootstrap_config=AnchorBootstrapConfig(candidate=CandidateSelectionConfig(maximum_candidates=4)),
+        propagation_config=PropagationConfig(variant="p1", rounds=1),
+    )
+    assert len(result.propagation_transactions) == 1
+    transaction = result.propagation_transactions[0]
+    assert transaction.round_index == 1
+    assert transaction.child_memory_hash == result.patient_state.memory.memory_hash
 
 
 def test_static_memory_channel_order_follows_explicit_mapping_not_modality_sort(tmp_path) -> None:

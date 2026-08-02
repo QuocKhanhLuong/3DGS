@@ -11,6 +11,7 @@ from smagm.data.brats21 import (
     BraTS21ValidationError,
     deterministic_plane_schedule,
     discover_patient,
+    extract_axial_plane_at_position,
     plane_from_nifti,
     validate_patient,
 )
@@ -91,6 +92,19 @@ def test_plane_geometry_preserves_source_affine_and_axis_order() -> None:
     assert plane.source_transform is not None
     assert plane.source_transform.to_canonical_dict()["index_order"] == ["u", "v", "slice"]
     assert plane.pixel_center_origin_ras_mm == (0.0, 8.0, 4.0)
+
+
+def test_fractional_target_plane_interpolates_intensities_but_nearest_preserves_labels(tmp_path: Path) -> None:
+    volume = np.zeros((3, 4, 5), dtype=np.float32)
+    for index in range(volume.shape[2]):
+        volume[:, :, index] = float(index)
+    path = tmp_path / "fractional.nii.gz"
+    nib.save(nib.Nifti1Image(volume, np.eye(4)), path)
+
+    linear = extract_axial_plane_at_position(path, 1.5, interpolation="linear")
+    nearest = extract_axial_plane_at_position(path, 1.5, interpolation="nearest")
+    np.testing.assert_allclose(linear, 1.5)
+    np.testing.assert_allclose(nearest, 2.0)
 
 
 def test_preparation_hashes_are_deterministic_and_segmentation_is_evaluator_only(tmp_path: Path) -> None:

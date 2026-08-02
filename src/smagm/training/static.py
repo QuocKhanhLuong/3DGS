@@ -10,10 +10,12 @@ import torch
 
 from ..anchors import AnchorBootstrapConfig, CachedPlaneEvidence, bootstrap_anchors
 from ..baselines import RepresentationPlan, RepresentationVariant, resolve_representation_plan
-from ..baselines.fixed_gaussian import FixedGaussianHead
+from ..baselines.fixed_gaussian import FixedGaussianHead, construct_fixed_gaussians
+from ..baselines.fixed_support import FixedSupportBatch
 from ..contracts.episode import EpisodeAssignment, EpisodeController, EpisodeLedger, FrozenPatientState
 from ..features.encoder import EvidenceEncoder
 from ..fields import GlobalStructuralField, SharedStructuralField, query_structural_field
+from ..gaussians import restore_gauge_fixed_gaussian_batch
 from ..losses.reconstruction import ReconstructionLossResult, reconstruction_loss
 from ..memory import PropagationConfig, PropagationTransaction, SeedMemoryConfig, propagate_memory
 from ..reconstruction.plane import combined_memory_gaussians
@@ -66,6 +68,83 @@ def _static_modality_order(
     return ordered
 
 
+def _head_volumetric_gaussians(
+    anchors: "AnchorBatch", gaussian_head: FixedGaussianHead, *, input_adapter: str,
+) -> "GaussianBatch":
+    """Construct the R4 volumetric bank from context-only anchor evidence.
+
+    Anchor selection and physical consolidation are discrete, but the compact
+    evidence at the selected anchors remains connected to the encoder graph.
+    The explicit prefix adapter is part of the product contract because the
+    shared T1 head currently declares a 25-channel input while R4 aggregation
+    exposes a 52-channel mean/dispersion evidence vector.
+    """
+
+    from ..anchors import AnchorBatch
+    from ..gaussians import GaussianBatch
+
+    if input_adapter != "anchor_evidence_prefix":
+        raise ValueError("the maintained static path supports only anchor_evidence_prefix Gaussian-head input")
+    if not isinstance(anchors, AnchorBatch):
+        raise TypeError("anchors must be an AnchorBatch")
+    input_dim = gaussian_head.config.input_dim
+    if anchors.evidence.shape[1] < input_dim:
+        raise ValueError(
+            f"Gaussian-head input adapter requires {input_dim} anchor evidence channels; "
+            f"only {anchors.evidence.shape[1]} are available"
+        )
+    if gaussian_head.config.appearance_channels != anchors.appearance.shape[1]:
+        raise ValueError("Gaussian-head appearance channels must match anchor modality channels")
+    observation_ids: list[str] = []
+    plane_hashes: list[str] = []
+    for anchor_id, observations, planes in zip(
+        anchors.anchor_ids,
+        anchors.geometry.contributing_observation_ids,
+        anchors.geometry.contributing_plane_hashes,
+    ):
+        if not observations or not planes:
+            raise ValueError(f"anchor {anchor_id} has incomplete legal provenance for Gaussian-head construction")
+        observation_ids.append(observations[0])
+        plane_hashes.append(planes[0])
+    supports = FixedSupportBatch(
+        centers_ras_mm=anchors.centers_ras_mm,
+        feature_vectors=anchors.evidence[:, :input_dim],
+        feature_indices_vu=torch.zeros((anchors.count, 2), dtype=torch.long, device=anchors.evidence.device),
+        reliability=anchors.geometry.geometry_confidence.clamp(0.0, 1.0),
+        observation_ids=tuple(observation_ids),
+        source_plane_hashes=tuple(plane_hashes),
+        batch_index=0,
+        # FixedSupportBatch uses row basis (t1, t2, n), matching the physical
+        # local-frame offset convention used by the Gaussian head.
+        support_basis_ras=anchors.frame_axes_ras,
+    )
+    predicted = construct_fixed_gaussians(
+        supports,
+        gaussian_head(supports.feature_vectors),
+        config=gaussian_head.config,
+    )
+    primitive_ids = tuple(f"volumetric:{anchor_id}" for anchor_id in anchors.anchor_ids)
+    return restore_gauge_fixed_gaussian_batch(
+        centers_ras_mm=predicted.centers_ras_mm,
+        covariance_factor=predicted.covariance_factor,
+        log_support_amplitude=predicted.log_support_amplitude,
+        appearance=predicted.appearance,
+        # Preserve the modality-validity mask from legal context evidence;
+        # the head may emit a value for every configured channel, but an
+        # unseen modality is not silently promoted to observed appearance.
+        appearance_valid=anchors.appearance_valid,
+        # The fixed-head converter keeps its Cholesky epsilon in the factor
+        # and returns a tiny residual epsilon.  Dual-bank rendering requires
+        # the same runtime residual policy as the anchor-created structural
+        # bank, whose GaussianBatch default is 1e-8.
+        covariance_epsilon=1e-8,
+        primitive_kind=("VOLUMETRIC",) * anchors.count,
+        primitive_id=primitive_ids,
+        gauge_policy=predicted.gauge_policy,
+        gauge_config_hash=predicted.gauge_config_hash or "",
+    )
+
+
 def build_static_episode_step(
     *, ledger: EpisodeLedger, assignment: EpisodeAssignment, target_id: str,
     encoder: EvidenceEncoder, gaussian_head: FixedGaussianHead,
@@ -82,6 +161,9 @@ def build_static_episode_step(
     propagation_config: PropagationConfig | None = None,
     patient_bounds_min_ras_mm: torch.Tensor | None = None,
     patient_bounds_max_ras_mm: torch.Tensor | None = None,
+    source_affine_ras_from_index: torch.Tensor | None = None,
+    source_shape_xyz: tuple[int, int, int] | None = None,
+    gaussian_head_input_adapter: str = "anchor_evidence_prefix",
 ) -> StaticEpisodeResult:
     """Build all static state before target metadata/payload reveal.
 
@@ -132,6 +214,7 @@ def build_static_episode_step(
     modality_ids = _static_modality_order(config, gaussian_head, context_modalities)
     anchors = bootstrap_anchors(cached, patient_id=patient_id, modality_ids=modality_ids, config=bootstrap_config)
     field_values: torch.Tensor | None
+    supported_anchor_mask: torch.Tensor | None = None
     if plan.variant is RepresentationVariant.ANCHOR_FIELD:
         assert field_model is not None
         if field_config_hash != field_model.config.config_hash:
@@ -144,6 +227,7 @@ def build_static_episode_step(
         if not bool(field_output.supported.all()):
             raise RuntimeError("seed anchors must be supported by their local StructuralField")
         field_values = field_output.value
+        supported_anchor_mask = field_output.supported
         resolved_field_config_hash = model.config.config_hash
     elif plan.variant is RepresentationVariant.GLOBAL_FIELD:
         assert global_field_model is not None
@@ -155,6 +239,9 @@ def build_static_episode_step(
         field_values = None
         resolved_field_config_hash = hashlib.sha256(b"no-structural-field").hexdigest()
         model = None
+    volumetric_gaussians = _head_volumetric_gaussians(
+        anchors, gaussian_head, input_adapter=gaussian_head_input_adapter,
+    )
     model_hash = hashlib.sha256(b"no-structural-field").hexdigest() if model is None else hashlib.sha256(
         b"".join(name.encode() + value.detach().cpu().contiguous().numpy().tobytes() for name, value in model.state_dict().items())
     ).hexdigest()
@@ -164,6 +251,7 @@ def build_static_episode_step(
         cache_key_hashes=context_step.feature_cache_key_hashes,
         anchors=anchors, field_config_hash=resolved_field_config_hash, field_model_hash=model_hash,
         memory_config=seed_memory_config, field_values=field_values,
+        volumetric_gaussians=volumetric_gaussians,
     )
     device = state.memory.structural.gaussians.centers_ras_mm.device
     lower = patient_bounds_min_ras_mm if patient_bounds_min_ras_mm is not None else state.anchors.centers_ras_mm.min(dim=0).values - state.anchors.support_scales_mm.max(dim=0).values
@@ -171,6 +259,9 @@ def build_static_episode_step(
     propagated_memory, transactions = propagate_memory(
         state.memory, state.anchors, config=propagation_config,
         bounds_min_ras_mm=lower.to(device=device), bounds_max_ras_mm=upper.to(device=device),
+        supported_anchor_mask=supported_anchor_mask,
+        source_affine_ras_from_index=source_affine_ras_from_index,
+        source_shape_xyz=source_shape_xyz,
     )
     if propagated_memory.memory_hash != state.memory.memory_hash:
         state = apply_memory_update(state, propagated_memory)
