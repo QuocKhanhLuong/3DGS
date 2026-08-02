@@ -130,8 +130,10 @@ boundaries and continuity. Volumetric Gaussians have broader support and carry
 modality-specific appearance for interior tissue. They are not interchangeable
 dense appearance primitives. In the maintained R4 path, their bounded local
 offsets, covariance, amplitude, and modality appearance are produced by the
-shared Gaussian head through the explicit `anchor_evidence_prefix` adapter
-(currently the configured 25-channel prefix of context-only anchor evidence).
+shared Gaussian head through a typed learned `AnchorEvidenceProjector` from the
+complete context-only compact anchor evidence vector to the declared head input
+dimension. The historical `anchor_evidence_prefix` truncation is retained only
+as an explicit ablation, not as the product path.
 The local StructuralField also contributes a bounded local-normal placement
 offset to head-produced volumetric seed centres. This keeps the field on the
 live differentiable reconstruction path when a thin structural bank is
@@ -160,8 +162,12 @@ frontier
 ```
 
 P0 disables propagation exactly. P1 uses fixed local-frame offsets and finite
-rounds. Per-anchor child, per-round, per-bank, and per-patient budgets are
-enforced. Proposals are rejected for duplicate collision, insufficient field
+rounds. Volumetric proposals use only `+n` or `-n`; structural propagation is
+explicitly tangent-only or disabled. Per-anchor child, per-round, per-bank,
+per-patient, total-anchor, seed, and reserved-propagation budgets are enforced
+before target commitment. A P1 configuration with zero child reserve is an
+error, rather than a reason to force invalid proposals. Proposals are rejected
+for duplicate collision, insufficient field
 support/evidence gain, high uncertainty, invalid covariance/non-finite values,
 outside-volume geometry, unsupported modality appearance, or budget limits.
 P2/P3 adaptive topology are optional and are not required by the first product
@@ -193,8 +199,13 @@ declared and independently evaluated.
 The query domain is a physical target plane or full physical grid. Gaussian
 profiles account for through-plane thickness/profile and preserve the target
 affine/grid. Camera pose, perspective projection, view-dependent color, and
-global-z propagation are not method assumptions. The maintained initial
-product episode queries the held-out target plane. An explicit full-source-grid
+global-z propagation are not method assumptions. Per render, the reference
+implementation precomputes the covariance factor, amplitude, valid appearance,
+conservative support radius, and plane bounds once, then uses conservative
+plane and physical tile culling. A brute-force path remains the numerical and
+gradient equivalence reference; candidate-pair counts are engineering
+telemetry, not a scientific performance claim. The maintained initial product
+episode queries the held-out target plane. An explicit full-source-grid
 mode derives the `[d,h,w]` grid from source geometry and declared in-plane
 stride, streams depth chunks, and serializes an affine-preserving prediction
 package; its latency remains unmeasured until that mode is actually run.
@@ -209,14 +220,30 @@ sampling protocol, preprocessing, model, checkpoint, and prediction package
 hashes are bound in run provenance. W&B receives pseudonyms and safe derived
 images only, never raw IDs, full NIfTI volumes, or segmentations.
 
-The streamed cohort trainer keeps global encoder, Gaussian-head,
-anchor-local-StructuralField, and optimizer state separate from each
-patient-specific Gaussian volume. A successful training patient atomically
-promotes that shared state into a target-free global checkpoint. Validation
-episodes may consume the last training checkpoint but do not backward, update,
-or promote it; patient state and evaluator payloads remain outside the global
-checkpoint. Validation therefore cannot alter the state used by a later
-training patient.
+The streamed cohort trainer creates exactly one process-level owner for the
+encoder, Gaussian head, anchor-local StructuralField, evidence projector,
+optimizer, scheduler, AMP scaler (explicitly absent for float32), W&B run,
+global step, and global checkpoint manager. A shuffled legal patient episode
+builds and discards temporary context evidence, anchors, Gaussian banks,
+propagation transactions, renderer graph, and receipt. A successful optimizer
+step atomically promotes only the target-free shared state. R0, package export,
+isolated evaluation, audit, and media run at declared validation/final cadence,
+not for every training patient. Validation is no-grad and cannot alter the
+shared state used by a later training patient.
+
+### Compute telemetry
+
+`encoder_forward_flops_2flop_per_mac` is an exact analytical count for forward
+`Conv2d` and `Linear` work only, using actual legal context tensor shapes and a
+declared two-FLOPs-per-MAC convention. It excludes analytic features, anchors,
+field, renderer, loss, backward, and optimizer. It is computed once per
+distinct legal context-shape batch in a cohort process and cached.
+`profiled_supported_operator_flops` is an optional
+`torch.profiler.with_flops` subtotal with explicitly partial/unknown operator
+coverage and a declared scope; it is never called total training-step FLOPs and
+is invoked at most once when its diagnostic option is enabled. Device-complete
+phase timings are collected only for the first explicitly timed diagnostic
+episode so normal cohort throughput is not synchronised per patient.
 
 ## 15. Evaluation protocol
 

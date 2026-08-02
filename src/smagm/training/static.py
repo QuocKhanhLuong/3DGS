@@ -5,6 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import time
+from contextlib import contextmanager
+from collections.abc import Iterator
 
 import torch
 
@@ -17,10 +20,17 @@ from ..features.encoder import EvidenceEncoder
 from ..fields import GlobalStructuralField, SharedStructuralField, query_structural_field
 from ..gaussians import restore_gauge_fixed_gaussian_batch
 from ..losses.reconstruction import ReconstructionLossResult, reconstruction_loss
-from ..memory import PropagationConfig, PropagationTransaction, SeedMemoryConfig, propagate_memory
+from ..memory import (
+    PropagationConfig,
+    PropagationTransaction,
+    SeedMemoryConfig,
+    propagate_memory,
+    validate_seed_and_reserve_budgets,
+)
 from ..reconstruction.plane import combined_memory_gaussians
 from ..renderer import RenderResult
 from ..state import PatientState, apply_memory_update, build_initial_patient_state
+from .anchor_evidence import AnchorEvidenceProjector, ProjectedAnchorEvidence
 from .episode import ContextOnlyEpisodeStep, LegalEpisodeConfig, build_context_only_episode_step
 
 
@@ -36,6 +46,10 @@ class StaticEpisodeResult:
     receipt_hash: str
     audit_hash: str
     representation_plan: RepresentationPlan
+    anchor_evidence_adapter: str
+    anchor_evidence_projector_parameter_count: int
+    anchor_evidence_projector_trainable_parameter_count: int
+    phase_timing_ms: dict[str, float | None]
 
 
 def _static_modality_order(
@@ -68,33 +82,88 @@ def _static_modality_order(
     return ordered
 
 
+def _head_feature_vectors(
+    anchors: "AnchorBatch",
+    gaussian_head: FixedGaussianHead,
+    *,
+    anchor_evidence_projector: AnchorEvidenceProjector | None,
+    input_adapter: str,
+) -> torch.Tensor:
+    """Resolve one provenance-preserving feature vector per anchor for the head."""
+
+    input_dim = gaussian_head.config.input_dim
+    if input_adapter == "anchor_evidence_projector":
+        if not isinstance(anchor_evidence_projector, AnchorEvidenceProjector):
+            raise ValueError(
+                "anchor_evidence_projector adapter requires an AnchorEvidenceProjector"
+            )
+        if anchor_evidence_projector.config.head_input_dim != input_dim:
+            raise ValueError("projector output channels must match the Gaussian-head input")
+        projected = anchor_evidence_projector(anchors)
+        if not isinstance(projected, ProjectedAnchorEvidence):
+            raise TypeError("anchor evidence projector must return ProjectedAnchorEvidence")
+        if (
+            projected.anchor_ids != anchors.anchor_ids
+            or projected.modality_ids != anchors.modality_ids
+            or projected.source_evidence_hash != anchors.evidence_hash
+            or projected.contributing_observation_ids
+            != anchors.geometry.contributing_observation_ids
+            or projected.contributing_plane_hashes != anchors.geometry.contributing_plane_hashes
+            or not torch.equal(projected.appearance_valid, anchors.appearance_valid)
+        ):
+            raise ValueError("projected anchor evidence must preserve modality validity and provenance")
+        feature_vectors = projected.feature_vectors
+        if (
+            feature_vectors.shape != (anchors.count, input_dim)
+            or feature_vectors.device != anchors.evidence.device
+            or feature_vectors.dtype != anchors.evidence.dtype
+        ):
+            raise ValueError("projected anchor evidence must match the source batch shape, device, and dtype")
+        return feature_vectors
+    if input_adapter == "anchor_evidence_prefix":
+        if anchor_evidence_projector is not None:
+            raise ValueError("anchor_evidence_prefix is an ablation and cannot receive a projector")
+        if anchors.evidence.shape[1] < input_dim:
+            raise ValueError(
+                f"Gaussian-head input adapter requires {input_dim} anchor evidence channels; "
+                f"only {anchors.evidence.shape[1]} are available"
+            )
+        return anchors.evidence[:, :input_dim]
+    raise ValueError(
+        "Gaussian-head input adapter must be 'anchor_evidence_projector' or "
+        "the explicit 'anchor_evidence_prefix' ablation"
+    )
+
+
 def _head_volumetric_gaussians(
-    anchors: "AnchorBatch", gaussian_head: FixedGaussianHead, *, input_adapter: str,
+    anchors: "AnchorBatch",
+    gaussian_head: FixedGaussianHead,
+    *,
+    anchor_evidence_projector: AnchorEvidenceProjector | None,
+    input_adapter: str,
 ) -> "GaussianBatch":
     """Construct the R4 volumetric bank from context-only anchor evidence.
 
     Anchor selection and physical consolidation are discrete, but the compact
     evidence at the selected anchors remains connected to the encoder graph.
-    The explicit prefix adapter is part of the product contract because the
-    shared T1 head currently declares a 25-channel input while R4 aggregation
-    exposes a 52-channel mean/dispersion evidence vector.
+    The maintained path learns a typed projection from every compact evidence
+    channel to the shared T1 head input.  Prefix truncation remains available
+    only as a named matched ablation.
     """
 
     from ..anchors import AnchorBatch
     from ..gaussians import GaussianBatch
 
-    if input_adapter != "anchor_evidence_prefix":
-        raise ValueError("the maintained static path supports only anchor_evidence_prefix Gaussian-head input")
     if not isinstance(anchors, AnchorBatch):
         raise TypeError("anchors must be an AnchorBatch")
-    input_dim = gaussian_head.config.input_dim
-    if anchors.evidence.shape[1] < input_dim:
-        raise ValueError(
-            f"Gaussian-head input adapter requires {input_dim} anchor evidence channels; "
-            f"only {anchors.evidence.shape[1]} are available"
-        )
     if gaussian_head.config.appearance_channels != anchors.appearance.shape[1]:
         raise ValueError("Gaussian-head appearance channels must match anchor modality channels")
+    feature_vectors = _head_feature_vectors(
+        anchors,
+        gaussian_head,
+        anchor_evidence_projector=anchor_evidence_projector,
+        input_adapter=input_adapter,
+    )
     observation_ids: list[str] = []
     plane_hashes: list[str] = []
     for anchor_id, observations, planes in zip(
@@ -108,15 +177,15 @@ def _head_volumetric_gaussians(
         plane_hashes.append(planes[0])
     supports = FixedSupportBatch(
         centers_ras_mm=anchors.centers_ras_mm,
-        feature_vectors=anchors.evidence[:, :input_dim],
+        feature_vectors=feature_vectors,
         feature_indices_vu=torch.zeros((anchors.count, 2), dtype=torch.long, device=anchors.evidence.device),
         reliability=anchors.geometry.geometry_confidence.clamp(0.0, 1.0),
         observation_ids=tuple(observation_ids),
         source_plane_hashes=tuple(plane_hashes),
         batch_index=0,
-        # FixedSupportBatch uses row basis (t1, t2, n), matching the physical
-        # local-frame offset convention used by the Gaussian head.
-        support_basis_ras=anchors.frame_axes_ras,
+        # AnchorGeometryBatch stores local axes as columns, while
+        # FixedSupportBatch requires rows (t1, t2, n).
+        support_basis_ras=anchors.frame_axes_ras.transpose(-1, -2),
     )
     predicted = construct_fixed_gaussians(
         supports,
@@ -163,7 +232,9 @@ def build_static_episode_step(
     patient_bounds_max_ras_mm: torch.Tensor | None = None,
     source_affine_ras_from_index: torch.Tensor | None = None,
     source_shape_xyz: tuple[int, int, int] | None = None,
-    gaussian_head_input_adapter: str = "anchor_evidence_prefix",
+    anchor_evidence_projector: AnchorEvidenceProjector | None = None,
+    gaussian_head_input_adapter: str = "anchor_evidence_projector",
+    collect_phase_timing: bool = False,
 ) -> StaticEpisodeResult:
     """Build all static state before target metadata/payload reveal.
 
@@ -190,6 +261,23 @@ def build_static_episode_step(
         raise ValueError("field_maximum_neighbors must be a positive integer")
     if not isinstance(registration_id, str) or not registration_id:
         raise ValueError("static aggregation requires an explicit registration identity")
+    if gaussian_head_input_adapter == "anchor_evidence_projector":
+        if not isinstance(anchor_evidence_projector, AnchorEvidenceProjector):
+            raise ValueError(
+                "anchor_evidence_projector adapter requires an AnchorEvidenceProjector"
+            )
+        if anchor_evidence_projector.config.head_input_dim != gaussian_head.config.input_dim:
+            raise ValueError("projector output channels must match the Gaussian-head input")
+        projector_report = anchor_evidence_projector.parameter_report
+    elif gaussian_head_input_adapter == "anchor_evidence_prefix":
+        if anchor_evidence_projector is not None:
+            raise ValueError("anchor_evidence_prefix is an ablation and cannot receive a projector")
+        projector_report = None
+    else:
+        raise ValueError(
+            "Gaussian-head input adapter must be 'anchor_evidence_projector' or "
+            "the explicit 'anchor_evidence_prefix' ablation"
+        )
     if plan.variant is RepresentationVariant.ANCHOR_FIELD:
         if field_model is None or global_field_model is not None:
             raise ValueError("R4 requires exactly the shared local StructuralField")
@@ -199,9 +287,43 @@ def build_static_episode_step(
     elif field_model is not None or global_field_model is not None:
         raise ValueError("R3 removes all structural-field modules")
 
-    context_step = build_context_only_episode_step(
-        ledger=ledger, assignment=assignment, encoder=encoder, gaussian_head=gaussian_head, config=config
-    )
+    if not isinstance(collect_phase_timing, bool):
+        raise TypeError("collect_phase_timing must be bool")
+    phase_timing_ms: dict[str, float | None] = {
+        "encoder_wall_time_ms": None,
+        "anchor_build_wall_time_ms": None,
+        "field_query_wall_time_ms": None,
+        "propagation_wall_time_ms": None,
+        "renderer_wall_time_ms": None,
+        "loss_wall_time_ms": None,
+    }
+
+    @contextmanager
+    def _phase(name: str) -> Iterator[None]:
+        if collect_phase_timing and torch.cuda.is_available():
+            torch.cuda.synchronize()
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            if collect_phase_timing and torch.cuda.is_available():
+                torch.cuda.synchronize()
+            if collect_phase_timing:
+                phase_timing_ms[name] = (time.perf_counter() - started) * 1000.0
+
+    with _phase("context_build_wall_time_ms"):
+        context_step = build_context_only_episode_step(
+            ledger=ledger,
+            assignment=assignment,
+            encoder=encoder,
+            gaussian_head=gaussian_head,
+            config=config,
+            synchronize_encoder_timing=collect_phase_timing,
+        )
+    if collect_phase_timing:
+        # This timing is recorded inside the hardened context path.  The outer
+        # boundary above additionally captures preprocessing/cache overhead.
+        phase_timing_ms["encoder_wall_time_ms"] = context_step.encoder_runtime_seconds * 1000.0
     cached = tuple(
         CachedPlaneEvidence(
             item.observation_id, item.modality_id, item.features, item.cache_key_hash,
@@ -212,7 +334,8 @@ def build_static_episode_step(
     )
     context_modalities = {item.modality_id for item in cached}
     modality_ids = _static_modality_order(config, gaussian_head, context_modalities)
-    anchors = bootstrap_anchors(cached, patient_id=patient_id, modality_ids=modality_ids, config=bootstrap_config)
+    with _phase("anchor_build_wall_time_ms"):
+        anchors = bootstrap_anchors(cached, patient_id=patient_id, modality_ids=modality_ids, config=bootstrap_config)
     field_values: torch.Tensor | None
     supported_anchor_mask: torch.Tensor | None = None
     if plan.variant is RepresentationVariant.ANCHOR_FIELD:
@@ -220,10 +343,11 @@ def build_static_episode_step(
         if field_config_hash != field_model.config.config_hash:
             raise ValueError("field_config_hash must bind the exact local-field config")
         model = field_model
-        field_output = query_structural_field(
-            model, anchors, anchors.centers_ras_mm,
-            maximum_neighbors=field_maximum_neighbors,
-        )
+        with _phase("field_query_wall_time_ms"):
+            field_output = query_structural_field(
+                model, anchors, anchors.centers_ras_mm,
+                maximum_neighbors=field_maximum_neighbors,
+            )
         if not bool(field_output.supported.all()):
             raise RuntimeError("seed anchors must be supported by their local StructuralField")
         field_values = field_output.value
@@ -240,7 +364,10 @@ def build_static_episode_step(
         resolved_field_config_hash = hashlib.sha256(b"no-structural-field").hexdigest()
         model = None
     volumetric_gaussians = _head_volumetric_gaussians(
-        anchors, gaussian_head, input_adapter=gaussian_head_input_adapter,
+        anchors,
+        gaussian_head,
+        anchor_evidence_projector=anchor_evidence_projector,
+        input_adapter=gaussian_head_input_adapter,
     )
     model_hash = hashlib.sha256(b"no-structural-field").hexdigest() if model is None else hashlib.sha256(
         b"".join(name.encode() + value.detach().cpu().contiguous().numpy().tobytes() for name, value in model.state_dict().items())
@@ -253,16 +380,18 @@ def build_static_episode_step(
         memory_config=seed_memory_config, field_values=field_values,
         volumetric_gaussians=volumetric_gaussians,
     )
+    validate_seed_and_reserve_budgets(state.memory, state.anchors, config=propagation_config)
     device = state.memory.structural.gaussians.centers_ras_mm.device
     lower = patient_bounds_min_ras_mm if patient_bounds_min_ras_mm is not None else state.anchors.centers_ras_mm.min(dim=0).values - state.anchors.support_scales_mm.max(dim=0).values
     upper = patient_bounds_max_ras_mm if patient_bounds_max_ras_mm is not None else state.anchors.centers_ras_mm.max(dim=0).values + state.anchors.support_scales_mm.max(dim=0).values
-    propagated_memory, transactions = propagate_memory(
-        state.memory, state.anchors, config=propagation_config,
-        bounds_min_ras_mm=lower.to(device=device), bounds_max_ras_mm=upper.to(device=device),
-        supported_anchor_mask=supported_anchor_mask,
-        source_affine_ras_from_index=source_affine_ras_from_index,
-        source_shape_xyz=source_shape_xyz,
-    )
+    with _phase("propagation_wall_time_ms"):
+        propagated_memory, transactions = propagate_memory(
+            state.memory, state.anchors, config=propagation_config,
+            bounds_min_ras_mm=lower.to(device=device), bounds_max_ras_mm=upper.to(device=device),
+            supported_anchor_mask=supported_anchor_mask,
+            source_affine_ras_from_index=source_affine_ras_from_index,
+            source_shape_xyz=source_shape_xyz,
+        )
     if propagated_memory.memory_hash != state.memory.memory_hash:
         state = apply_memory_update(state, propagated_memory)
     target_metadata = ledger.metadata(target_id)
@@ -276,10 +405,11 @@ def build_static_episode_step(
     frozen = FrozenPatientState.create(ledger=ledger, gaussians=combined_memory_gaussians(state), upstream_state_hash=state.state_version)
     ledger.expose_target_metadata(target_id)
     commit = ledger.commit_target(target_id, frozen.state_version)
-    prediction, receipt = EpisodeController().render_and_register(
-        ledger=ledger, commit_capability=commit, frozen_state=frozen,
-        appearance_channel=target_appearance_channel, render_config=config.renderer,
-    )
+    with _phase("renderer_wall_time_ms"):
+        prediction, receipt = EpisodeController().render_and_register(
+            ledger=ledger, commit_capability=commit, frozen_state=frozen,
+            appearance_channel=target_appearance_channel, render_config=config.renderer,
+        )
     target_payload = ledger.reveal_target(target_id, receipt)
     from ..data.io import decode_observation
     from ..data.normalization import apply_preprocessing
@@ -287,7 +417,8 @@ def build_static_episode_step(
     target_normalized = apply_preprocessing(context_step.preprocessing, target_decoded)
     target = target_normalized.image[0].to(device=device, dtype=prediction.intensity.dtype)
     target_valid = target_normalized.valid_mask[0].to(device=device)
-    loss = reconstruction_loss(prediction, target, target_valid, config=config.reconstruction_loss)
+    with _phase("loss_wall_time_ms"):
+        loss = reconstruction_loss(prediction, target, target_valid, config=config.reconstruction_loss)
     receipt_payload = json.dumps(
         ledger.prediction_records[-1].to_canonical_dict(),
         sort_keys=True,
@@ -298,4 +429,12 @@ def build_static_episode_step(
         patient_state=state, context_step=context_step, prediction=prediction, target=target,
         target_valid_mask=target_valid, loss=loss, propagation_transactions=transactions,
         receipt_hash=receipt_hash, audit_hash=ledger.audit_hash, representation_plan=plan,
+        anchor_evidence_adapter=gaussian_head_input_adapter,
+        anchor_evidence_projector_parameter_count=(
+            0 if projector_report is None else projector_report.parameter_count
+        ),
+        anchor_evidence_projector_trainable_parameter_count=(
+            0 if projector_report is None else projector_report.trainable_parameter_count
+        ),
+        phase_timing_ms=phase_timing_ms,
     )

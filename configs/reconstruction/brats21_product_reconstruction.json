@@ -6,6 +6,7 @@
     "minimum_supported_psf_mass": 0.999,
     "pixel_chunk_size": 1024,
     "gaussian_chunk_size": 128,
+    "tile_shape_hw": [32, 32],
     "profile": "delta"
   },
   "runner": {

@@ -24,7 +24,12 @@ from smagm.fields import GlobalStructuralField, GlobalStructuralFieldConfig, Sha
 from smagm.losses.reconstruction import ReconstructionLossConfig
 from smagm.memory import PropagationConfig
 from smagm.renderer import RenderConfig
-from smagm.training import LegalEpisodeConfig, build_representation_episode_step
+from smagm.training import (
+    AnchorEvidenceProjector,
+    AnchorEvidenceProjectorConfig,
+    LegalEpisodeConfig,
+    build_representation_episode_step,
+)
 
 
 def _payload(phase: float, shape: tuple[int, int]) -> bytes:
@@ -191,6 +196,12 @@ def _encoder_head(*, appearance_channels: int = 1) -> tuple[EvidenceEncoder, Fix
     )
 
 
+def _anchor_projector(head: FixedGaussianHead) -> AnchorEvidenceProjector:
+    return AnchorEvidenceProjector(
+        AnchorEvidenceProjectorConfig(evidence_dim=52, head_input_dim=head.config.input_dim)
+    )
+
+
 def test_representation_switches_have_exact_module_inventories_and_reject_t4_or_mismatched_p1() -> None:
     expected_removed = {
         "r0": ("encoder", "physical_anchors", "shared_local_field", "global_coordinate_field"),
@@ -241,6 +252,7 @@ def test_anchor_representation_switches_build_only_the_selected_field(tmp_path, 
     torch.manual_seed(9)
     ledger, assignment = _episode(tmp_path, variant)
     encoder, head = _encoder_head()
+    projector = _anchor_projector(head)
     local = SharedStructuralField(StructuralFieldConfig(evidence_dim=52, hidden_width=16)) if variant == "r4" else None
     global_field = GlobalStructuralField(
         GlobalStructuralFieldConfig(evidence_dim=52, coordinate_scale_mm=16.0, hidden_width=16)
@@ -253,6 +265,7 @@ def test_anchor_representation_switches_build_only_the_selected_field(tmp_path, 
         config=_config(),
         encoder=encoder,
         gaussian_head=head,
+        anchor_evidence_projector=projector,
         local_field=local,
         global_field=global_field,
         bootstrap_config=AnchorBootstrapConfig(candidate=CandidateSelectionConfig(maximum_candidates=4)),
@@ -268,12 +281,17 @@ def test_anchor_representation_switches_build_only_the_selected_field(tmp_path, 
         gradients = [parameter.grad for parameter in selected_field.parameters()]
         assert all(value is not None and bool(torch.isfinite(value).all()) for value in gradients)
         assert any(float(value.abs().sum()) > 0 for value in gradients if value is not None)
+    assert any(
+        parameter.grad is not None and float(parameter.grad.abs().sum()) > 0
+        for parameter in projector.parameters()
+    )
 
 
 def test_anchor_representation_dispatcher_preserves_p1_transactions(tmp_path) -> None:
     torch.manual_seed(23)
     ledger, assignment = _episode(tmp_path, "r4-p1")
     encoder, head = _encoder_head()
+    projector = _anchor_projector(head)
     field = SharedStructuralField(StructuralFieldConfig(evidence_dim=52, hidden_width=16))
     result = build_representation_episode_step(
         ledger=ledger,
@@ -284,6 +302,7 @@ def test_anchor_representation_dispatcher_preserves_p1_transactions(tmp_path) ->
         config=_config(),
         encoder=encoder,
         gaussian_head=head,
+        anchor_evidence_projector=projector,
         local_field=field,
         bootstrap_config=AnchorBootstrapConfig(candidate=CandidateSelectionConfig(maximum_candidates=4)),
         propagation_config=PropagationConfig(variant="p1", rounds=1),
@@ -298,6 +317,7 @@ def test_static_memory_channel_order_follows_explicit_mapping_not_modality_sort(
     torch.manual_seed(14)
     ledger, assignment = _multimodal_episode(tmp_path)
     encoder, head = _encoder_head(appearance_channels=2)
+    projector = _anchor_projector(head)
     config = LegalEpisodeConfig(
         supports=FixedSupportConfig(step_vu=(4, 4)),
         renderer=RenderConfig(support_epsilon=1e-10),
@@ -312,12 +332,46 @@ def test_static_memory_channel_order_follows_explicit_mapping_not_modality_sort(
         config=config,
         encoder=encoder,
         gaussian_head=head,
+        anchor_evidence_projector=projector,
         bootstrap_config=AnchorBootstrapConfig(candidate=CandidateSelectionConfig(maximum_candidates=4)),
         propagation_config=PropagationConfig(variant="p0"),
     )
     assert result.patient_state is not None
     assert result.patient_state.memory.modality_ids == ("T2", "T1")
     assert result.loss.status == "OK"
+
+
+def test_anchor_projector_is_default_and_prefix_is_explicit_ablation(tmp_path) -> None:
+    ledger, assignment = _episode(tmp_path, "missing-projector")
+    encoder, head = _encoder_head()
+    with pytest.raises(ValueError, match="requires an AnchorEvidenceProjector"):
+        build_representation_episode_step(
+            ledger=ledger,
+            assignment=assignment,
+            target_id="target",
+            representation_variant="r3",
+            config=_config(),
+            encoder=encoder,
+            gaussian_head=head,
+            propagation_config=PropagationConfig(variant="p0"),
+        )
+    assert ledger.event_records == ()
+
+    legacy_ledger, legacy_assignment = _episode(tmp_path, "prefix-ablation")
+    legacy_encoder, legacy_head = _encoder_head()
+    legacy = build_representation_episode_step(
+        ledger=legacy_ledger,
+        assignment=legacy_assignment,
+        target_id="target",
+        representation_variant="r3",
+        config=_config(),
+        encoder=legacy_encoder,
+        gaussian_head=legacy_head,
+        propagation_config=PropagationConfig(variant="p0"),
+        gaussian_head_input_adapter="anchor_evidence_prefix",
+    )
+    assert legacy.loss.status == "OK"
+    assert legacy.patient_state is not None
 
 
 def test_fixed_support_gaussian_switch_uses_the_maintained_t1c_path(tmp_path) -> None:

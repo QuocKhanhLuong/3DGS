@@ -25,10 +25,15 @@ if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
 fi
 
 export PYTHONUNBUFFERED=1
+WANDB_RUN_MODE="${WANDB_MODE:-online}"
+if [[ "${WANDB_RUN_MODE}" != "online" && "${WANDB_RUN_MODE}" != "offline" && "${WANDB_RUN_MODE}" != "disabled" ]]; then
+  echo "WANDB_MODE must be online, offline, or disabled; got ${WANDB_RUN_MODE}" >&2
+  exit 2
+fi
 PYTHONPATH=src python scripts/train_brats21.py \
   --config configs/experiments/brats21_product_full.json \
   --output-dir "${RUN_DIR}" \
   --stage full \
   --resume auto \
-  --wandb-mode online \
+  --wandb-mode "${WANDB_RUN_MODE}" \
   2>&1 | tee -a "${LOG_FILE}"

@@ -20,12 +20,17 @@
   },
   "training": {
     "learning_rate": 0.001,
-    "steps": 3,
+    "steps": 1,
     "fixed_support_step_vu": [4, 4],
     "fixed_support_border_vu": [1, 1],
     "fixed_support_max_points": 64,
     "gaussian_head_input_dim": 25,
-    "gaussian_head_input_adapter": "anchor_evidence_prefix",
+    "gaussian_head_input_adapter": "anchor_evidence_projector",
+    "anchor_evidence_projector": {
+      "evidence_dim": 52,
+      "head_input_dim": 25,
+      "bias": true
+    },
     "gaussian_head_hidden_dim": 16,
     "reconstruction_intensity": "mse",
     "allow_cpu_fallback": false
@@ -36,20 +41,20 @@
     "weight_decay": 0.0
   },
   "cohort_training": {
-    "global_model_scope": ["encoder", "gaussian_head", "structural_field", "optimizer"],
-    "patient_state_scope": "immutable_patient_specific_gaussian_state",
+    "global_model_scope": ["encoder", "gaussian_head", "structural_field", "evidence_projector", "optimizer", "scheduler", "amp_scaler", "global_step", "wandb_run", "global_checkpoint_manager"],
+    "patient_state_scope": "ephemeral_legal_context_evidence_anchors_gaussian_banks_propagation_renderer_receipt",
     "global_checkpoint": "global_model_checkpoint.pt",
-    "promotion_boundary": "successful_training_patient_boundary",
+    "promotion_boundary": "successful_global_optimizer_step",
     "validation_updates_global_model": false,
     "target_payload_not_in_global_checkpoint": true
   },
   "schedule": {
     "name": "constant",
     "warmup_steps": 0,
-    "validation_cadence_steps": 10
+    "validation_cadence": "final"
   },
   "checkpointing": {
-    "interval_steps": 10,
+    "interval_steps": 1,
     "keep_last": 2,
     "resume_policy": "auto",
     "atomic": true,
@@ -63,10 +68,11 @@
     "minimum_supported_psf_mass": 0.999,
     "pixel_chunk_size": 1024,
     "gaussian_chunk_size": 128,
+    "tile_shape_hw": [32, 32],
     "profile": "delta"
   },
   "anchor": {
-    "maximum_candidates": 8,
+    "maximum_candidates": 3,
     "minimum_score": 0.0,
     "structural_weight": 1.0,
     "reliability_weight": 0.25,
@@ -98,15 +104,26 @@
     "rounds": 1,
     "step_mm": 0.75,
     "children_per_parent_per_round": 1,
+    "structural_propagation_policy": "tangent_only",
     "duplicate_radius_mm": 0.25,
     "uncertainty_growth_per_mm": 0.1,
     "maximum_structural_primitives": 128,
     "maximum_volumetric_primitives": 128,
+    "maximum_total_anchors": 64,
+    "structural_seed_budget": 64,
+    "volumetric_seed_budget": 64,
+    "propagation_reserved_budget": 128,
     "maximum_children_per_anchor": 8,
     "maximum_patient_primitives": 256,
     "maximum_uncertainty": 4.0,
     "minimum_evidence_gain": 0.05,
     "minimum_cross_modality_agreement": 0.25
+  },
+  "diagnostics": {
+    "analytical_encoder_flops": true,
+    "profile_supported_operator_flops": false,
+    "profile_scope": "one legal cohort episode forward, loss, and backward; optimizer excluded",
+    "phase_timing": true
   },
   "interpolation": {
     "stride_vu": [4, 4],

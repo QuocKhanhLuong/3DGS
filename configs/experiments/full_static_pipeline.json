@@ -15,6 +15,7 @@
     "fixed_support_step_vu": [4, 4],
     "fixed_support_border_vu": [1, 1],
     "gaussian_head_input_dim": 25,
+    "gaussian_head_input_adapter": "anchor_evidence_prefix",
     "gaussian_head_hidden_dim": 32,
     "reconstruction_intensity": "mse"
   },

@@ -5,12 +5,12 @@ from .contracts import GaussianMemory, GaussianMemoryBank, PrimitiveKind, Primit
 from .index import query_memory_radius
 from .initialize import SeedMemoryConfig, initialize_seed_memory
 from .observability import initial_observability, propagated_observability
-from .propagation import PropagationConfig, PropagationTransaction, propagate_memory
+from .propagation import PropagationConfig, PropagationTransaction, propagate_memory, validate_seed_and_reserve_budgets
 
 __all__ = [
     "GaussianMemory", "GaussianMemoryBank", "PrimitiveKind", "PrimitiveObservability",
     "PropagationConfig", "PropagationTransaction", "SeedMemoryConfig",
     "gaussian_memory_hash", "initial_observability",
     "initialize_seed_memory", "propagated_observability", "query_memory_radius",
-    "propagate_memory", "validate_appearance_slots",
+    "propagate_memory", "validate_appearance_slots", "validate_seed_and_reserve_budgets",
 ]

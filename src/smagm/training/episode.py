@@ -231,6 +231,7 @@ def _build_context_evidence(
     encoder: EvidenceEncoder,
     gaussian_head: FixedGaussianHead,
     config: LegalEpisodeConfig,
+    synchronize_encoder_timing: bool = False,
 ) -> tuple[PreprocessingRecord, tuple[ContextEvidence, ...], tuple[FixedSupportBatch, ...], tuple[str, ...], int, float]:
     """The one shared context-only path used by warm-up and reconstruction."""
 
@@ -255,8 +256,12 @@ def _build_context_evidence(
         normalized = apply_preprocessing(preprocessing, decoded)
         image = normalized.image.unsqueeze(0).to(device=device, dtype=dtype)
         valid_mask = normalized.valid_mask.unsqueeze(0).to(device=device)
+        if synchronize_encoder_timing and image.device.type == "cuda":
+            torch.cuda.synchronize(image.device)
         start = time.perf_counter()
         features = encoder(image, decoded.metadata.plane, decoded.modality_id, valid_mask)
+        if synchronize_encoder_timing and image.device.type == "cuda":
+            torch.cuda.synchronize(image.device)
         encoder_runtime_seconds += time.perf_counter() - start
         key = FeatureCacheKey.from_features(
             features,
@@ -284,13 +289,19 @@ def build_context_only_episode_step(
     encoder: EvidenceEncoder,
     gaussian_head: FixedGaussianHead,
     config: LegalEpisodeConfig | None = None,
+    synchronize_encoder_timing: bool = False,
 ) -> ContextOnlyEpisodeStep:
     """Build legal context evidence for auxiliary warm-up without target access."""
 
     _validate_inputs(ledger, assignment, encoder, gaussian_head)
     config = config or LegalEpisodeConfig()
     preprocessing, evidence, supports, key_hashes, cache_bytes, encoder_runtime_seconds = _build_context_evidence(
-        ledger=ledger, assignment=assignment, encoder=encoder, gaussian_head=gaussian_head, config=config
+        ledger=ledger,
+        assignment=assignment,
+        encoder=encoder,
+        gaussian_head=gaussian_head,
+        config=config,
+        synchronize_encoder_timing=synchronize_encoder_timing,
     )
     combined = _combine_supports(supports)
     return ContextOnlyEpisodeStep(

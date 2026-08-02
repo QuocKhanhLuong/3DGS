@@ -44,7 +44,13 @@ from ..contracts.observation import PatientSplitRegistry
 from ..data.brats21_prepare import PreparedBraTS21, load_prepared_bundle
 from ..data.normalization import NormalizationConfig
 from ..evaluation import open_serialized_audit_targets
-from ..experiments.complexity import parameter_counts, profile_training_step
+from ..experiments.complexity import (
+    PhaseTiming,
+    analytical_conv_linear_forward_flops,
+    parameter_counts,
+    peak_cuda_memory_bytes,
+    profile_supported_operator_flops,
+)
 from ..features.encoder import EncoderConfig, EvidenceEncoder
 from ..fields import SharedStructuralField, StructuralFieldConfig
 from ..losses.reconstruction import ReconstructionLossConfig
@@ -58,7 +64,12 @@ from ..reconstruction import (
 from ..reconstruction.uncertainty import support_uncertainty
 from ..renderer import RenderConfig, RenderResult, SlabProfile
 from ..state import save_patient_state
-from ..training import LegalEpisodeConfig, build_representation_episode_step
+from ..training import (
+    AnchorEvidenceProjector,
+    AnchorEvidenceProjectorConfig,
+    LegalEpisodeConfig,
+    build_representation_episode_step,
+)
 
 
 _ROOT = Path(__file__).resolve().parents[3]
@@ -209,6 +220,7 @@ def _load_global_model_checkpoint(
     gaussian_head: FixedGaussianHead,
     field: SharedStructuralField,
     optimizer: Any,
+    anchor_evidence_projector: AnchorEvidenceProjector | None = None,
 ) -> dict[str, object]:
     """Load shared cohort parameters without admitting patient/target data."""
 
@@ -229,6 +241,14 @@ def _load_global_model_checkpoint(
         encoder.load_state_dict(payload["encoder"])
         gaussian_head.load_state_dict(payload["gaussian_head"])
         field.load_state_dict(payload["field"])
+        saved_projector = payload.get("anchor_evidence_projector")
+        if anchor_evidence_projector is None:
+            if saved_projector is not None:
+                raise ValueError("checkpoint contains a projector but this execution did not construct one")
+        else:
+            if not isinstance(saved_projector, Mapping):
+                raise ValueError("checkpoint does not contain the declared anchor evidence projector")
+            anchor_evidence_projector.load_state_dict(saved_projector)
         optimizer.load_state_dict(payload["optimizer"])
     except (KeyError, TypeError, RuntimeError, ValueError) as error:
         raise ValueError("global model checkpoint state is invalid") from error
@@ -494,6 +514,7 @@ def _episode_config(config: Mapping[str, Any]) -> LegalEpisodeConfig:
             pixel_chunk_size=renderer["pixel_chunk_size"],
             gaussian_chunk_size=renderer["gaussian_chunk_size"],
             minimum_supported_psf_mass=float(renderer["minimum_supported_psf_mass"]),
+            tile_shape_hw=tuple(int(value) for value in renderer.get("tile_shape_hw", (32, 32))),
             profile=SlabProfile.delta(),
         ),
         reconstruction_loss=ReconstructionLossConfig(intensity=str(training["reconstruction_intensity"])),
@@ -531,6 +552,7 @@ def _propagation_config(config: Mapping[str, Any]) -> PropagationConfig:
         rounds=int(raw["rounds"]),
         step_mm=float(raw["step_mm"]),
         children_per_parent_per_round=int(raw["children_per_parent_per_round"]),
+        structural_propagation_policy=str(raw.get("structural_propagation_policy", "tangent_only")),
         duplicate_radius_mm=float(raw["duplicate_radius_mm"]),
         uncertainty_growth_per_mm=float(raw["uncertainty_growth_per_mm"]),
         maximum_structural_primitives=int(raw["maximum_structural_primitives"]),
@@ -540,6 +562,10 @@ def _propagation_config(config: Mapping[str, Any]) -> PropagationConfig:
         maximum_uncertainty=None if raw.get("maximum_uncertainty") is None else float(raw["maximum_uncertainty"]),
         minimum_evidence_gain=float(raw.get("minimum_evidence_gain", 0.0)),
         minimum_cross_modality_agreement=float(raw.get("minimum_cross_modality_agreement", 0.0)),
+        maximum_total_anchors=None if raw.get("maximum_total_anchors") is None else int(raw["maximum_total_anchors"]),
+        structural_seed_budget=None if raw.get("structural_seed_budget") is None else int(raw["structural_seed_budget"]),
+        volumetric_seed_budget=None if raw.get("volumetric_seed_budget") is None else int(raw["volumetric_seed_budget"]),
+        propagation_reserved_budget=None if raw.get("propagation_reserved_budget") is None else int(raw["propagation_reserved_budget"]),
     )
 
 
@@ -552,6 +578,34 @@ def _seed_memory_config(config: Mapping[str, Any]) -> SeedMemoryConfig:
         initial_uncertainty=float(raw["initial_uncertainty"]),
         field_center_offset_fraction=float(raw["field_center_offset_fraction"]),
     )
+
+
+def _build_anchor_evidence_projector(
+    config: Mapping[str, Any],
+    *,
+    device: torch.device,
+) -> AnchorEvidenceProjector | None:
+    """Build the declared typed adapter, retaining prefix only as an ablation."""
+
+    training = dict(config["training"])
+    adapter = str(training.get("gaussian_head_input_adapter", "anchor_evidence_prefix"))
+    if adapter == "anchor_evidence_prefix":
+        return None
+    if adapter != "anchor_evidence_projector":
+        raise ValueError("Gaussian-head input adapter must be anchor_evidence_projector or anchor_evidence_prefix")
+    raw = training.get("anchor_evidence_projector")
+    if not isinstance(raw, Mapping):
+        raise ValueError("anchor_evidence_projector adapter requires a declared projector config")
+    projector_config = AnchorEvidenceProjectorConfig(
+        evidence_dim=int(raw["evidence_dim"]),
+        head_input_dim=int(raw["head_input_dim"]),
+        bias=bool(raw.get("bias", True)),
+    )
+    if projector_config.evidence_dim != int(config["field"]["evidence_dim"]):
+        raise ValueError("anchor evidence projector input must equal the declared field evidence dimension")
+    if projector_config.head_input_dim != int(training["gaussian_head_input_dim"]):
+        raise ValueError("anchor evidence projector output must equal gaussian_head_input_dim")
+    return AnchorEvidenceProjector(projector_config).to(device=device, dtype=torch.float32)
 
 
 def _interpolation_config(config: Mapping[str, Any]) -> SparseInterpolationConfig:
@@ -774,6 +828,103 @@ def _gradient_norm(module: torch.nn.Module) -> tuple[float, bool]:
     return float(norm.detach().cpu()), bool(torch.isfinite(norm) and norm > 0)
 
 
+def _encoder_conv_telemetry(
+    encoder: EvidenceEncoder,
+    bundle: PreparedBraTS21,
+) -> dict[str, object]:
+    """Count only E2 Conv2d/Linear forward work for legal context shapes.
+
+    The product encoder is invoked independently for each legal context image.
+    This helper mirrors those actual tensors with zero-valued legal-shape
+    tensors and never opens a target payload.  It intentionally excludes the
+    analytic bank, renderer, loss, backward, and optimizer work.
+    """
+
+    micro_cnn = encoder.micro_cnn
+    if micro_cnn is None:
+        return {
+            "encoder_forward_flops_2flop_per_mac": None,
+            "encoder_forward_flops_scope": "not_applicable_no_learned_e2_micro_cnn",
+            "encoder_forward_flops_context_count": len(bundle.assignment.context_ids),
+        }
+    parameter = next(micro_cnn.parameters(), None)
+    if parameter is None:
+        raise RuntimeError("E2 micro-CNN has no parameters")
+    total = 0
+    shape_counts = _context_shape_batches(bundle)
+    shapes: list[list[int]] = []
+    per_shape: dict[str, int] = {}
+    was_training = micro_cnn.training
+    micro_cnn.eval()
+    try:
+        with torch.no_grad():
+            for (height, width), count in sorted(shape_counts.items()):
+                tensor = torch.zeros((count, 7, height, width), device=parameter.device, dtype=parameter.dtype)
+                report = analytical_conv_linear_forward_flops(micro_cnn, tensor)
+                count_flops = int(report["forward_flops_2flop_per_mac"])
+                total += count_flops
+                key = f"{count}x7x{height}x{width}"
+                per_shape[key] = count_flops
+                shapes.append([count, 7, height, width])
+    finally:
+        micro_cnn.train(was_training)
+    return {
+        "encoder_forward_flops_2flop_per_mac": total,
+        "encoder_forward_flops_scope": "E2 micro-CNN forward Conv2d/Linear only; 2 FLOPs per MAC; legal context images only",
+        "encoder_forward_flops_context_count": len(bundle.assignment.context_ids),
+        "encoder_forward_flops_input_shapes": shapes,
+        "encoder_forward_flops_by_shape": per_shape,
+    }
+
+
+def _context_shape_batches(bundle: PreparedBraTS21) -> dict[tuple[int, int], int]:
+    """Return the actual legal context shapes grouped into CNN batches."""
+
+    shape_counts: dict[tuple[int, int], int] = {}
+    for observation_id in bundle.assignment.context_ids:
+        height, width = bundle.manifest.metadata(observation_id).plane.shape_hw
+        key = (int(height), int(width))
+        shape_counts[key] = shape_counts.get(key, 0) + 1
+    return shape_counts
+
+
+def _resolved_encoder_conv_telemetry(
+    encoder: EvidenceEncoder,
+    bundle: PreparedBraTS21,
+    config: Mapping[str, Any],
+    *,
+    cache_owner: Any | None = None,
+) -> dict[str, object]:
+    """Compute exact encoder work once per distinct legal context shape batch."""
+
+    diagnostics = dict(config.get("diagnostics", {}))
+    if not bool(diagnostics.get("analytical_encoder_flops", False)):
+        return {
+            "encoder_forward_flops_2flop_per_mac": None,
+            "encoder_forward_flops_scope": "disabled_by_diagnostics.analytical_encoder_flops",
+            "encoder_forward_flops_context_count": len(bundle.assignment.context_ids),
+            "encoder_forward_flops_input_shapes": [],
+            "encoder_forward_flops_by_shape": {},
+            "encoder_forward_flops_measurement": "not_invoked",
+        }
+    expected_shapes = [
+        [count, 7, height, width]
+        for (height, width), count in sorted(_context_shape_batches(bundle).items())
+    ]
+    cached = None if cache_owner is None else getattr(cache_owner, "encoder_flop_telemetry", None)
+    if isinstance(cached, Mapping) and cached.get("encoder_forward_flops_input_shapes") == expected_shapes:
+        telemetry = dict(cached)
+        telemetry["encoder_forward_flops_measurement"] = "process_cache_from_legal_context_shape_batch"
+        return telemetry
+    if cached is not None and not isinstance(cached, Mapping):
+        raise TypeError("cohort encoder FLOP telemetry cache must be a mapping or None")
+    telemetry = _encoder_conv_telemetry(encoder, bundle)
+    telemetry["encoder_forward_flops_measurement"] = "computed_from_legal_context_shape_batch"
+    if cache_owner is not None:
+        setattr(cache_owner, "encoder_flop_telemetry", dict(telemetry))
+    return telemetry
+
+
 class _AdamFallback:
     """Small dependency-free Adam used only when the installed torch optimizer is broken.
 
@@ -846,9 +997,17 @@ class _AdamFallback:
 
 
 def _make_optimizer(
-    encoder: EvidenceEncoder, gaussian_head: FixedGaussianHead, field: SharedStructuralField, learning_rate: float
+    encoder: EvidenceEncoder,
+    gaussian_head: FixedGaussianHead,
+    field: SharedStructuralField,
+    learning_rate: float,
+    anchor_evidence_projector: AnchorEvidenceProjector | None = None,
 ) -> tuple[Any, str]:
+    """Create the native optimizer over every declared shared learned module."""
+
     parameters = tuple(encoder.parameters()) + tuple(gaussian_head.parameters()) + tuple(field.parameters())
+    if anchor_evidence_projector is not None:
+        parameters = parameters + tuple(anchor_evidence_projector.parameters())
     try:
         return torch.optim.Adam(parameters, lr=learning_rate), "torch.optim.Adam"
     except ImportError:
@@ -887,13 +1046,14 @@ def _save_r4_progress_checkpoint(
     gaussian_head: FixedGaussianHead,
     field: SharedStructuralField,
     optimizer: Any,
+    anchor_evidence_projector: AnchorEvidenceProjector | None = None,
     cohort_split_hash: str | None = None,
 ) -> None:
     if completed_steps < 0 or completed_steps > steps or len(reports) != completed_steps:
         raise ValueError("R4 progress checkpoint cursor and report count are inconsistent")
     _atomic_torch(
         {
-            "schema": "smagm-brats21-r4-progress-v1",
+            "schema": "smagm-brats21-r4-progress-v2" if anchor_evidence_projector is not None else "smagm-brats21-r4-progress-v1",
             "config_hash": config_hash,
             "manifest_hash": bundle.manifest.manifest_hash,
             "split_hash": split_hash,
@@ -906,6 +1066,7 @@ def _save_r4_progress_checkpoint(
             "encoder": _frozen_state_dict(encoder),
             "gaussian_head": _frozen_state_dict(gaussian_head),
             "field": _frozen_state_dict(field),
+            "anchor_evidence_projector": None if anchor_evidence_projector is None else _frozen_state_dict(anchor_evidence_projector),
             "optimizer": optimizer.state_dict(),
             "target_payload_not_in_checkpoint": True,
         },
@@ -925,10 +1086,11 @@ def _load_r4_progress_checkpoint(
     gaussian_head: FixedGaussianHead,
     field: SharedStructuralField,
     optimizer: Any,
+    anchor_evidence_projector: AnchorEvidenceProjector | None = None,
     cohort_split_hash: str | None = None,
 ) -> tuple[int, list[dict[str, object]]]:
     payload = torch.load(path, map_location="cpu", weights_only=True)
-    if not isinstance(payload, dict) or payload.get("schema") != "smagm-brats21-r4-progress-v1":
+    if not isinstance(payload, dict) or payload.get("schema") not in ("smagm-brats21-r4-progress-v1", "smagm-brats21-r4-progress-v2"):
         raise ValueError("R4 progress checkpoint schema is invalid")
     bindings = {
         "config_hash": config_hash,
@@ -951,6 +1113,14 @@ def _load_r4_progress_checkpoint(
         encoder.load_state_dict(payload["encoder"])
         gaussian_head.load_state_dict(payload["gaussian_head"])
         field.load_state_dict(payload["field"])
+        saved_projector = payload.get("anchor_evidence_projector")
+        if anchor_evidence_projector is None:
+            if saved_projector is not None:
+                raise ValueError("R4 progress checkpoint contains a projector but this execution did not construct one")
+        else:
+            if not isinstance(saved_projector, Mapping):
+                raise ValueError("R4 progress checkpoint does not contain the declared anchor evidence projector")
+            anchor_evidence_projector.load_state_dict(saved_projector)
         optimizer.load_state_dict(payload["optimizer"])
     except (KeyError, TypeError, RuntimeError, ValueError) as error:
         raise ValueError("R4 progress checkpoint model or optimizer state is invalid") from error
@@ -1054,6 +1224,214 @@ def _run_r0(
     return report, result, result.target.detach(), result.target_valid_mask.detach(), result.preprocessing_record_hash or ""
 
 
+def _r4_source_geometry(
+    bundle: PreparedBraTS21,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, tuple[int, int, int] | None]:
+    """Read only prepared header geometry required for bounded propagation."""
+
+    patient_bounds_min_ras_mm, patient_bounds_max_ras_mm = _source_volume_bounds_from_geometry(
+        bundle.manifest_json.get("source_geometry", {})
+    )
+    source_geometry = bundle.manifest_json.get("source_geometry", {})
+    source_shape_xyz: tuple[int, int, int] | None = None
+    source_affine_ras_from_index: torch.Tensor | None = None
+    if isinstance(source_geometry, Mapping) and source_geometry:
+        shape_raw = source_geometry.get("shape_xyz")
+        affine_raw = source_geometry.get("affine")
+        if not isinstance(shape_raw, (list, tuple)) or len(shape_raw) != 3:
+            raise ValueError("R4 source geometry must declare shape_xyz for oriented propagation containment")
+        source_shape_xyz = tuple(int(value) for value in shape_raw)
+        source_affine_ras_from_index = torch.as_tensor(affine_raw, dtype=torch.float64)
+    return patient_bounds_min_ras_mm, patient_bounds_max_ras_mm, source_affine_ras_from_index, source_shape_xyz
+
+
+def run_cohort_training_episode(
+    *,
+    bundle: PreparedBraTS21,
+    config: Mapping[str, Any],
+    config_hash: str,
+    cohort_split_hash: str,
+    cohort_model: Any,
+    deferred_target_reader: Callable[[], bytes] | None,
+    training_updates: bool,
+    profile_supported_operator_flops_enabled: bool = False,
+) -> dict[str, object]:
+    """Execute one legal temporary patient episode against one global model.
+
+    This deliberately performs neither R0, package serialization, isolated
+    evaluation, media export, W&B creation, nor checkpoint writing.  The
+    product controller performs those only at declared validation/final
+    cadence.  The receipt-gated target remains local to this function and is
+    absent from its return value and the global model snapshot.
+    """
+
+    required = ("encoder", "gaussian_head", "structural_field", "optimizer", "zero_grad", "optimizer_step", "run_with_optional_profiler", "global_step")
+    if any(not hasattr(cohort_model, name) for name in required):
+        raise TypeError("cohort_model does not implement the required process-level ownership contract")
+    encoder = cohort_model.encoder
+    gaussian_head = cohort_model.gaussian_head
+    field = cohort_model.structural_field
+    projector = getattr(cohort_model, "evidence_projector", None)
+    if not isinstance(encoder, EvidenceEncoder) or not isinstance(gaussian_head, FixedGaussianHead) or not isinstance(field, SharedStructuralField):
+        raise TypeError("cohort model does not own the declared E2, Gaussian-head, and StructuralField modules")
+    if projector is not None and not isinstance(projector, AnchorEvidenceProjector):
+        raise TypeError("cohort model evidence_projector must be AnchorEvidenceProjector or None")
+
+    episode_config = _episode_config(config)
+    bootstrap = _bootstrap_config(config)
+    seed_memory = _seed_memory_config(config)
+    propagation = _propagation_config(config)
+    registry = PatientSplitRegistry.create((bundle.manifest,))
+    bounds_min, bounds_max, source_affine, source_shape = _r4_source_geometry(bundle)
+    phase = PhaseTiming()
+    collect_phase_timing = bool(
+        dict(config.get("diagnostics", {})).get("phase_timing", False)
+        and int(getattr(cohort_model, "global_step", 0)) == 0
+    )
+    start = time.perf_counter()
+    if collect_phase_timing and torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+    def _operation() -> Any:
+        ledger = _new_ledger(bundle, registry, deferred_target_reader=deferred_target_reader)
+        with phase.measure("representation_forward_wall_time_ms"):
+            built = build_representation_episode_step(
+                ledger=ledger,
+                assignment=bundle.assignment,
+                target_id=bundle.target_id,
+                representation_variant="r4",
+                propagation_variant=propagation.variant,
+                config=episode_config,
+                encoder=encoder,
+                gaussian_head=gaussian_head,
+                local_field=field,
+                field_maximum_neighbors=int(config["field"]["maximum_neighbors"]),
+                registration_id=str(config["anchor"]["registration_id"]),
+                bootstrap_config=bootstrap,
+                seed_memory_config=seed_memory,
+                propagation_config=propagation,
+                patient_bounds_min_ras_mm=bounds_min,
+                patient_bounds_max_ras_mm=bounds_max,
+                source_affine_ras_from_index=source_affine,
+                source_shape_xyz=source_shape,
+                anchor_evidence_projector=projector,
+                gaussian_head_input_adapter=str(config.get("training", {}).get("gaussian_head_input_adapter", "anchor_evidence_prefix")),
+                collect_phase_timing=collect_phase_timing,
+            )
+        if training_updates:
+            if collect_phase_timing and torch.cuda.is_available():
+                torch.cuda.synchronize()
+            with phase.measure("backward_wall_time_ms"):
+                built.loss.total.backward()
+                if collect_phase_timing and torch.cuda.is_available():
+                    torch.cuda.synchronize()
+        return built, ledger
+
+    if training_updates:
+        cohort_model.zero_grad()
+    (result, ledger), profiler = cohort_model.run_with_optional_profiler(
+        _operation,
+        enabled=bool(training_updates and profile_supported_operator_flops_enabled),
+        scope="one legal cohort episode forward, loss, and backward; optimizer excluded",
+    )
+    if training_updates:
+        encoder_grad, encoder_ok = _gradient_norm(encoder)
+        head_grad, head_ok = _gradient_norm(gaussian_head)
+        field_grad, field_ok = _gradient_norm(field)
+        projector_grad, projector_ok = (0.0, True) if projector is None else _gradient_norm(projector)
+        if not all((encoder_ok, head_ok, field_ok, projector_ok)) or not np.isfinite(float(result.loss.total.detach().cpu())):
+            raise FloatingPointError(
+                "BraTS21 cohort R4 gradient contract failed: "
+                f"encoder={encoder_grad:.6e} (ok={encoder_ok}), "
+                f"gaussian_head={head_grad:.6e} (ok={head_ok}), "
+                f"field={field_grad:.6e} (ok={field_ok}), "
+                f"evidence_projector={projector_grad:.6e} (ok={projector_ok}), "
+                f"loss={float(result.loss.total.detach().cpu()):.6e}"
+            )
+    else:
+        encoder_grad = head_grad = field_grad = projector_grad = 0.0
+    field_hash = _model_state_hash(field)
+    if result.patient_state is None or result.patient_state.field_model_hash != field_hash:
+        raise RuntimeError("temporary patient state does not bind the exact pre-update StructuralField")
+    events = _event_report(ledger)
+    state_before_update = getattr(cohort_model, "state_hash", None)
+    if training_updates:
+        if collect_phase_timing and torch.cuda.is_available():
+            torch.cuda.synchronize()
+        with phase.measure("optimizer_wall_time_ms"):
+            global_step = int(cohort_model.optimizer_step())
+            if collect_phase_timing and torch.cuda.is_available():
+                torch.cuda.synchronize()
+    else:
+        global_step = int(cohort_model.global_step)
+    if collect_phase_timing and torch.cuda.is_available():
+        torch.cuda.synchronize()
+    full_step_host_ms = (time.perf_counter() - start) * 1000.0
+    # Only the diagnostic first episode is synchronized.  A later host-side
+    # enqueue duration is useful operationally but must not be presented as a
+    # device-complete wall time.
+    full_step_ms: float | None = full_step_host_ms if collect_phase_timing else None
+    transactions = result.propagation_transactions
+    static_timing = result.phase_timing_ms or {}
+    telemetry = _resolved_encoder_conv_telemetry(
+        encoder,
+        bundle,
+        config,
+        cache_owner=cohort_model,
+    )
+    peak = peak_cuda_memory_bytes()
+    report: dict[str, object] = {
+        "schema": "smagm-brats21-cohort-episode-v1",
+        "global_step": global_step,
+        "training_update_applied": training_updates,
+        "loss": float(result.loss.total.detach().cpu()),
+        "legal_pixel_count": result.loss.legal_pixel_count,
+        "target_valid_pixel_count": result.loss.target_valid_pixel_count,
+        "supported_fraction": result.loss.supported_fraction,
+        "unsupported_fraction": float(result.prediction.unsupported_mask.float().mean().detach().cpu()),
+        "encoder_gradient_norm": encoder_grad,
+        "gaussian_head_gradient_norm": head_grad,
+        "field_gradient_norm": field_grad,
+        "evidence_projector_gradient_norm": projector_grad,
+        "anchor_count": result.patient_state.anchors.count,
+        "structural_gaussian_count": result.patient_state.memory.structural.gaussians.count,
+        "volumetric_gaussian_count": result.patient_state.memory.volumetric.gaussians.count,
+        "primitive_count": result.patient_state.memory.primitive_count,
+        "pixel_gaussian_candidate_pairs": result.prediction.pixel_gaussian_candidate_pairs,
+        "propagation_proposal_count": sum(item.proposal_count for item in transactions),
+        "propagation_child_count": sum(item.accepted_count for item in transactions),
+        "propagation_rejected_budget": sum(item.rejected_budget for item in transactions),
+        "propagation_rejected_duplicate": sum(item.rejected_duplicate for item in transactions),
+        "propagation_rejected_out_of_bounds": sum(item.rejected_out_of_bounds for item in transactions),
+        "propagation_rejected_unsupported": sum(item.rejected_unsupported for item in transactions),
+        "propagation_rejected_uncertainty": sum(item.rejected_uncertainty for item in transactions),
+        "propagation_rejected_no_gain": sum(item.rejected_no_meaningful_gain for item in transactions),
+        "propagation_rejected_invalid": sum(item.rejected_invalid for item in transactions),
+        "receipt_hash": result.receipt_hash,
+        "target_commitment_hash": events["target_commitment_hash"],
+        "target_reveal_after_prediction": True,
+        "preprocessing_record_hash": result.preprocessing_record_hash,
+        "field_model_hash_before_update": field_hash,
+        "global_model_state_hash_before_update": state_before_update,
+        "full_step_wall_time_ms": full_step_ms,
+        "full_step_host_enqueue_time_ms": full_step_host_ms,
+        "phase_timing_synchronized": collect_phase_timing,
+        "encoder_wall_time_ms": static_timing.get("encoder_wall_time_ms"),
+        "anchor_build_wall_time_ms": static_timing.get("anchor_build_wall_time_ms"),
+        "field_query_wall_time_ms": static_timing.get("field_query_wall_time_ms"),
+        "propagation_wall_time_ms": static_timing.get("propagation_wall_time_ms"),
+        "renderer_wall_time_ms": static_timing.get("renderer_wall_time_ms"),
+        "loss_wall_time_ms": static_timing.get("loss_wall_time_ms"),
+        "backward_wall_time_ms": phase.value("backward_wall_time_ms") if training_updates else 0.0,
+        "optimizer_wall_time_ms": phase.value("optimizer_wall_time_ms") if training_updates else 0.0,
+        "representation_forward_wall_time_ms": phase.value("representation_forward_wall_time_ms"),
+        **telemetry,
+        **profiler,
+        **peak,
+    }
+    return report
+
+
 def _run_r4(
     *,
     bundle: PreparedBraTS21,
@@ -1064,6 +1442,7 @@ def _run_r4(
     gaussian_head: FixedGaussianHead,
     field: SharedStructuralField,
     optimizer: Any,
+    anchor_evidence_projector: AnchorEvidenceProjector | None,
     bootstrap: AnchorBootstrapConfig,
     seed_memory: SeedMemoryConfig,
     propagation: PropagationConfig,
@@ -1078,6 +1457,8 @@ def _run_r4(
     checkpoint_interval_steps: int,
     resume: bool,
     training_updates: bool = True,
+    profile_supported_operator_flops_enabled: bool = False,
+    telemetry_cache_owner: Any | None = None,
 ) -> tuple[dict[str, object], Any, torch.Tensor, torch.Tensor, str]:
     start = time.perf_counter()
     if checkpoint_interval_steps <= 0:
@@ -1086,18 +1467,31 @@ def _run_r4(
     global_model_binding_hash = _global_model_binding_hash(config)
     learning_rate = _optimizer_learning_rate(optimizer)
     experiment_name = str(config.get("experiment_name", "brats21-static-diagnostic"))
-    model_complexity = parameter_counts({
+    learned_modules: dict[str, torch.nn.Module] = {
         "encoder": encoder,
         "gaussian_head": gaussian_head,
         "structural_field": field,
-    })
-    model_complexity["training_step_flops"] = None
-    model_complexity["flops_method"] = "pending_first_training_step"
-    model_complexity["flops_supported"] = False
+    }
+    if anchor_evidence_projector is not None:
+        learned_modules["evidence_projector"] = anchor_evidence_projector
+    model_complexity = parameter_counts(learned_modules)
+    model_complexity.update(
+        _resolved_encoder_conv_telemetry(
+            encoder,
+            bundle,
+            config,
+            cache_owner=telemetry_cache_owner,
+        )
+    )
+    model_complexity["profiled_supported_operator_flops"] = None
+    model_complexity["profiler_scope"] = "not_invoked"
+    model_complexity["profiler_operator_coverage"] = "partial_unknown_torch_profiler_supported_operators_only"
+    model_complexity["profiler_enabled"] = False
     print(
         f"[experiment] name={experiment_name} "
         f"parameters={model_complexity['parameters']} "
-        f"trainable_parameters={model_complexity['trainable_parameters']}",
+        f"trainable_parameters={model_complexity['trainable_parameters']} "
+        f"encoder_forward_flops_2flop_per_mac={model_complexity['encoder_forward_flops_2flop_per_mac']}",
         flush=True,
     )
     patient_bounds_min_ras_mm, patient_bounds_max_ras_mm = _source_volume_bounds_from_geometry(
@@ -1135,6 +1529,7 @@ def _run_r4(
             gaussian_head=gaussian_head,
             field=field,
             optimizer=optimizer,
+            anchor_evidence_projector=anchor_evidence_projector,
             cohort_split_hash=resolved_cohort_split_hash,
         )
         reports = saved_reports
@@ -1155,6 +1550,7 @@ def _run_r4(
             gaussian_head=gaussian_head,
             field=field,
             optimizer=optimizer,
+            anchor_evidence_projector=anchor_evidence_projector,
             cohort_split_hash=resolved_cohort_split_hash,
         )
     else:
@@ -1185,37 +1581,47 @@ def _run_r4(
                     patient_bounds_max_ras_mm=patient_bounds_max_ras_mm,
                     source_affine_ras_from_index=source_affine_ras_from_index,
                     source_shape_xyz=source_shape_xyz,
+                    anchor_evidence_projector=anchor_evidence_projector,
                     gaussian_head_input_adapter=str(config.get("training", {}).get("gaussian_head_input_adapter", "anchor_evidence_prefix")),
                 )
             if training_updates:
                 built.loss.total.backward()
             return built
 
-        if training_updates and step_index == start_step and model_complexity["training_step_flops"] is None:
-            result, flops = profile_training_step(_execute_episode_step)
-            model_complexity["training_step_flops"] = flops.get("flops")
-            model_complexity["flops_method"] = flops.get("method")
-            model_complexity["flops_supported"] = bool(flops.get("supported", False))
-            if flops.get("flops") is None:
-                print(f"[experiment] training_step_flops=unavailable reason={flops.get('reason', 'profiler unsupported')}", flush=True)
-            else:
-                print(f"[experiment] training_step_flops={flops['flops']} method={flops['method']}", flush=True)
+        if training_updates and step_index == start_step and profile_supported_operator_flops_enabled:
+            result, profile = profile_supported_operator_flops(
+                _execute_episode_step,
+                enabled=True,
+                scope="one legal episode forward, loss, and backward; optimizer excluded",
+            )
+            model_complexity.update(profile)
+            print(
+                "[experiment] profiled_supported_operator_flops="
+                f"{profile.get('profiled_supported_operator_flops')} "
+                f"scope={profile.get('profiler_scope')}",
+                flush=True,
+            )
         else:
             result = _execute_episode_step()
         if training_updates:
             encoder_grad, encoder_ok = _gradient_norm(encoder)
             gaussian_head_grad, gaussian_head_ok = _gradient_norm(gaussian_head)
             field_grad, field_ok = _gradient_norm(field)
-            if not encoder_ok or not gaussian_head_ok or not field_ok or not np.isfinite(result.loss.total.detach().cpu().item()):
+            if anchor_evidence_projector is None:
+                projector_grad, projector_ok = 0.0, True
+            else:
+                projector_grad, projector_ok = _gradient_norm(anchor_evidence_projector)
+            if not encoder_ok or not gaussian_head_ok or not field_ok or not projector_ok or not np.isfinite(result.loss.total.detach().cpu().item()):
                 raise FloatingPointError(
                     "BraTS21 R4 gradient contract failed: "
                     f"encoder={encoder_grad:.6e} (ok={encoder_ok}), "
                     f"gaussian_head={gaussian_head_grad:.6e} (ok={gaussian_head_ok}), "
                     f"field={field_grad:.6e} (ok={field_ok}), "
+                    f"evidence_projector={projector_grad:.6e} (ok={projector_ok}), "
                     f"loss={float(result.loss.total.detach().cpu()):.6e}"
                 )
         else:
-            encoder_grad = gaussian_head_grad = field_grad = 0.0
+            encoder_grad = gaussian_head_grad = field_grad = projector_grad = 0.0
         state_encoder_snapshot = _frozen_state_dict(encoder)
         state_field_snapshot = _frozen_state_dict(field)
         state_encoder_hash = encoder.state_hash()
@@ -1239,10 +1645,14 @@ def _run_r4(
             "encoder_gradient_norm": encoder_grad,
             "gaussian_head_gradient_norm": gaussian_head_grad,
             "field_gradient_norm": field_grad,
+            "evidence_projector_gradient_norm": projector_grad,
             "experiment_name": experiment_name,
             "parameter_count": model_complexity["parameters"],
             "trainable_parameter_count": model_complexity["trainable_parameters"],
-            "training_step_flops": model_complexity["training_step_flops"],
+            "encoder_forward_flops_2flop_per_mac": model_complexity["encoder_forward_flops_2flop_per_mac"],
+            "profiled_supported_operator_flops": model_complexity["profiled_supported_operator_flops"],
+            "profiler_scope": model_complexity["profiler_scope"],
+            "profiler_operator_coverage": model_complexity["profiler_operator_coverage"],
             "primitive_count": result.patient_state.memory.primitive_count,
             "anchor_count": result.patient_state.anchors.count,
             "state_version": result.patient_state.state_version,
@@ -1251,10 +1661,12 @@ def _run_r4(
             "event_order": [item["event"] for item in events["events"]],
             "encoder_state_hash": state_encoder_hash,
             "field_model_hash": state_field_hash,
-            "propagation_child_count": sum(len(item.accepted_primitive_ids) for item in result.propagation_transactions),
+            "propagation_proposal_count": sum(item.proposal_count for item in result.propagation_transactions),
+            "propagation_child_count": sum(item.accepted_count for item in result.propagation_transactions),
             "propagation_rejected_out_of_bounds": sum(item.rejected_out_of_bounds for item in result.propagation_transactions),
             "propagation_rejected_unsupported": sum(item.rejected_unsupported for item in result.propagation_transactions),
-            "propagation_rejected_duplicate_or_budget": sum(item.rejected_duplicate_or_budget for item in result.propagation_transactions),
+            "propagation_rejected_duplicate": sum(item.rejected_duplicate for item in result.propagation_transactions),
+            "propagation_rejected_budget": sum(item.rejected_budget for item in result.propagation_transactions),
             "propagation_rejected_uncertainty": sum(item.rejected_uncertainty for item in result.propagation_transactions),
             "propagation_rejected_invalid": sum(item.rejected_invalid for item in result.propagation_transactions),
             "propagation_rejected_no_meaningful_gain": sum(item.rejected_no_meaningful_gain for item in result.propagation_transactions),
@@ -1274,6 +1686,7 @@ def _run_r4(
                 gaussian_head=gaussian_head,
                 field=field,
                 optimizer=optimizer,
+                anchor_evidence_projector=anchor_evidence_projector,
                 cohort_split_hash=resolved_cohort_split_hash,
             )
 
@@ -1302,6 +1715,8 @@ def _run_r4(
             patient_bounds_max_ras_mm=patient_bounds_max_ras_mm,
             source_affine_ras_from_index=source_affine_ras_from_index,
             source_shape_xyz=source_shape_xyz,
+            anchor_evidence_projector=anchor_evidence_projector,
+            gaussian_head_input_adapter=str(config.get("training", {}).get("gaussian_head_input_adapter", "anchor_evidence_prefix")),
         )
     last_result = final_result
     last_state = final_result.patient_state
@@ -1327,6 +1742,7 @@ def _run_r4(
         "encoder": state_encoder_snapshot,
         "field": state_field_snapshot,
         "gaussian_head": _frozen_state_dict(gaussian_head),
+        "anchor_evidence_projector": None if anchor_evidence_projector is None else _frozen_state_dict(anchor_evidence_projector),
         "encoder_for_patient_state_hash": state_encoder_hash,
         "field_for_patient_state_hash": state_field_hash,
         "gaussian_head_hash": _model_state_hash(gaussian_head),
@@ -1438,16 +1854,21 @@ def _run_r4(
         "model_complexity": model_complexity,
         "parameter_count": model_complexity["parameters"],
         "trainable_parameter_count": model_complexity["trainable_parameters"],
-        "training_step_flops": model_complexity.get("training_step_flops"),
+        "encoder_forward_flops_2flop_per_mac": model_complexity.get("encoder_forward_flops_2flop_per_mac"),
+        "profiled_supported_operator_flops": model_complexity.get("profiled_supported_operator_flops"),
+        "profiler_scope": model_complexity.get("profiler_scope"),
+        "profiler_operator_coverage": model_complexity.get("profiler_operator_coverage"),
         "learning_rate": learning_rate,
         "primitive_count": last_state.memory.primitive_count,
         "anchor_count": last_state.anchors.count,
         "structural_gaussian_count": last_state.memory.structural.gaussians.count,
         "volumetric_gaussian_count": last_state.memory.volumetric.gaussians.count,
-        "propagation_child_count": sum(len(item.accepted_primitive_ids) for item in last_result.propagation_transactions),
+        "propagation_proposal_count": sum(item.proposal_count for item in last_result.propagation_transactions),
+        "propagation_child_count": sum(item.accepted_count for item in last_result.propagation_transactions),
         "propagation_rejected_out_of_bounds": sum(item.rejected_out_of_bounds for item in last_result.propagation_transactions),
         "propagation_rejected_unsupported": sum(item.rejected_unsupported for item in last_result.propagation_transactions),
-        "propagation_rejected_duplicate_or_budget": sum(item.rejected_duplicate_or_budget for item in last_result.propagation_transactions),
+        "propagation_rejected_duplicate": sum(item.rejected_duplicate for item in last_result.propagation_transactions),
+        "propagation_rejected_budget": sum(item.rejected_budget for item in last_result.propagation_transactions),
         "propagation_rejected_uncertainty": sum(item.rejected_uncertainty for item in last_result.propagation_transactions),
         "propagation_rejected_invalid": sum(item.rejected_invalid for item in last_result.propagation_transactions),
         "propagation_rejected_no_meaningful_gain": sum(item.rejected_no_meaningful_gain for item in last_result.propagation_transactions),
@@ -1492,6 +1913,9 @@ def run(
     initial_global_checkpoint: Path | None = None,
     resume: bool = False,
     validation_only: bool = False,
+    shared_cohort_model: Any | None = None,
+    external_logger: Any | None = None,
+    profile_supported_operator_flops_enabled: bool | None = None,
 ) -> dict[str, object]:
     config, config_hash = _load_config(config_path)
     if wandb_mode is not None:
@@ -1505,7 +1929,7 @@ def run(
         raise ValueError("BraTS21 training steps must be positive")
     if config.get("execution_mode", "smoke") == "smoke" and requested_steps > 5:
         raise ValueError("the diagnostic smoke mode is limited to 2-5 steps; use the product runner for longer runs")
-    if validation_only and initial_global_checkpoint is None:
+    if validation_only and initial_global_checkpoint is None and shared_cohort_model is None:
         raise ValueError("validation-only execution requires a final global model checkpoint")
     bundle = load_prepared_bundle(prepared_dir)
     sampling = dict(config.get("sampling", {}))
@@ -1558,20 +1982,43 @@ def run(
     seed_memory = _seed_memory_config(config)
     propagation = _propagation_config(config)
     interpolation = _interpolation_config(config)
-    encoder = EvidenceEncoder(EncoderConfig(variant="e2")).to(device=device, dtype=torch.float32)
-    head = FixedGaussianHead(FixedGaussianHeadConfig(
-        input_dim=int(config["training"]["gaussian_head_input_dim"]),
-        appearance_channels=len(tuple(config["modalities"])),
-        hidden_dim=int(config["training"]["gaussian_head_hidden_dim"]),
-    )).to(device=device, dtype=torch.float32)
-    field_config = StructuralFieldConfig(
-        evidence_dim=int(config["field"]["evidence_dim"]),
-        hidden_width=int(config["field"]["hidden_width"]),
-        hidden_layers=int(config["field"]["hidden_layers"]),
-        activation=str(config["field"]["activation"]),
-    )
-    field = SharedStructuralField(field_config).to(device=device, dtype=torch.float32)
-    optimizer, optimizer_name = _make_optimizer(encoder, head, field, float(config["training"]["learning_rate"]))
+    if shared_cohort_model is None:
+        encoder = EvidenceEncoder(EncoderConfig(variant="e2")).to(device=device, dtype=torch.float32)
+        head = FixedGaussianHead(FixedGaussianHeadConfig(
+            input_dim=int(config["training"]["gaussian_head_input_dim"]),
+            appearance_channels=len(tuple(config["modalities"])),
+            hidden_dim=int(config["training"]["gaussian_head_hidden_dim"]),
+        )).to(device=device, dtype=torch.float32)
+        field_config = StructuralFieldConfig(
+            evidence_dim=int(config["field"]["evidence_dim"]),
+            hidden_width=int(config["field"]["hidden_width"]),
+            hidden_layers=int(config["field"]["hidden_layers"]),
+            activation=str(config["field"]["activation"]),
+        )
+        field = SharedStructuralField(field_config).to(device=device, dtype=torch.float32)
+        anchor_evidence_projector = _build_anchor_evidence_projector(config, device=device)
+        optimizer, optimizer_name = _make_optimizer(
+            encoder,
+            head,
+            field,
+            float(config["training"]["learning_rate"]),
+            anchor_evidence_projector,
+        )
+    else:
+        if initial_global_checkpoint is not None:
+            raise ValueError("a shared cohort model must be restored by its owning product controller")
+        encoder = getattr(shared_cohort_model, "encoder", None)
+        head = getattr(shared_cohort_model, "gaussian_head", None)
+        field = getattr(shared_cohort_model, "structural_field", None)
+        anchor_evidence_projector = getattr(shared_cohort_model, "evidence_projector", None)
+        optimizer = getattr(shared_cohort_model, "optimizer", None)
+        if not isinstance(encoder, EvidenceEncoder) or not isinstance(head, FixedGaussianHead) or not isinstance(field, SharedStructuralField):
+            raise TypeError("shared cohort model does not own the expected encoder, Gaussian head, and StructuralField")
+        if anchor_evidence_projector is not None and not isinstance(anchor_evidence_projector, AnchorEvidenceProjector):
+            raise TypeError("shared cohort model has an invalid anchor evidence projector")
+        if not callable(getattr(optimizer, "step", None)):
+            raise TypeError("shared cohort model has an invalid optimizer")
+        optimizer_name = "process-owned-cohort-optimizer"
     global_model_binding_hash = _global_model_binding_hash(config)
     global_model_input: dict[str, object] | None = None
     if initial_global_checkpoint is not None:
@@ -1583,6 +2030,7 @@ def run(
             gaussian_head=head,
             field=field,
             optimizer=optimizer,
+            anchor_evidence_projector=anchor_evidence_projector,
         )
     run_start = time.perf_counter()
     environment = {
@@ -1594,11 +2042,14 @@ def run(
     }
     environment_hash = _digest(environment)
     resolved = json.loads(json.dumps(config))
-    model_complexity_preview = parameter_counts({
+    preview_modules: dict[str, torch.nn.Module] = {
         "encoder": encoder,
         "gaussian_head": head,
         "structural_field": field,
-    })
+    }
+    if anchor_evidence_projector is not None:
+        preview_modules["evidence_projector"] = anchor_evidence_projector
+    model_complexity_preview = parameter_counts(preview_modules)
     resolved["runtime"] = {
         "actual_device": device_report["actual_device"],
         "allow_cpu_fallback": bool(allow_cpu_fallback or config["training"].get("allow_cpu_fallback", False)),
@@ -1625,65 +2076,77 @@ def run(
         "target_plane": bundle.target_plane.to_canonical_dict(),
     }, output_dir / "eval_manifest.json")
     recovered_partial_outputs: list[str] = []
-    logger = None
+    logger = external_logger
+    owns_logger = False
+    external_logger_step = (
+        int(getattr(shared_cohort_model, "global_step"))
+        if external_logger is not None and shared_cohort_model is not None
+        else None
+    )
     try:
-        try:
-            from ..experiments.wandb import WandbLogger
-
-            logger = WandbLogger(
-                config=resolved,
-                run_name=f"{str(config.get('experiment_name', 'brats21-static-diagnostic'))}-{pseudonymous_patient}",
-                run_dir=output_dir,
-                mode=str(config.get("wandb", {}).get("mode", "disabled")),
-                metadata={
-                    "schema": config["schema"],
-                    "repository_commit": git["repository_commit"],
-                    "repository_dirty": git["repository_dirty"],
-                    "seed": seed,
-                    "encoder_variant": "e2",
-                    "representation_variant": "anchor_field",
-                    "propagation_variant": str(config["propagation_variant"]),
-                    "patient_pseudonymous_id": pseudonymous_patient,
-                    "cohort_hash": config.get("cohort_hash"),
-                    "split_hash": split_hash,
-                    "assignment_hash": bundle.assignment.assignment_hash,
-                    "sampling_protocol_hash": sampling_protocol_hash,
-                    "context_count": len(bundle.assignment.context_ids),
-                    "context_plane_positions_mm": context_plane_positions_mm,
-                    "target_plane_position_mm": target_plane_position_mm,
-                    "modality_inventory": list(config["modalities"]),
-                    "target_modality": str(config["target_modality"]),
-                    "target_orientation": bundle.manifest_json.get("source_geometry", {}).get("orientation"),
-                    "source_kind": config["source_kind"],
-                    "experiment_name": str(config.get("experiment_name", "brats21-static-diagnostic")),
-                    "parameter_count": model_complexity_preview["parameters"],
-                    "trainable_parameter_count": model_complexity_preview["trainable_parameters"],
-                },
-            )
-            logger.start()
-            requested_wandb_mode = str(config.get("wandb", {}).get("mode", "disabled")).strip().lower()
-            if requested_wandb_mode != "disabled" and logger.mode == "disabled":
-                raise RuntimeError(
-                    f"W&B mode {requested_wandb_mode!r} was requested but no active W&B run was created: "
-                    f"{logger.fallback_reason or 'the optional client is unavailable'}"
-                )
-            # W&B scalar history accepts finite numeric values only.  The
-            # config hash is already stored in the sanitized run config and
-            # metadata; only numeric run counters belong in the history.
-            logger.log({
-                "run/seed": seed,
-                "run/context_count": len(bundle.assignment.context_ids),
-                "training/learning_rate": float(config["training"]["learning_rate"]),
-                "model/parameter_count": int(model_complexity_preview["parameters"]),
-                "model/trainable_parameter_count": int(model_complexity_preview["trainable_parameters"]),
-            }, step=0)
-        except ImportError as error:
-            requested_wandb_mode = str(config.get("wandb", {}).get("mode", "disabled")).strip().lower()
+        requested_wandb_mode = str(config.get("wandb", {}).get("mode", "disabled")).strip().lower()
+        if logger is None and shared_cohort_model is not None:
+            # A validation/final-evaluation episode must never spin up a
+            # second W&B run.  The process-level controller may inject its
+            # existing logger; otherwise this helper stays unlogged.
             if requested_wandb_mode != "disabled":
-                raise RuntimeError(
-                    f"W&B mode {requested_wandb_mode!r} was requested but the optional wandb package is unavailable"
-                ) from error
-            logger = None
+                raise RuntimeError("a shared cohort model requires an externally owned W&B logger when logging is enabled")
+        elif logger is None:
+            try:
+                from ..experiments.wandb import WandbLogger
+
+                logger = WandbLogger(
+                    config=resolved,
+                    run_name=f"{str(config.get('experiment_name', 'brats21-static-diagnostic'))}-{pseudonymous_patient}",
+                    run_dir=output_dir,
+                    mode=requested_wandb_mode,
+                    metadata={
+                        "schema": config["schema"],
+                        "repository_commit": git["repository_commit"],
+                        "repository_dirty": git["repository_dirty"],
+                        "seed": seed,
+                        "encoder_variant": "e2",
+                        "representation_variant": "anchor_field",
+                        "propagation_variant": str(config["propagation_variant"]),
+                        "patient_pseudonymous_id": pseudonymous_patient,
+                        "cohort_hash": config.get("cohort_hash"),
+                        "split_hash": split_hash,
+                        "assignment_hash": bundle.assignment.assignment_hash,
+                        "sampling_protocol_hash": sampling_protocol_hash,
+                        "context_count": len(bundle.assignment.context_ids),
+                        "context_plane_positions_mm": context_plane_positions_mm,
+                        "target_plane_position_mm": target_plane_position_mm,
+                        "modality_inventory": list(config["modalities"]),
+                        "target_modality": str(config["target_modality"]),
+                        "target_orientation": bundle.manifest_json.get("source_geometry", {}).get("orientation"),
+                        "source_kind": config["source_kind"],
+                        "experiment_name": str(config.get("experiment_name", "brats21-static-diagnostic")),
+                        "parameter_count": model_complexity_preview["parameters"],
+                        "trainable_parameter_count": model_complexity_preview["trainable_parameters"],
+                    },
+                )
+                logger.start()
+                owns_logger = True
+                if requested_wandb_mode != "disabled" and logger.mode == "disabled":
+                    raise RuntimeError(
+                        f"W&B mode {requested_wandb_mode!r} was requested but no active W&B run was created: "
+                        f"{logger.fallback_reason or 'the optional client is unavailable'}"
+                    )
+                # W&B scalar history accepts finite numeric values only. The
+                # shared global logger already records process-level values.
+                logger.log({
+                    "run/seed": seed,
+                    "run/context_count": len(bundle.assignment.context_ids),
+                    "training/learning_rate": float(config["training"]["learning_rate"]),
+                    "model/parameter_count": int(model_complexity_preview["parameters"]),
+                    "model/trainable_parameter_count": int(model_complexity_preview["trainable_parameters"]),
+                }, step=0)
+            except ImportError as error:
+                if requested_wandb_mode != "disabled":
+                    raise RuntimeError(
+                        f"W&B mode {requested_wandb_mode!r} was requested but the optional wandb package is unavailable"
+                    ) from error
+                logger = None
         r0_dir = output_dir / "r0"
         r0_execution_dir = r0_dir
         if r0_dir.exists() and any(r0_dir.iterdir()):
@@ -1715,7 +2178,7 @@ def run(
                 "r0/unsupported_fraction": r0_report["unsupported_fraction"],
                 "r0/primitive_count": r0_report["primitive_count"],
                 "r0/runtime_seconds": r0_report["runtime_seconds"],
-            }, step=0)
+            }, step=0 if external_logger_step is None else external_logger_step)
         r4_name = f"e2_r4_{propagation.variant}"
         r4_dir = output_dir / r4_name
         r4_progress_path = r4_dir / "progress_checkpoint.pt"
@@ -1734,6 +2197,7 @@ def run(
         r4_report, r4_result, r4_target, r4_valid, r4_preprocess = _run_r4(
             bundle=bundle, registry=split_registry, config=config, episode_config=episode_config,
             encoder=encoder, gaussian_head=head, field=field, optimizer=optimizer,
+            anchor_evidence_projector=anchor_evidence_projector,
             bootstrap=bootstrap, seed_memory=seed_memory, propagation=propagation,
             output_dir=r4_dir, config_hash=config_hash, split_hash=split_hash,
             cohort_split_hash=cohort_split_hash, git=git,
@@ -1742,6 +2206,12 @@ def run(
             checkpoint_interval_steps=int(config.get("checkpointing", {}).get("interval_steps", 1)),
             resume=resume,
             training_updates=not validation_only,
+            profile_supported_operator_flops_enabled=(
+                bool(dict(config.get("diagnostics", {})).get("profile_supported_operator_flops", False))
+                if profile_supported_operator_flops_enabled is None
+                else bool(profile_supported_operator_flops_enabled)
+            ),
+            telemetry_cache_owner=shared_cohort_model,
         )
         if logger is not None:
             for item in r4_report["steps"]:
@@ -1753,16 +2223,19 @@ def run(
                     f"{r4_name}/encoder_gradient_norm": item["encoder_gradient_norm"],
                     f"{r4_name}/gaussian_head_gradient_norm": item["gaussian_head_gradient_norm"],
                     f"{r4_name}/field_gradient_norm": item["field_gradient_norm"],
+                    f"{r4_name}/evidence_projector_gradient_norm": item["evidence_projector_gradient_norm"],
                     f"{r4_name}/primitive_count": item["primitive_count"],
                     f"{r4_name}/anchor_count": item["anchor_count"],
                     f"{r4_name}/propagation_child_count": item["propagation_child_count"],
+                    f"{r4_name}/propagation_proposal_count": item["propagation_proposal_count"],
                     f"{r4_name}/propagation_rejected_out_of_bounds": item["propagation_rejected_out_of_bounds"],
                     f"{r4_name}/propagation_rejected_unsupported": item["propagation_rejected_unsupported"],
-                    f"{r4_name}/propagation_rejected_duplicate_or_budget": item["propagation_rejected_duplicate_or_budget"],
+                    f"{r4_name}/propagation_rejected_duplicate": item["propagation_rejected_duplicate"],
+                    f"{r4_name}/propagation_rejected_budget": item["propagation_rejected_budget"],
                     f"{r4_name}/propagation_rejected_uncertainty": item["propagation_rejected_uncertainty"],
                     f"{r4_name}/propagation_rejected_invalid": item["propagation_rejected_invalid"],
                     f"{r4_name}/propagation_rejected_no_meaningful_gain": item["propagation_rejected_no_meaningful_gain"],
-                }, step=int(item["step"]))
+                }, step=int(item["step"]) if external_logger_step is None else external_logger_step)
         if bundle.segmentation_payload_deferred:
             if deferred_segmentation_reader is None:
                 raise RuntimeError("prepared bundle defers segmentation but no receipt-gated evaluator reader was supplied")
@@ -1852,7 +2325,7 @@ def run(
                     "support/mask": (~r4_result.prediction.unsupported_mask).to(torch.float32),
                     "uncertainty/support_diagnostic": r4_uncertainty,
                 },
-                step=requested_steps + 1,
+                step=requested_steps + 1 if external_logger_step is None else external_logger_step,
             )
             logger.update_summary({
                 "artifacts/r0_summary": str((r0_dir / "summary.json").relative_to(output_dir)),
@@ -1939,7 +2412,10 @@ def run(
                 "checkpoint_size_bytes": r4_report.get("checkpoint_size_bytes"),
                 "parameter_count": r4_report.get("parameter_count"),
                 "trainable_parameter_count": r4_report.get("trainable_parameter_count"),
-                "training_step_flops": r4_report.get("training_step_flops"),
+                "encoder_forward_flops_2flop_per_mac": r4_report.get("encoder_forward_flops_2flop_per_mac"),
+                "profiled_supported_operator_flops": r4_report.get("profiled_supported_operator_flops"),
+                "profiler_scope": r4_report.get("profiler_scope"),
+                "profiler_operator_coverage": r4_report.get("profiler_operator_coverage"),
             },
             "repository": git,
             "environment_hash": environment_hash,
@@ -1969,12 +2445,26 @@ def run(
             evaluation_scalars["runtime/peak_cuda_memory_bytes"] = float(peak_memory or 0)
             evaluation_scalars["model/parameter_count"] = float(model_complexity_preview["parameters"])
             evaluation_scalars["model/trainable_parameter_count"] = float(model_complexity_preview["trainable_parameters"])
-            measured_flops = r4_report.get("training_step_flops")
+            measured_flops = r4_report.get("profiled_supported_operator_flops")
             if isinstance(measured_flops, (int, float)) and np.isfinite(float(measured_flops)):
-                evaluation_scalars["compute/training_step_flops"] = float(measured_flops)
-            logger.log(evaluation_scalars, step=requested_steps + 1)
-            wandb_finish = logger.finish(status="finished")
-            summary["wandb"] = wandb_finish.to_dict()
+                evaluation_scalars["compute/profiled_supported_operator_flops"] = float(measured_flops)
+            encoder_flops = r4_report.get("encoder_forward_flops_2flop_per_mac")
+            if isinstance(encoder_flops, (int, float)) and np.isfinite(float(encoder_flops)):
+                evaluation_scalars["compute/encoder_forward_flops_2flop_per_mac"] = float(encoder_flops)
+            logger.log(
+                evaluation_scalars,
+                step=requested_steps + 1 if external_logger_step is None else external_logger_step,
+            )
+            if owns_logger:
+                wandb_finish = logger.finish(status="finished")
+                summary["wandb"] = wandb_finish.to_dict()
+            else:
+                summary["wandb"] = {
+                    "mode": getattr(logger, "mode", "external-process-level"),
+                    "run_id": getattr(logger, "run_id", None),
+                    "url": getattr(logger, "url", None),
+                    "ownership": "external_process_level",
+                }
         else:
             summary["wandb"] = {"mode": "unavailable", "run_id": None, "url": None}
         _atomic_json(summary, output_dir / "summary.json")
@@ -1982,7 +2472,7 @@ def run(
     except Exception as error:
         failure = {"schema": "smagm-brats21-real-smoke-failure-v1", "failure_reason": f"{type(error).__name__}: {error}", "repository": git}
         _atomic_json(failure, output_dir / "failure.json")
-        if logger is not None:
+        if logger is not None and owns_logger:
             logger.finish(status="failed", failure_reason=failure["failure_reason"])
         raise
 

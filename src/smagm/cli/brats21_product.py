@@ -38,6 +38,11 @@ from ..data.brats21 import (
 )
 from ..data.brats21_sampling import BraTS21SamplingConfig, build_sampling_plan
 from ..data.normalization import NormalizationConfig
+from ..baselines.fixed_gaussian import FixedGaussianHead, FixedGaussianHeadConfig
+from ..features.encoder import EncoderConfig, EvidenceEncoder
+from ..fields import SharedStructuralField, StructuralFieldConfig
+from ..training import AnchorEvidenceProjector
+from .brats21_cohort import BraTS21CohortModel, GlobalCheckpointManager
 
 
 _ROOT = Path(__file__).resolve().parents[3]
@@ -144,7 +149,12 @@ _PRODUCT_METRIC_FIELDS = (
     "per_plane_latency_seconds", "peak_cuda_allocated_bytes", "peak_cuda_reserved_bytes",
     "anchor_count", "structural_gaussian_count", "volumetric_gaussian_count",
     "propagation_child_count", "cache_size_bytes", "checkpoint_size_bytes",
-    "parameter_count", "trainable_parameter_count", "training_step_flops",
+    "propagation_proposal_count", "propagation_rejected_budget", "propagation_rejected_duplicate",
+    "pixel_gaussian_candidate_pairs", "parameter_count", "trainable_parameter_count",
+    "encoder_forward_flops_2flop_per_mac", "profiled_supported_operator_flops",
+    "full_step_wall_time_ms", "encoder_wall_time_ms", "anchor_build_wall_time_ms",
+    "field_query_wall_time_ms", "propagation_wall_time_ms", "renderer_wall_time_ms",
+    "loss_wall_time_ms", "backward_wall_time_ms", "optimizer_wall_time_ms",
 )
 
 _PRODUCT_METRIC_STATUS_FIELDS = (
@@ -638,10 +648,10 @@ def _load_product_config(path: Path) -> tuple[dict[str, Any], str]:
     if not isinstance(product_validation, dict):
         raise ValueError("product config must declare a validation policy")
     validation_cadence = str(product_validation.get("cadence", ""))
-    if validation_cadence not in ("disabled", "post_training_patient_disjoint_sweep"):
-        raise ValueError("product validation cadence must be disabled or post_training_patient_disjoint_sweep")
+    if validation_cadence not in ("disabled", "final", "end_of_epoch"):
+        raise ValueError("product validation cadence must be disabled, final, or end_of_epoch")
     validation_enabled = bool(product_validation.get("enabled", False))
-    if validation_enabled != (validation_cadence == "post_training_patient_disjoint_sweep"):
+    if validation_enabled != (validation_cadence != "disabled"):
         raise ValueError("product validation enabled flag must agree with its declared cadence")
     if str(product_validation.get("selection_policy", "")) != "fixed_geometry_only_no_checkpoint_selection":
         raise ValueError("product validation must declare fixed geometry-only selection without checkpoint selection")
@@ -713,13 +723,86 @@ def _load_product_config(path: Path) -> tuple[dict[str, Any], str]:
         raise ValueError("product configs must never enable CPU fallback")
     if training.get("encoder_variant") != "e2" or training.get("representation_variant") != "anchor_field":
         raise ValueError("the product controller is locked to E2 + R4")
-    if training.get("training", {}).get("gaussian_head_input_adapter") != "anchor_evidence_prefix":
-        raise ValueError("the product controller requires the declared anchor_evidence_prefix Gaussian-head adapter")
+    cohort_training = training.get("cohort_training")
+    if not isinstance(cohort_training, dict):
+        raise ValueError("product training must declare its process-owned cohort lifecycle")
+    required_global_owners = {
+        "encoder", "gaussian_head", "structural_field", "evidence_projector",
+        "optimizer", "scheduler", "amp_scaler", "global_step", "wandb_run",
+        "global_checkpoint_manager",
+    }
+    configured_global_owners = cohort_training.get("global_model_scope")
+    if not isinstance(configured_global_owners, list) or not required_global_owners.issubset(set(configured_global_owners)):
+        raise ValueError("product cohort lifecycle must declare every process-owned global component")
+    if cohort_training.get("promotion_boundary") != "successful_global_optimizer_step":
+        raise ValueError("product global checkpoint promotion must follow a successful optimizer step")
+    if cohort_training.get("validation_updates_global_model") is not False:
+        raise ValueError("product validation must not update the global model")
+    if cohort_training.get("target_payload_not_in_global_checkpoint") is not True:
+        raise ValueError("product global checkpoint must explicitly exclude target payloads")
+    checkpointing = training.get("checkpointing")
+    if not isinstance(checkpointing, dict) or int(checkpointing.get("interval_steps", 0)) != 1:
+        raise ValueError("product global checkpoint manager must persist every successful optimizer step")
+    renderer_policy = reconstruction.get("renderer")
+    training_renderer_policy = training.get("renderer")
+    if not isinstance(renderer_policy, dict) or "tile_shape_hw" not in renderer_policy:
+        raise ValueError("product renderer must declare its physical tile-culling shape")
+    if not isinstance(training_renderer_policy, dict) or training_renderer_policy.get("tile_shape_hw") != renderer_policy.get("tile_shape_hw"):
+        raise ValueError("product training and reconstruction renderer tile shapes must agree")
+    tile_shape = renderer_policy["tile_shape_hw"]
+    if not isinstance(tile_shape, list) or len(tile_shape) != 2 or any(int(value) <= 0 for value in tile_shape):
+        raise ValueError("product renderer tile_shape_hw must contain two positive integers")
+    diagnostics = training.get("diagnostics")
+    if not isinstance(diagnostics, dict) or not isinstance(diagnostics.get("analytical_encoder_flops"), bool) or not isinstance(diagnostics.get("profile_supported_operator_flops"), bool):
+        raise ValueError("product diagnostics must explicitly declare analytical and profiler FLOP policies")
+    if training.get("training", {}).get("gaussian_head_input_adapter") != "anchor_evidence_projector":
+        raise ValueError("the product controller requires the typed anchor_evidence_projector adapter")
+    projector = training.get("training", {}).get("anchor_evidence_projector")
+    if not isinstance(projector, dict):
+        raise ValueError("product training must declare anchor_evidence_projector dimensions")
+    if int(projector.get("evidence_dim", -1)) != int(training.get("field", {}).get("evidence_dim", -2)):
+        raise ValueError("product projector evidence_dim must equal field evidence_dim")
+    if int(projector.get("head_input_dim", -1)) != int(training.get("training", {}).get("gaussian_head_input_dim", -2)):
+        raise ValueError("product projector head_input_dim must equal gaussian_head_input_dim")
     propagation_policy = dict(training.get("propagation", {}))
     if float(propagation_policy.get("minimum_evidence_gain", 0.0)) <= 0.0:
         raise ValueError("product propagation must reject zero meaningful evidence gain with a positive threshold")
     if not 0.0 < float(propagation_policy.get("minimum_cross_modality_agreement", 0.0)) <= 1.0:
         raise ValueError("product propagation must declare a positive cross-modality agreement threshold")
+    required_p1_budgets = (
+        "maximum_total_anchors", "structural_seed_budget", "volumetric_seed_budget",
+        "propagation_reserved_budget", "maximum_patient_primitives",
+    )
+    if any(name not in propagation_policy for name in required_p1_budgets):
+        raise ValueError("product P1 must declare total-anchor, seed, reserve, and patient primitive budgets")
+    if int(propagation_policy["propagation_reserved_budget"]) <= 0:
+        raise ValueError("product P1 requires a positive propagation_reserved_budget")
+    if int(propagation_policy["structural_seed_budget"]) > int(propagation_policy["maximum_structural_primitives"]):
+        raise ValueError("structural_seed_budget cannot exceed maximum_structural_primitives")
+    if int(propagation_policy["volumetric_seed_budget"]) > int(propagation_policy["maximum_volumetric_primitives"]):
+        raise ValueError("volumetric_seed_budget cannot exceed maximum_volumetric_primitives")
+    if int(propagation_policy["structural_seed_budget"]) < int(propagation_policy["maximum_total_anchors"]):
+        raise ValueError("structural_seed_budget must cover one seed per declared anchor")
+    if int(propagation_policy["volumetric_seed_budget"]) < int(propagation_policy["maximum_total_anchors"]):
+        raise ValueError("volumetric_seed_budget must cover one seed per declared anchor")
+    seed_and_reserve = (
+        int(propagation_policy["structural_seed_budget"])
+        + int(propagation_policy["volumetric_seed_budget"])
+        + int(propagation_policy["propagation_reserved_budget"])
+    )
+    if seed_and_reserve > int(propagation_policy["maximum_patient_primitives"]):
+        raise ValueError("product P1 seed budgets plus propagation reserve exceed maximum_patient_primitives")
+    per_bank_child_capacity = (
+        int(propagation_policy["maximum_structural_primitives"])
+        - int(propagation_policy["structural_seed_budget"])
+        + int(propagation_policy["maximum_volumetric_primitives"])
+        - int(propagation_policy["volumetric_seed_budget"])
+    )
+    if int(propagation_policy["propagation_reserved_budget"]) > per_bank_child_capacity:
+        raise ValueError("product P1 reserve exceeds final structural/volumetric child capacity")
+    max_steps = int(product.get("max_global_steps", product.get("steps", 0)))
+    if max_steps <= 0 or int(product.get("epochs", 1)) <= 0:
+        raise ValueError("product config must declare positive epochs and max_global_steps")
     if training.get("t4_routing") is not False:
         raise ValueError("T4 routing must remain explicitly disabled")
     config = {
@@ -781,6 +864,109 @@ def _runtime_config(config: dict[str, Any], *, propagation_variant: str, steps: 
     training["wandb"]["project"] = "smagm-brats21"
     training["wandb"]["group"] = str(product.get("wandb_group", training["wandb"].get("group", "structure-propagation")))
     return training
+
+
+def _build_cohort_model(
+    *,
+    config: dict[str, Any],
+    propagation_variant: str,
+    wandb_mode: str,
+    logger: Any | None,
+    global_checkpoint: Path,
+) -> tuple[BraTS21CohortModel, dict[str, Any], str, str]:
+    """Construct the one process-owned learned cohort model exactly once."""
+
+    from .brats21_smoke import _build_anchor_evidence_projector, _global_model_binding_hash, _make_optimizer
+
+    runtime = _runtime_config(
+        config,
+        propagation_variant=propagation_variant,
+        steps=1,
+        wandb_mode=wandb_mode,
+        split_name=str(config["product"].get("training_split", "train")),
+    )
+    device = torch.device("cuda")
+    encoder = EvidenceEncoder(EncoderConfig(variant="e2")).to(device=device, dtype=torch.float32)
+    gaussian_head = FixedGaussianHead(FixedGaussianHeadConfig(
+        input_dim=int(runtime["training"]["gaussian_head_input_dim"]),
+        appearance_channels=len(tuple(runtime["modalities"])),
+        hidden_dim=int(runtime["training"]["gaussian_head_hidden_dim"]),
+    )).to(device=device, dtype=torch.float32)
+    structural_field = SharedStructuralField(StructuralFieldConfig(
+        evidence_dim=int(runtime["field"]["evidence_dim"]),
+        hidden_width=int(runtime["field"]["hidden_width"]),
+        hidden_layers=int(runtime["field"]["hidden_layers"]),
+        activation=str(runtime["field"]["activation"]),
+    )).to(device=device, dtype=torch.float32)
+    projector = _build_anchor_evidence_projector(runtime, device=device)
+    optimizer, optimizer_name = _make_optimizer(
+        encoder,
+        gaussian_head,
+        structural_field,
+        float(runtime["training"]["learning_rate"]),
+        projector,
+    )
+    scheduler: Any | None = None
+    if hasattr(optimizer, "param_groups"):
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda _step: 1.0)
+    cohort = BraTS21CohortModel(
+        encoder=encoder,
+        gaussian_head=gaussian_head,
+        structural_field=structural_field,
+        evidence_projector=projector,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        amp_scaler=None,  # Float32 product policy deliberately uses no AMP scaler.
+        wandb_logger=logger,
+        checkpoint_manager=GlobalCheckpointManager(global_checkpoint),
+    )
+    return cohort, runtime, _global_model_binding_hash(runtime), optimizer_name
+
+
+def _save_cohort_checkpoint(
+    path: Path,
+    *,
+    cohort: BraTS21CohortModel,
+    model_binding_hash: str,
+    cohort_hash: str,
+    split_hash: str,
+) -> str:
+    """Atomically persist a target-free snapshot of the live global object."""
+
+    if cohort.checkpoint_manager is None or cohort.checkpoint_manager.path != path:
+        raise ValueError("cohort checkpoint manager does not own the declared global checkpoint path")
+    return cohort.save_global_checkpoint(
+        model_binding_hash=model_binding_hash,
+        cohort_hash=cohort_hash,
+        split_hash=split_hash,
+    )
+
+
+def _load_cohort_checkpoint(
+    path: Path,
+    *,
+    cohort: BraTS21CohortModel,
+    model_binding_hash: str,
+    cohort_hash: str,
+    split_hash: str,
+) -> int:
+    if cohort.checkpoint_manager is None or cohort.checkpoint_manager.path != path:
+        raise ValueError("cohort checkpoint manager does not own the declared global checkpoint path")
+    return cohort.restore_global_checkpoint(
+        model_binding_hash=model_binding_hash,
+        cohort_hash=cohort_hash,
+        split_hash=split_hash,
+    )
+
+
+def _epoch_patient_order(patient_ids: tuple[str, ...], *, seed: int, epoch_index: int) -> tuple[str, ...]:
+    """Deterministically shuffle patient identities without exposing them in reports."""
+
+    if epoch_index < 0:
+        raise ValueError("epoch_index must be non-negative")
+    ordered = list(patient_ids)
+    random.Random(int(seed) + epoch_index).shuffle(ordered)
+    return tuple(ordered)
 
 
 def _split_for(patient_id: str, fractions: dict[str, float]) -> str:
@@ -1136,9 +1322,13 @@ def _run_one_patient(
     *, config: dict[str, Any], patient_id: str, run_root: Path, propagation_variant: str, steps: int, wandb_mode: str,
     evaluation_path: Path, seed: int, split_name: str, initial_global_checkpoint: Path | None = None,
     validation_only: bool = False,
+    cohort_model: BraTS21CohortModel | None = None,
+    cohort_episode_only: bool = False,
+    profile_supported_operator_flops_enabled: bool = False,
+    external_logger: Any | None = None,
 ) -> dict[str, Any]:
     from .brats21_smoke import run as smoke_run
-    from ..data.brats21_prepare import prepare_brats21_product_patient
+    from ..data.brats21_prepare import load_prepared_bundle, prepare_brats21_product_patient
 
     pseudonym = hashlib.sha256(f"smagm-brats21-patient-v1:{patient_id}".encode()).hexdigest()[:16]
     train_split = str(config["product"].get("training_split", "train"))
@@ -1149,7 +1339,7 @@ def _run_one_patient(
     training_summary = patient_root / "training" / "summary.json"
     completion_recovery_path: str | None = None
     training_recovery_path: str | None = None
-    if summary.exists():
+    if not cohort_episode_only and summary.exists():
         marker_valid = False
         recorded_training_summary: Path | None = None
         try:
@@ -1194,7 +1384,7 @@ def _run_one_patient(
             raise RuntimeError(f"patient completion marker is not a regular file: {summary}")
         quarantined = _quarantine_partial_file(summary)
         completion_recovery_path = str(quarantined.relative_to(patient_root))
-    if training_summary.exists():
+    if not cohort_episode_only and training_summary.exists():
         # A process may have completed the immutable patient result just
         # before the cohort-level state update. Reconstitute the small
         # patient completion marker without rerunning or overwriting it.
@@ -1326,6 +1516,44 @@ def _run_one_patient(
                 raise RuntimeError("deferred segmentation plane contains labels outside {0,1,2,4}")
             return npy_bytes(segmentation.astype(np.uint8, copy=False))
 
+    if cohort_episode_only:
+        if cohort_model is None:
+            raise ValueError("cohort_episode_only requires one process-owned BraTS21CohortModel")
+        from .brats21_smoke import run_cohort_training_episode
+
+        runtime = _runtime_config(
+            config,
+            propagation_variant=propagation_variant,
+            steps=1,
+            wandb_mode=wandb_mode,
+            split_name=split_name,
+        )
+        bundle = load_prepared_bundle(prepared_root)
+        report = run_cohort_training_episode(
+            bundle=bundle,
+            config=runtime,
+            config_hash=_hash(runtime),
+            cohort_split_hash=str(config["split_hash"]),
+            cohort_model=cohort_model,
+            deferred_target_reader=deferred_target_reader,
+            training_updates=not validation_only,
+            profile_supported_operator_flops_enabled=profile_supported_operator_flops_enabled,
+        )
+        episode_root = patient_root / "episodes"
+        episode_root.mkdir(parents=True, exist_ok=True)
+        episode_path = episode_root / f"global-step-{int(report['global_step']):08d}.json"
+        _atomic_json(episode_path, report)
+        return {
+            "patient_pseudonym": f"patient-{pseudonym}",
+            "split": split_name,
+            "status": "episode_complete",
+            "episode_report": str(episode_path),
+            "report": report,
+            "completion_recovery_path": completion_recovery_path,
+            "prepared_recovery_path": prepared_recovery_path,
+            "training_recovery_path": training_recovery_path,
+        }
+
     runtime_path = _runtime_config_file(patient_root, config, propagation_variant=propagation_variant, steps=steps, wandb_mode=wandb_mode, split_name=split_name)
     evaluation_runtime_path = patient_root / "resolved_evaluation_config.json"
     evaluation_runtime = json.loads(json.dumps(config["evaluation"]))
@@ -1351,6 +1579,9 @@ def _run_one_patient(
         initial_global_checkpoint=initial_global_checkpoint,
         resume=True,
         validation_only=validation_only,
+        shared_cohort_model=cohort_model,
+        external_logger=external_logger,
+        profile_supported_operator_flops_enabled=False,
     )
     _atomic_json(summary, {
         "schema": "smagm-brats21-product-patient-complete-v1",
@@ -1374,7 +1605,7 @@ def _run_one_patient(
     }
 
 
-def run(*, config_path: Path, output_dir: Path, stage: str | None = None, patient_id: str | None = None, patient_limit: int | None = None, resume: str = "auto", wandb_mode: str | None = None, dry_run: bool = False) -> dict[str, Any]:
+def _run_legacy_per_patient_product(*, config_path: Path, output_dir: Path, stage: str | None = None, patient_id: str | None = None, patient_limit: int | None = None, resume: str = "auto", wandb_mode: str | None = None, dry_run: bool = False) -> dict[str, Any]:
     config, config_hash = _load_product_config(config_path)
     cohort_hash, split_hash = _cohort_and_split_hashes(config)
     config["cohort_hash"] = cohort_hash
@@ -1470,7 +1701,7 @@ def run(*, config_path: Path, output_dir: Path, stage: str | None = None, patien
     print(
         f"[experiment] name={product['experiment_name']} stage={resolved_stage} "
         f"propagation={propagation_variant} steps={steps} parameters=reported-per-patient "
-        f"training_step_flops=reported-on-first-step",
+        f"profiled_supported_operator_flops=diagnostic-only",
         flush=True,
     )
     cuda = _cuda_preflight()
@@ -1652,6 +1883,519 @@ def run(*, config_path: Path, output_dir: Path, stage: str | None = None, patien
         "scientific_pass_recorded": False,
     })
     return state
+
+
+def run(
+    *,
+    config_path: Path,
+    output_dir: Path,
+    stage: str | None = None,
+    patient_id: str | None = None,
+    patient_limit: int | None = None,
+    resume: str = "auto",
+    wandb_mode: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Run the process-owned, shuffled BraTS21 cohort training lifecycle.
+
+    Learned modules and their optimizer live in one ``BraTS21CohortModel``.
+    Each patient call builds and discards a receipt-gated temporary state; R0,
+    package evaluation, media, and audit remain validation/final work only.
+    """
+
+    config, config_hash = _load_product_config(config_path)
+    cohort_hash, split_hash = _cohort_and_split_hashes(config)
+    config["cohort_hash"] = cohort_hash
+    config["split_hash"] = split_hash
+    product = dict(config["product"])
+    resolved_stage = stage or str(product.get("stage", "full"))
+    if resolved_stage != "full":
+        raise ValueError("the product controller has one launch mode: stage=full")
+    propagation_variant = "p1"
+    epochs = int(product.get("epochs", 1))
+    max_global_steps = int(product.get("max_global_steps", product.get("steps", 0)))
+    if epochs <= 0 or max_global_steps <= 0:
+        raise ValueError("product epochs and max_global_steps must be positive")
+    resolved_wandb = str(wandb_mode or product.get("wandb_mode", "disabled"))
+    if resolved_wandb not in ("disabled", "offline", "online"):
+        raise ValueError("wandb_mode must be disabled, offline, or online")
+
+    output_dir = output_dir.resolve()
+    disk = _disk_report(output_dir)
+    minimum_free_gib = float(product.get("minimum_free_disk_gib", 50.0))
+    disk_policy = str(product.get("disk_policy", "advisory")).strip().lower()
+    if disk_policy not in ("advisory", "enforced"):
+        raise ValueError("product disk_policy must be advisory or enforced")
+    disk.update({
+        "minimum_free_gib": minimum_free_gib,
+        "safe": float(disk["free_gib"]) >= minimum_free_gib,
+        "policy": disk_policy,
+        "guard_enforced": disk_policy == "enforced",
+    })
+    if not disk["safe"]:
+        disk["warning"] = (
+            f"free disk {disk['free_gib']:.2f} GiB is below the advisory threshold "
+            f"{minimum_free_gib:.2f} GiB; the operating system may stop the run if storage is exhausted"
+        )
+
+    training_split = str(product.get("training_split", "train"))
+    patients = _patient_ids(
+        config,
+        resolved_stage,
+        patient_id,
+        patient_limit if patient_limit is not None else product.get("patient_limit"),
+        split_name=training_split,
+    )
+    validation = dict(product.get("validation", {}))
+    validation_enabled = bool(validation.get("enabled", False))
+    validation_cadence = str(validation.get("cadence", "disabled"))
+    validation_split = str(validation.get("split", "validation"))
+    validation_steps = int(validation.get("steps", 1))
+    if validation_enabled:
+        if validation_split == training_split:
+            raise ValueError("product validation split must be patient-disjoint from training")
+        if validation_steps <= 0:
+            raise ValueError("validation steps must be positive")
+        validation_limit = validation.get("patient_limit")
+        validation_patients = _patient_ids(
+            config,
+            resolved_stage,
+            None,
+            None if validation_limit is None else int(validation_limit),
+            split_name=validation_split,
+        )
+    else:
+        validation_patients = ()
+
+    epoch_orders = tuple(_epoch_patient_order(patients, seed=int(config["training"]["seed"]), epoch_index=epoch) for epoch in range(epochs))
+    flattened = tuple((epoch, ordinal, item) for epoch, order in enumerate(epoch_orders) for ordinal, item in enumerate(order))
+    planned_updates = min(max_global_steps, len(flattened))
+    runtime_preview = _runtime_config(
+        config,
+        propagation_variant=propagation_variant,
+        steps=1,
+        wandb_mode=resolved_wandb,
+        split_name=training_split,
+    )
+    dry = {
+        "schema": "smagm-brats21-product-dry-run-v2",
+        "stage": resolved_stage,
+        "config_hash": config_hash,
+        "cohort_hash": cohort_hash,
+        "split_hash": split_hash,
+        "experiment_name": str(product["experiment_name"]),
+        "propagation_variant": propagation_variant,
+        "training_lifecycle": "one process-owned model/optimizer/scheduler/scaler/logger; shuffled temporary patient episodes",
+        "epochs": epochs,
+        "max_global_steps": max_global_steps,
+        "planned_updates": planned_updates,
+        "training_patient_count": len(patients),
+        "validation": {
+            "enabled": validation_enabled,
+            "cadence": validation_cadence,
+            "split": validation_split,
+            "patient_count": len(validation_patients),
+            "steps": validation_steps,
+            "selection_scope": "fixed deterministic geometry-only episodes; no optimizer updates",
+        },
+        "disk": disk,
+        "cuda_policy": "required; no CPU fallback",
+        "wandb": {"mode": resolved_wandb, "project": "smagm-brats21", "group": product.get("wandb_group")},
+        "runtime_config_hash": _hash(runtime_preview),
+        "t4_routing": False,
+    }
+    if dry_run:
+        print(json.dumps(dry, sort_keys=True, indent=2))
+        return dry
+    if not disk["safe"]:
+        if disk_policy == "enforced":
+            raise RuntimeError(
+                f"insufficient free disk for {resolved_stage}: "
+                f"{disk['free_gib']:.2f} GiB < {minimum_free_gib:.2f} GiB"
+            )
+        print(f"[disk-warning] {disk['warning']}", file=sys.stderr, flush=True)
+
+    cuda = _cuda_preflight()
+    torch.manual_seed(int(config["training"]["seed"]))
+    torch.cuda.manual_seed_all(int(config["training"]["seed"]))
+    torch.cuda.reset_peak_memory_stats()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_paths = dict(product["output_paths"])
+    state_path = output_dir / str(output_paths["state_file"])
+    complete_path = output_dir / str(output_paths["completion_marker"])
+    global_checkpoint = output_dir / str(output_paths["global_checkpoint"])
+    if complete_path.exists():
+        raise FileExistsError(f"successful product run already exists: {output_dir}")
+    if state_path.exists():
+        if resume == "none":
+            raise FileExistsError("run state exists; use --resume auto or a new output directory")
+        state = _read_json(state_path)
+        if state.get("schema") != "smagm-brats21-cohort-run-state-v2":
+            raise ValueError("existing run uses a legacy per-patient lifecycle; choose a new output directory")
+        expected = {
+            "stage": resolved_stage,
+            "config_hash": config_hash,
+            "cohort_hash": cohort_hash,
+            "split_hash": split_hash,
+            "wandb_mode": resolved_wandb,
+        }
+        if any(state.get(name) != value for name, value in expected.items()):
+            raise ValueError("existing cohort run state does not match config/cohort/split/stage/W&B mode")
+        if not isinstance(state.get("training_history"), list) or not isinstance(state.get("completed"), dict) or not isinstance(state.get("failures"), list):
+            raise ValueError("existing cohort run state is malformed")
+    else:
+        state = {
+            "schema": "smagm-brats21-cohort-run-state-v2",
+            "training_history": [],
+            "completed": {},
+            "failures": [],
+            "status": "running",
+            "started_at_unix": time.time(),
+        }
+
+    logger: Any | None = None
+    logger_finished = False
+    try:
+        from ..experiments.wandb import WandbLogger
+
+        logger = WandbLogger(
+            config=runtime_preview,
+            run_name=str(product["experiment_name"]),
+            run_dir=output_dir,
+            mode=resolved_wandb,
+            metadata={
+                "repository_commit": _git_commit_or_unknown(),
+                "repository_dirty": _git_dirty(),
+                "cohort_hash": cohort_hash,
+                "split_hash": split_hash,
+                "sampling_protocol_hash": config.get("sampling_config_hash"),
+                "experiment_name": str(product["experiment_name"]),
+                "propagation_variant": propagation_variant,
+                "t4_routing": False,
+                "patient_identifiers": "pseudonymous-only-per-episode",
+            },
+        )
+        cohort, runtime, binding_hash, optimizer_name = _build_cohort_model(
+            config=config,
+            propagation_variant=propagation_variant,
+            wandb_mode=resolved_wandb,
+            logger=logger,
+            global_checkpoint=global_checkpoint,
+        )
+        cohort.start_wandb()
+        if resolved_wandb != "disabled" and logger.mode == "disabled":
+            raise RuntimeError(
+                f"W&B mode {resolved_wandb!r} was requested but no active W&B run was created: "
+                f"{logger.fallback_reason or 'the optional client is unavailable'}"
+            )
+    except ImportError as error:
+        if resolved_wandb != "disabled":
+            raise RuntimeError("W&B client is unavailable for the requested enabled product run") from error
+        cohort, runtime, binding_hash, optimizer_name = _build_cohort_model(
+            config=config,
+            propagation_variant=propagation_variant,
+            wandb_mode=resolved_wandb,
+            logger=None,
+            global_checkpoint=global_checkpoint,
+        )
+
+    if global_checkpoint.exists():
+        restored_step = _load_cohort_checkpoint(
+            global_checkpoint,
+            cohort=cohort,
+            model_binding_hash=binding_hash,
+            cohort_hash=cohort_hash,
+            split_hash=split_hash,
+        )
+    else:
+        restored_step = 0
+    history = state["training_history"]
+    if len(history) != restored_step or restored_step > planned_updates:
+        raise ValueError("global checkpoint cursor does not agree with resumable cohort training history")
+    if int(state.get("global_step", restored_step)) != restored_step:
+        raise ValueError("run state global_step does not agree with the global checkpoint")
+
+    counts = cohort.module_counts
+    print(
+        f"[experiment] name={product['experiment_name']} stage=full propagation=p1 "
+        f"epochs={epochs} max_global_steps={max_global_steps} "
+        f"parameters={counts['parameters']} trainable_parameters={counts['trainable_parameters']} "
+        "encoder_forward_flops_2flop_per_mac=reported-from-first-legal-episode "
+        "profiled_supported_operator_flops=diagnostic-only",
+        flush=True,
+    )
+    print(f"[experiment] parameter_counts_by_module={json.dumps(counts['by_module'], sort_keys=True)}", flush=True)
+    state.update({
+        "status": "running",
+        "stage": resolved_stage,
+        "config_hash": config_hash,
+        "cohort_hash": cohort_hash,
+        "split_hash": split_hash,
+        "wandb_mode": resolved_wandb,
+        "cuda": cuda,
+        "disk": disk,
+        "experiment_name": str(product["experiment_name"]),
+        "intended_branch": "feature/structure-constrained-brats-full-pipeline",
+        "optimizer": optimizer_name,
+        "model_binding_hash": binding_hash,
+        "global_model_checkpoint": str(global_checkpoint),
+        "global_step": restored_step,
+        "epochs": epochs,
+        "max_global_steps": max_global_steps,
+        "training_schedule_length": len(flattened),
+        "planned_updates": planned_updates,
+        "model_parameter_counts": counts,
+        "t4_routing": False,
+    })
+    _atomic_json(state_path, state)
+    if logger is not None:
+        logger.log({
+            "model/parameter_count": int(counts["parameters"]),
+            "model/trainable_parameter_count": int(counts["trainable_parameters"]),
+            "run/seed": int(config["training"]["seed"]),
+            "run/planned_updates": planned_updates,
+        }, step=restored_step)
+
+    diagnostic_profile = bool(dict(config["training"].get("diagnostics", {})).get("profile_supported_operator_flops", False))
+    try:
+        for schedule_index in range(restored_step, planned_updates):
+            epoch_index, ordinal, item = flattened[schedule_index]
+            pseudonym = "patient-" + hashlib.sha256(f"smagm-brats21-patient-v1:{item}".encode()).hexdigest()[:16]
+            try:
+                result = _run_one_patient(
+                    config=config,
+                    patient_id=item,
+                    run_root=output_dir,
+                    propagation_variant=propagation_variant,
+                    steps=1,
+                    wandb_mode="disabled",
+                    evaluation_path=_resolve_config_path(Path(config["product_path"]).parent, str(product["evaluation_config"])),
+                    seed=int(config["training"]["seed"]) + epoch_index * 1_000_000 + ordinal,
+                    split_name=training_split,
+                    cohort_model=cohort,
+                    cohort_episode_only=True,
+                    profile_supported_operator_flops_enabled=diagnostic_profile,
+                )
+            except Exception as error:
+                failure = {
+                    "phase": "training_episode",
+                    "global_step_before_failure": cohort.global_step,
+                    "epoch_index": epoch_index,
+                    "patient_pseudonym": pseudonym,
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                }
+                state["failures"].append(failure)
+                state["status"] = "failed"
+                _atomic_json(state_path, state)
+                raise
+            report = result["report"]
+            if not isinstance(report, dict) or int(report["global_step"]) != schedule_index + 1:
+                raise RuntimeError("cohort episode did not advance the expected monotonic global step")
+            history.append({
+                "global_step": int(report["global_step"]),
+                "epoch_index": epoch_index,
+                "episode_ordinal": ordinal,
+                "patient_pseudonym": pseudonym,
+                "episode_report": str(result["episode_report"]),
+                "loss": float(report["loss"]),
+                "receipt_hash": str(report["receipt_hash"]),
+                "target_payload_not_in_history": True,
+            })
+            checkpoint_hash = _save_cohort_checkpoint(
+                global_checkpoint,
+                cohort=cohort,
+                model_binding_hash=binding_hash,
+                cohort_hash=cohort_hash,
+                split_hash=split_hash,
+            )
+            state["global_step"] = cohort.global_step
+            state["global_checkpoint_sha256"] = checkpoint_hash
+            state["last_training_episode"] = history[-1]
+            _atomic_json(state_path, state)
+            if logger is not None:
+                training_metrics: dict[str, int | float] = {
+                    "training/loss": float(report["loss"]),
+                    "training/supported_fraction": float(report["supported_fraction"]),
+                    "training/unsupported_fraction": float(report["unsupported_fraction"]),
+                    "training/learning_rate": _optimizer_learning_rate_for_product(cohort.optimizer),
+                    "representation/anchor_count": int(report["anchor_count"]),
+                    "representation/structural_gaussian_count": int(report["structural_gaussian_count"]),
+                    "representation/volumetric_gaussian_count": int(report["volumetric_gaussian_count"]),
+                    "propagation/proposal_count": int(report["propagation_proposal_count"]),
+                    "propagation/accepted_count": int(report["propagation_child_count"]),
+                    "propagation/rejected_budget": int(report["propagation_rejected_budget"]),
+                    "propagation/rejected_duplicate": int(report["propagation_rejected_duplicate"]),
+                    "runtime/full_step_host_enqueue_time_ms": float(report.get("full_step_host_enqueue_time_ms", report["full_step_wall_time_ms"])),
+                    "runtime/pixel_gaussian_candidate_pairs": int(report["pixel_gaussian_candidate_pairs"]),
+                }
+                full_step_wall_time_ms = report.get("full_step_wall_time_ms")
+                if isinstance(full_step_wall_time_ms, (int, float)) and math.isfinite(float(full_step_wall_time_ms)):
+                    training_metrics["runtime/full_step_wall_time_ms"] = float(full_step_wall_time_ms)
+                encoder_flops = report.get("encoder_forward_flops_2flop_per_mac")
+                if isinstance(encoder_flops, (int, float)) and math.isfinite(float(encoder_flops)):
+                    training_metrics["compute/encoder_forward_flops_2flop_per_mac"] = float(encoder_flops)
+                profiled_flops = report.get("profiled_supported_operator_flops")
+                if isinstance(profiled_flops, (int, float)) and math.isfinite(float(profiled_flops)):
+                    training_metrics["compute/profiled_supported_operator_flops"] = float(profiled_flops)
+                logger.log(training_metrics, step=cohort.global_step)
+            if schedule_index == restored_step:
+                state["first_episode_diagnostics"] = {
+                    name: report.get(name)
+                    for name in (
+                        "encoder_forward_flops_2flop_per_mac",
+                        "encoder_forward_flops_scope",
+                        "encoder_forward_flops_input_shapes",
+                        "encoder_forward_flops_by_shape",
+                        "encoder_forward_flops_measurement",
+                        "profiled_supported_operator_flops",
+                        "profiler_scope",
+                        "profiler_operator_coverage",
+                        "full_step_wall_time_ms",
+                        "full_step_host_enqueue_time_ms",
+                        "encoder_wall_time_ms",
+                        "anchor_build_wall_time_ms",
+                        "field_query_wall_time_ms",
+                        "propagation_wall_time_ms",
+                        "renderer_wall_time_ms",
+                        "loss_wall_time_ms",
+                        "backward_wall_time_ms",
+                        "optimizer_wall_time_ms",
+                        "pixel_gaussian_candidate_pairs",
+                    )
+                }
+                _atomic_json(state_path, state)
+                measured_wall = report.get("full_step_wall_time_ms")
+                wall_text = (
+                    f"{float(measured_wall):.3f}"
+                    if isinstance(measured_wall, (int, float)) and math.isfinite(float(measured_wall))
+                    else "not_measured"
+                )
+                print(
+                    "[experiment] first_episode "
+                    f"encoder_forward_flops_2flop_per_mac={report['encoder_forward_flops_2flop_per_mac']} "
+                    f"profiled_supported_operator_flops={report.get('profiled_supported_operator_flops')} "
+                    f"full_step_wall_time_ms={wall_text}",
+                    flush=True,
+                )
+
+        if validation_enabled:
+            evaluation_path = _resolve_config_path(Path(config["product_path"]).parent, str(product["evaluation_config"]))
+            for index, item in enumerate(validation_patients):
+                pseudonym = "patient-" + hashlib.sha256(f"smagm-brats21-patient-v1:{item}".encode()).hexdigest()[:16]
+                completion_key = f"{validation_split}:{pseudonym}"
+                if completion_key in state["completed"]:
+                    continue
+                try:
+                    result = cohort.validation(lambda item=item, index=index: _run_one_patient(
+                        config=config,
+                        patient_id=item,
+                        run_root=output_dir,
+                        propagation_variant=propagation_variant,
+                        steps=validation_steps,
+                        wandb_mode="disabled",
+                        evaluation_path=evaluation_path,
+                        seed=int(config["training"]["seed"]) + 10_000_000 + index,
+                        split_name=validation_split,
+                        validation_only=True,
+                        cohort_model=cohort,
+                        external_logger=logger,
+                    ))
+                except Exception as error:
+                    state["failures"].append({
+                        "phase": "validation",
+                        "patient_pseudonym": pseudonym,
+                        "error_type": type(error).__name__,
+                        "error": str(error),
+                    })
+                    state["status"] = "failed"
+                    _atomic_json(state_path, state)
+                    raise
+                state["completed"][completion_key] = result
+                _atomic_json(state_path, state)
+                if logger is not None and isinstance(result.get("report"), dict):
+                    report = result["report"]
+                    r4 = report.get(f"e2_r4_{propagation_variant}")
+                    if isinstance(r4, dict):
+                        logger.log({
+                            "validation/r4_loss": float(r4["loss"]),
+                            "validation/r4_supported_fraction": float(r4["supported_fraction"]),
+                            "validation/r4_unsupported_fraction": float(r4["unsupported_fraction"]),
+                        }, step=cohort.global_step)
+
+        metrics_report = _write_product_metric_reports(
+            state=state,
+            output_dir=output_dir,
+            output_paths=output_paths,
+            propagation_variant=propagation_variant,
+            aggregation_config=dict(config["evaluation"].get("aggregation", {})),
+        )
+        state["metrics"] = metrics_report
+        state["status"] = "complete"
+        state["finished_at_unix"] = time.time()
+        state["global_step"] = cohort.global_step
+        state["peak_cuda_memory"] = {
+            "peak_cuda_allocated_bytes": int(torch.cuda.max_memory_allocated()),
+            "peak_cuda_reserved_bytes": int(torch.cuda.max_memory_reserved()),
+        }
+        if logger is not None:
+            logger.update_summary({
+                "global_step": cohort.global_step,
+                "global_model_checkpoint": str(global_checkpoint.relative_to(output_dir)),
+                "global_checkpoint_sha256": state.get("global_checkpoint_sha256"),
+                "metrics": metrics_report,
+                "t4_routing": False,
+                "scientific_pass_recorded": False,
+            })
+            state["wandb"] = logger.finish(status="finished").to_dict()
+            logger_finished = True
+        else:
+            state["wandb"] = {"mode": "unavailable", "run_id": None, "url": None}
+        _atomic_json(state_path, state)
+        _atomic_json(output_dir / str(output_paths["completion_marker"]), {
+            "schema": "smagm-brats21-cohort-complete-v2",
+            "config_hash": config_hash,
+            "training_patient_count": len(patients),
+            "validation_patient_count": len(validation_patients),
+            "global_step": cohort.global_step,
+            "global_model_checkpoint": str(global_checkpoint),
+            "global_checkpoint_sha256": state.get("global_checkpoint_sha256"),
+            "scientific_pass_recorded": False,
+            "t4_routing": False,
+        })
+        return state
+    except Exception as error:
+        if logger is not None and not logger_finished:
+            logger.finish(status="failed", failure_reason=f"{type(error).__name__}: {error}")
+        raise
+
+
+def _git_commit_or_unknown() -> str:
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=_ROOT, check=True, capture_output=True, text=True
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
+def _git_dirty() -> bool:
+    try:
+        return bool(subprocess.run(
+            ["git", "status", "--porcelain=v1"], cwd=_ROOT, check=True, capture_output=True, text=True
+        ).stdout.strip())
+    except (OSError, subprocess.CalledProcessError):
+        return True
+
+
+def _optimizer_learning_rate_for_product(optimizer: Any) -> float:
+    if hasattr(optimizer, "param_groups"):
+        groups = getattr(optimizer, "param_groups")
+        if isinstance(groups, list) and groups and isinstance(groups[0], dict):
+            return float(groups[0]["lr"])
+    if hasattr(optimizer, "learning_rate"):
+        return float(getattr(optimizer, "learning_rate"))
+    raise ValueError("cohort optimizer does not expose a learning rate")
 
 
 def main() -> None:

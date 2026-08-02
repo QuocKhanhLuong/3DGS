@@ -8,6 +8,12 @@ from .episode import (
     build_context_only_episode_step,
     build_legal_episode_step,
 )
+from .anchor_evidence import (
+    AnchorEvidenceProjector,
+    AnchorEvidenceProjectorConfig,
+    AnchorEvidenceProjectorReport,
+    ProjectedAnchorEvidence,
+)
 from .metrics import gradient_norm, parameter_count
 from .objective import T1CObjectiveConfig, T1CObjectiveResult, compose_t1c_objective, resolve_objective
 from .provenance import RunProvenance, canonical_hash, capture_run_provenance, module_state_hash
@@ -20,11 +26,15 @@ from .representations import ContextImageEvidence, RepresentationEpisodeResult, 
 __all__ = [
     "ContextEvidence",
     "ContextOnlyEpisodeStep",
+    "AnchorEvidenceProjector",
+    "AnchorEvidenceProjectorConfig",
+    "AnchorEvidenceProjectorReport",
     "LegalEpisodeConfig",
     "LegalEpisodeStep",
     "MatchedExperimentIdentity",
     "MatchedVariantSchedule",
     "RunProvenance",
+    "ProjectedAnchorEvidence",
     "StageConfig",
     "TrainingSchedule",
     "T1CTrainer",

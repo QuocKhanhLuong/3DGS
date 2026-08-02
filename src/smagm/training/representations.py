@@ -28,6 +28,7 @@ from ..losses.reconstruction import ReconstructionLossResult, reconstruction_los
 from ..memory import PropagationConfig, PropagationTransaction, SeedMemoryConfig
 from ..renderer import RenderResult
 from ..state import PatientState
+from .anchor_evidence import AnchorEvidenceProjector
 from .episode import LegalEpisodeConfig, build_legal_episode_step
 from .static import build_static_episode_step
 
@@ -90,6 +91,7 @@ class RepresentationEpisodeResult:
     preprocessing_record_hash: str | None = None
     primitive_count: int | None = None
     propagation_transactions: tuple[PropagationTransaction, ...] = ()
+    phase_timing_ms: dict[str, float | None] | None = None
 
 
 def _direct_context_baseline(
@@ -206,7 +208,8 @@ def build_representation_episode_step(
     patient_bounds_max_ras_mm: torch.Tensor | None = None,
     source_affine_ras_from_index: torch.Tensor | None = None,
     source_shape_xyz: tuple[int, int, int] | None = None,
-    gaussian_head_input_adapter: str = "anchor_evidence_prefix",
+    anchor_evidence_projector: AnchorEvidenceProjector | None = None,
+    gaussian_head_input_adapter: str = "anchor_evidence_projector",
 ) -> RepresentationEpisodeResult:
     """Run one receipt-gated episode while constructing only selected modules."""
 
@@ -217,7 +220,16 @@ def build_representation_episode_step(
     if len(assignment.target_ids) != 1:
         raise ValueError("the representation dispatcher supports exactly one target per episode")
     if plan.variant in (RepresentationVariant.INTERPOLATION, RepresentationVariant.FREE_GAUSSIAN):
-        if any(module is not None for module in (encoder, gaussian_head, local_field, global_field)):
+        if any(
+            module is not None
+            for module in (
+                encoder,
+                gaussian_head,
+                local_field,
+                global_field,
+                anchor_evidence_projector,
+            )
+        ):
             raise ValueError("R0/R2 reject encoder, Gaussian-head, anchor-field, and global-field modules")
         return _direct_context_baseline(
             ledger=ledger,
@@ -230,8 +242,8 @@ def build_representation_episode_step(
     if encoder is None or gaussian_head is None:
         raise ValueError("R1/R3/R4/R5 require the declared evidence encoder and common Gaussian head contract")
     if plan.variant is RepresentationVariant.FIXED_SUPPORT_GAUSSIAN:
-        if local_field is not None or global_field is not None:
-            raise ValueError("R1 removes anchor and field modules")
+        if local_field is not None or global_field is not None or anchor_evidence_projector is not None:
+            raise ValueError("R1 removes anchor, projector, and field modules")
         result = build_legal_episode_step(
             ledger=ledger,
             assignment=assignment,
@@ -282,6 +294,7 @@ def build_representation_episode_step(
         patient_bounds_max_ras_mm=patient_bounds_max_ras_mm,
         source_affine_ras_from_index=source_affine_ras_from_index,
         source_shape_xyz=source_shape_xyz,
+        anchor_evidence_projector=anchor_evidence_projector,
         gaussian_head_input_adapter=gaussian_head_input_adapter,
     )
     return RepresentationEpisodeResult(
@@ -299,6 +312,7 @@ def build_representation_episode_step(
         static.context_step.preprocessing.record_hash,
         static.patient_state.memory.primitive_count,
         static.propagation_transactions,
+        static.phase_timing_ms,
     )
 
 

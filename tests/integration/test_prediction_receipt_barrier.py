@@ -454,6 +454,6 @@ def test_prediction_digest_is_canonical_for_layout_and_unsupported_nans() -> Non
 
 def test_renderer_version_is_controlled_and_profile_aware() -> None:
     base = RenderConfig()
-    assert base.renderer_version.startswith("through-plane-profile-aware-gaussian-reference-renderer/v1:")
+    assert base.renderer_version.startswith("through-plane-profile-aware-gaussian-reference-renderer/v2:")
     assert base.renderer_version == RenderConfig().renderer_version
     assert base.renderer_version != RenderConfig(support_epsilon=1e-7).renderer_version

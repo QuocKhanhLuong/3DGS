@@ -440,8 +440,12 @@ def test_full_product_runtime_config_declares_dataset_evaluation_and_output_cont
     assert runtime["output_paths"]["aggregate_metrics"] == "aggregate_metrics.json"
     assert runtime["experiment_name"] == "brats21-structure-constrained-full-e2-r4-p1"
     assert config["product"]["disk_policy"] == "advisory"
-    assert config["product"]["validation"]["cadence"] == "post_training_patient_disjoint_sweep"
+    assert config["product"]["validation"]["cadence"] == "final"
     assert config["product"]["validation"]["selection_policy"] == "fixed_geometry_only_no_checkpoint_selection"
+    assert config["product"]["max_global_steps"] == 100
+    propagation = config["training"]["propagation"]
+    assert propagation["propagation_reserved_budget"] > 0
+    assert config["training"]["training"]["gaussian_head_input_adapter"] == "anchor_evidence_projector"
 
 
 def test_full_product_is_the_only_launch_mode() -> None:

@@ -244,6 +244,7 @@ def run(*, config_path: Path, steps: int, output_dir: Path, seed: int | None = N
                 field_maximum_neighbors=int(field_cfg_raw["maximum_neighbors"]),
                 registration_id=str(anchor_raw["registration_id"]),
                 bootstrap_config=bootstrap, seed_memory_config=seed_memory, propagation_config=propagation,
+                gaussian_head_input_adapter=str(training_raw.get("gaussian_head_input_adapter", "anchor_evidence_projector")),
             )
             result.loss.total.backward()
             encoder_grad = torch.sqrt(sum((parameter.grad.square().sum() for parameter in encoder.parameters() if parameter.grad is not None), torch.tensor(0.0)))

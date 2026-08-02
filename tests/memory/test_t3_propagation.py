@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from smagm.memory import (
     gaussian_memory_hash,
     initialize_seed_memory,
     propagate_memory,
+    validate_seed_and_reserve_budgets,
 )
 from smagm.renderer import render_plane
 from smagm.state import apply_memory_update, build_initial_patient_state, load_patient_state, save_patient_state
@@ -73,6 +75,42 @@ def _multi_modality_anchor(*, second_value: float) -> AnchorBatch:
     return AnchorBatch(
         base.patient_id, base.geometry, base.evidence, appearance, valid,
         base.observability, ("t1", "t2"), digest,
+    )
+
+
+def _rotated_anchors(anchors: AnchorBatch, rotation_ras: torch.Tensor) -> AnchorBatch:
+    """Apply one proper RAS rotation to all physical anchor-frame quantities."""
+
+    geometry = anchors.geometry
+    rotated_geometry = AnchorGeometryBatch(
+        geometry.anchor_ids,
+        anchors.centers_ras_mm @ rotation_ras.T,
+        rotation_ras.unsqueeze(0) @ anchors.frame_axes_ras,
+        geometry.frame_validity,
+        geometry.support_scales_mm,
+        geometry.geometry_confidence,
+        geometry.disagreement,
+        geometry.contributing_observation_ids,
+        geometry.contributing_plane_hashes,
+        geometry.provenance_hashes,
+    )
+    digest = anchor_evidence_hash(
+        patient_id=anchors.patient_id,
+        geometry=rotated_geometry,
+        evidence=anchors.evidence,
+        appearance=anchors.appearance,
+        appearance_valid=anchors.appearance_valid,
+        observability=anchors.observability,
+    )
+    return AnchorBatch(
+        anchors.patient_id,
+        rotated_geometry,
+        anchors.evidence,
+        anchors.appearance,
+        anchors.appearance_valid,
+        anchors.observability,
+        anchors.modality_ids,
+        digest,
     )
 
 
@@ -231,7 +269,171 @@ def test_p1_enforces_per_anchor_children_across_rounds_and_patient_budget() -> N
     assert propagated.primitive_count <= 3
     assert sum(parent is not None for parent in propagated.structural.parent_primitive_ids) <= 1
     assert sum(parent is not None for parent in propagated.volumetric.parent_primitive_ids) <= 1
-    assert any(item.rejected_duplicate_or_budget > 0 for item in transactions)
+    assert any(item.rejected_budget > 0 for item in transactions)
+    assert all(not hasattr(item, "rejected_duplicate_or_budget") for item in transactions)
+
+
+def test_p1_reports_exhaustive_separate_proposal_rejection_counters() -> None:
+    anchors = _anchors()
+    memory = initialize_seed_memory(anchors)
+    propagated, transactions = propagate_memory(
+        memory,
+        anchors,
+        config=PropagationConfig(
+            rounds=1,
+            children_per_parent_per_round=3,
+            maximum_children_per_anchor=8,
+            maximum_structural_primitives=8,
+            maximum_volumetric_primitives=8,
+        ),
+        bounds_min_ras_mm=torch.tensor([-5.0] * 3),
+        bounds_max_ras_mm=torch.tensor([5.0] * 3),
+    )
+    transaction = transactions[0]
+    assert propagated.primitive_count == memory.primitive_count + transaction.accepted_count
+    assert transaction.proposal_count == 6
+    assert transaction.accepted_count == len(transaction.accepted_primitive_ids)
+    assert transaction.rejected_duplicate == 1
+    assert transaction.rejected_budget == 0
+    assert transaction.proposal_count == transaction.accepted_count + sum((
+        transaction.rejected_out_of_bounds,
+        transaction.rejected_unsupported,
+        transaction.rejected_duplicate,
+        transaction.rejected_budget,
+        transaction.rejected_uncertainty,
+        transaction.rejected_invalid,
+        transaction.rejected_no_meaningful_gain,
+    ))
+    assert not hasattr(transaction, "rejected_duplicate_or_budget")
+
+
+def test_p1_preflights_seed_capacities_without_changing_p0() -> None:
+    anchors = _anchors()
+    memory = initialize_seed_memory(anchors)
+    at_capacity, transactions = propagate_memory(
+        memory,
+        anchors,
+        config=PropagationConfig(
+            rounds=1,
+            maximum_structural_primitives=1,
+            maximum_volumetric_primitives=1,
+            maximum_patient_primitives=2,
+        ),
+        bounds_min_ras_mm=torch.tensor([-5.0] * 3),
+        bounds_max_ras_mm=torch.tensor([5.0] * 3),
+    )
+    transaction = transactions[0]
+    assert at_capacity.memory_hash == memory.memory_hash
+    assert transaction.proposal_count == 2
+    assert transaction.accepted_count == 0
+    assert transaction.rejected_budget == 2
+
+    two_anchor_memory = initialize_seed_memory(_two_anchors())
+    with pytest.raises(ValueError, match="structural seed primitive count"):
+        propagate_memory(
+            two_anchor_memory,
+            _two_anchors(),
+            config=PropagationConfig(maximum_structural_primitives=1, maximum_volumetric_primitives=2),
+            bounds_min_ras_mm=torch.tensor([-5.0] * 3),
+            bounds_max_ras_mm=torch.tensor([5.0] * 3),
+        )
+    p0_result, p0_transactions = propagate_memory(
+        two_anchor_memory,
+        _two_anchors(),
+        config=PropagationConfig(variant="p0", maximum_structural_primitives=1, maximum_volumetric_primitives=1),
+        bounds_min_ras_mm=torch.tensor([-5.0] * 3),
+        bounds_max_ras_mm=torch.tensor([5.0] * 3),
+    )
+    assert p0_result is two_anchor_memory
+    assert p0_transactions == ()
+
+
+def test_p1_uses_declared_structural_tangent_or_no_propagation_policy() -> None:
+    anchors = _anchors()
+    memory = initialize_seed_memory(anchors)
+    tangent_config = PropagationConfig(
+        rounds=1,
+        children_per_parent_per_round=4,
+        structural_propagation_policy="tangent_only",
+        maximum_structural_primitives=8,
+        maximum_volumetric_primitives=8,
+    )
+    tangent, _ = propagate_memory(
+        memory,
+        anchors,
+        config=tangent_config,
+        bounds_min_ras_mm=torch.tensor([-5.0] * 3),
+        bounds_max_ras_mm=torch.tensor([5.0] * 3),
+    )
+    structural_children = tangent.structural.gaussians.centers_ras_mm[memory.structural.gaussians.count :]
+    volumetric_children = tangent.volumetric.gaussians.centers_ras_mm[memory.volumetric.gaussians.count :]
+    structural_local = structural_children - memory.structural.gaussians.centers_ras_mm[0]
+    volumetric_local = volumetric_children - memory.volumetric.gaussians.centers_ras_mm[0]
+    assert structural_children.shape[0] == 4
+    assert torch.allclose(structural_local[:, 2], torch.zeros(4))
+    assert torch.allclose(structural_local[:, :2].abs().sum(dim=1), torch.ones(4))
+    assert volumetric_children.shape[0] == 2
+    assert torch.allclose(volumetric_local[:, :2], torch.zeros(2, 2))
+    assert torch.allclose(volumetric_local[:, 2].abs(), torch.ones(2))
+
+    no_structural, transactions = propagate_memory(
+        memory,
+        anchors,
+        config=PropagationConfig(
+            rounds=1,
+            children_per_parent_per_round=2,
+            structural_propagation_policy="none",
+            maximum_structural_primitives=8,
+            maximum_volumetric_primitives=8,
+        ),
+        bounds_min_ras_mm=torch.tensor([-5.0] * 3),
+        bounds_max_ras_mm=torch.tensor([5.0] * 3),
+    )
+    assert no_structural.structural.gaussians.count == memory.structural.gaussians.count
+    assert no_structural.volumetric.gaussians.count == memory.volumetric.gaussians.count + 2
+    assert transactions[0].proposal_count == 2
+
+
+def test_p1_is_equivariant_under_proper_ras_rotation() -> None:
+    anchors = _anchors()
+    rotation = torch.tensor([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]])
+    rotated_anchors = _rotated_anchors(anchors, rotation)
+    config = PropagationConfig(
+        rounds=1,
+        children_per_parent_per_round=2,
+        maximum_structural_primitives=8,
+        maximum_volumetric_primitives=8,
+    )
+    kwargs = dict(
+        config=config,
+        bounds_min_ras_mm=torch.tensor([-5.0] * 3),
+        bounds_max_ras_mm=torch.tensor([5.0] * 3),
+    )
+    propagated, transactions = propagate_memory(initialize_seed_memory(anchors), anchors, **kwargs)
+    rotated, rotated_transactions = propagate_memory(
+        initialize_seed_memory(rotated_anchors),
+        rotated_anchors,
+        **kwargs,
+    )
+    assert torch.allclose(
+        rotated.structural.gaussians.centers_ras_mm,
+        propagated.structural.gaussians.centers_ras_mm @ rotation.T,
+        atol=1e-6,
+    )
+    assert torch.allclose(
+        rotated.volumetric.gaussians.centers_ras_mm,
+        propagated.volumetric.gaussians.centers_ras_mm @ rotation.T,
+        atol=1e-6,
+    )
+    assert transactions[0].proposal_count == rotated_transactions[0].proposal_count
+    assert transactions[0].accepted_count == rotated_transactions[0].accepted_count
+
+
+def test_p1_api_excludes_target_and_segmentation_inputs() -> None:
+    parameters = inspect.signature(propagate_memory).parameters.values()
+    forbidden = ("target", "audit", "segment", "label", "image", "payload")
+    assert not any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters)
+    assert not any(any(token in parameter.name.lower() for token in forbidden) for parameter in parameters)
 
 
 def test_p1_rejects_unsupported_and_uncertain_frontier_without_children() -> None:
@@ -322,3 +524,39 @@ def test_cross_modality_gate_uses_appearance_agreement_not_slot_presence() -> No
     )
     assert rejected.memory_hash == disagreeing_memory.memory_hash
     assert rejected_transactions[0].rejected_no_meaningful_gain > 0
+
+
+def test_explicit_seed_and_reserve_budget_leaves_declared_p1_capacity() -> None:
+    anchors = _anchors()
+    memory = initialize_seed_memory(anchors)
+    config = PropagationConfig(
+        variant="p1",
+        rounds=1,
+        maximum_total_anchors=1,
+        structural_seed_budget=1,
+        volumetric_seed_budget=1,
+        propagation_reserved_budget=2,
+        maximum_structural_primitives=2,
+        maximum_volumetric_primitives=2,
+        maximum_patient_primitives=4,
+    )
+    validate_seed_and_reserve_budgets(memory, anchors, config=config)
+    assert memory.primitive_count + config.propagation_reserved_budget == config.maximum_patient_primitives
+
+    with pytest.raises(ValueError, match="propagation_reserved_budget"):
+        PropagationConfig(variant="p1", rounds=1, propagation_reserved_budget=0)
+    with pytest.raises(ValueError, match="seed primitive count plus propagation_reserved_budget"):
+        validate_seed_and_reserve_budgets(
+            memory,
+            anchors,
+            config=PropagationConfig(
+                variant="p1",
+                rounds=1,
+                structural_seed_budget=1,
+                volumetric_seed_budget=1,
+                propagation_reserved_budget=3,
+                maximum_structural_primitives=2,
+                maximum_volumetric_primitives=2,
+                maximum_patient_primitives=4,
+            ),
+        )

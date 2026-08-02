@@ -12,10 +12,13 @@ volumetric Gaussian banks remain
 distinct; propagation uses local anchor frames rather than global z. T4
 routing is absent and blocked. The implementation is an active candidate with
 T2/T3/T5 Human Gates pending; inventory and full-run W&B results are execution
-evidence only. Training patients carry global encoder,
-Gaussian-head, StructuralField, and optimizer state through an atomic,
-target-free cohort checkpoint; patient Gaussian state remains separate and
-validation never promotes updates.
+evidence only. Training patients carry one global encoder, Gaussian-head,
+StructuralField, typed anchor-evidence projector, optimizer, scheduler,
+float32 AMP policy, W&B run, and checkpoint manager through an atomic,
+target-free cohort checkpoint; patient Gaussian state remains ephemeral and
+validation never promotes updates. Encoder FLOP telemetry is explicitly
+forward Conv2d/Linear work under two FLOPs per MAC; optional profiler FLOPs are
+only a partial operator subtotal.
 
 ## 1. Purpose
 
@@ -345,6 +348,8 @@ Owns the pure through-plane profile-aware Gaussian reference operator:
 - normalized additive intensity composition;
 - support and unsupported diagnostics;
 - deterministic differentiable rendering;
+- one-time per-Gaussian preparation plus conservative plane/tile culling;
+- a public brute-force equivalence reference and candidate-pair telemetry;
 - no ledger mutation and no target reveal.
 
 This file remains a low-level numeric reference. It must not become the owner of
@@ -380,6 +385,7 @@ Lower-level packages must not import `training/`.
 | `trainer.py` | IMPLEMENTED/PARTIAL | Optimizer, declared precision, gradient accumulation/clipping, safe checkpoints, and bounded step reporting. Long-running validation/early-stopping orchestration remains experiment policy. |
 | `schedule.py` | IMPLEMENTED/PARTIAL | Typed structural warm-up, joint reconstruction, and reconstruction-dominant refinement policy without phase-shaped model APIs. |
 | `sampling.py` | IMPLEMENTED | Deterministic matched episode/target schedules across E0/E1/E2. |
+| `anchor_evidence.py` | IMPLEMENTED CANDIDATE | Typed learned full-anchor-evidence projector for the Gaussian head; prefix truncation is an explicit ablation only. |
 | `metrics.py` | IMPLEMENTED/PARTIAL | Gradient health and parameter diagnostics; full experiment-level collapse, latency, and memory aggregation remains pending real experiments. |
 | `provenance.py` | IMPLEMENTED/PARTIAL | Commit, dirty state, config, manifest, split, assignment, seed, environment, checkpoint, and artifact bindings. New source/config text is hashed directly; generated and binary payload paths are recorded without rereading them. Full immutable experiment-directory serialization remains pending real runs. |
 
