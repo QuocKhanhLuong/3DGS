@@ -62,6 +62,20 @@ def _two_anchors() -> AnchorBatch:
     return AnchorBatch("p", geometry, evidence, appearance, valid, observability, ("t1",), digest)
 
 
+def _multi_modality_anchor(*, second_value: float) -> AnchorBatch:
+    base = _anchors()
+    appearance = torch.tensor([[0.2, second_value]])
+    valid = torch.ones_like(appearance, dtype=torch.bool)
+    digest = anchor_evidence_hash(
+        patient_id=base.patient_id, geometry=base.geometry, evidence=base.evidence,
+        appearance=appearance, appearance_valid=valid, observability=base.observability,
+    )
+    return AnchorBatch(
+        base.patient_id, base.geometry, base.evidence, appearance, valid,
+        base.observability, ("t1", "t2"), digest,
+    )
+
+
 def _bank_with_log_amplitudes(bank: GaussianMemoryBank, values: torch.Tensor) -> GaussianMemoryBank:
     gaussian = bank.gaussians
     restored = restore_gauge_fixed_gaussian_batch(
@@ -196,3 +210,115 @@ def test_propagated_bank_renders_and_backpropagates_to_patient_geometry() -> Non
     result.intensity[~result.unsupported_mask].sum().backward()
     assert anchors.centers_ras_mm.grad is not None
     assert torch.isfinite(anchors.centers_ras_mm.grad).all()
+
+
+def test_p1_enforces_per_anchor_children_across_rounds_and_patient_budget() -> None:
+    anchors = _anchors(); memory = initialize_seed_memory(anchors)
+    propagated, transactions = propagate_memory(
+        memory,
+        anchors,
+        config=PropagationConfig(
+            rounds=3,
+            children_per_parent_per_round=2,
+            maximum_children_per_anchor=1,
+            maximum_patient_primitives=3,
+            maximum_structural_primitives=8,
+            maximum_volumetric_primitives=8,
+        ),
+        bounds_min_ras_mm=torch.tensor([-5.0] * 3),
+        bounds_max_ras_mm=torch.tensor([5.0] * 3),
+    )
+    assert propagated.primitive_count <= 3
+    assert sum(parent is not None for parent in propagated.structural.parent_primitive_ids) <= 1
+    assert sum(parent is not None for parent in propagated.volumetric.parent_primitive_ids) <= 1
+    assert any(item.rejected_duplicate_or_budget > 0 for item in transactions)
+
+
+def test_p1_rejects_unsupported_and_uncertain_frontier_without_children() -> None:
+    anchors = _anchors(); memory = initialize_seed_memory(anchors)
+    unsupported, unsupported_transactions = propagate_memory(
+        memory,
+        anchors,
+        config=PropagationConfig(rounds=1),
+        bounds_min_ras_mm=torch.tensor([-5.0] * 3),
+        bounds_max_ras_mm=torch.tensor([5.0] * 3),
+        supported_anchor_mask=torch.zeros(1, dtype=torch.bool),
+    )
+    assert unsupported.memory_hash == memory.memory_hash
+    assert unsupported_transactions[0].rejected_no_meaningful_gain > 0
+    uncertain, uncertain_transactions = propagate_memory(
+        memory,
+        anchors,
+        config=PropagationConfig(rounds=1, maximum_uncertainty=0.05),
+        bounds_min_ras_mm=torch.tensor([-5.0] * 3),
+        bounds_max_ras_mm=torch.tensor([5.0] * 3),
+    )
+    assert uncertain.memory_hash == memory.memory_hash
+    assert uncertain_transactions[0].rejected_uncertainty > 0
+
+
+def test_p1_uses_oriented_source_volume_containment_for_oblique_affines() -> None:
+    cosine = 2.0 ** -0.5
+    centers = torch.tensor([[0.0, 2.0 ** 0.5, 1.0]])
+    frame = torch.tensor([[[cosine, -cosine, 0.0], [cosine, cosine, 0.0], [0.0, 0.0, 1.0]]])
+    geometry = AnchorGeometryBatch(
+        ("oblique-anchor",), centers, frame, torch.ones(1, 3, dtype=torch.bool),
+        torch.full((1, 3), 4.0), torch.ones(1, 1), torch.zeros(1, 1),
+        (("observation",),), ((_digest("oblique-plane"),),), (_digest("oblique-anchor"),),
+    )
+    evidence = torch.ones(1, 4)
+    appearance = torch.ones(1, 1)
+    appearance_valid = torch.ones(1, 1, dtype=torch.bool)
+    observability = torch.tensor([[1.0, 0.8, 0.1]])
+    digest = anchor_evidence_hash(
+        patient_id="p", geometry=geometry, evidence=evidence, appearance=appearance,
+        appearance_valid=appearance_valid, observability=observability,
+    )
+    anchors = AnchorBatch("p", geometry, evidence, appearance, appearance_valid, observability, ("t1",), digest)
+    memory = initialize_seed_memory(anchors)
+    affine = torch.tensor([
+        [cosine, -cosine, 0.0, 0.0],
+        [cosine, cosine, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ])
+    propagated, transactions = propagate_memory(
+        memory,
+        anchors,
+        config=PropagationConfig(rounds=1, step_mm=1.5),
+        bounds_min_ras_mm=torch.tensor([-2.0 ** 0.5, 0.0, 0.0]),
+        bounds_max_ras_mm=torch.tensor([2.0 ** 0.5, 2.0 * 2.0 ** 0.5, 2.0]),
+        source_affine_ras_from_index=affine,
+        source_shape_xyz=(3, 3, 3),
+    )
+    inverse = torch.linalg.inv(affine)
+    centers_h = torch.cat((propagated.structural.gaussians.centers_ras_mm, torch.ones(propagated.structural.gaussians.count, 1)), dim=1)
+    indices = (centers_h @ inverse.T)[:, :3]
+    assert bool((indices >= -1e-5).all())
+    assert bool((indices <= 2.0 + 1e-5).all())
+    assert propagated.primitive_count == memory.primitive_count
+    assert transactions[0].rejected_out_of_bounds > 0
+
+
+def test_cross_modality_gate_uses_appearance_agreement_not_slot_presence() -> None:
+    agreeing = _multi_modality_anchor(second_value=0.2)
+    agreeing_memory = initialize_seed_memory(agreeing)
+    propagated, transactions = propagate_memory(
+        agreeing_memory,
+        agreeing,
+        config=PropagationConfig(rounds=1, minimum_cross_modality_agreement=0.9),
+        bounds_min_ras_mm=torch.tensor([-5.0] * 3), bounds_max_ras_mm=torch.tensor([5.0] * 3),
+    )
+    assert propagated.primitive_count > agreeing_memory.primitive_count
+    assert transactions[0].rejected_no_meaningful_gain == 0
+
+    disagreeing = _multi_modality_anchor(second_value=0.9)
+    disagreeing_memory = initialize_seed_memory(disagreeing)
+    rejected, rejected_transactions = propagate_memory(
+        disagreeing_memory,
+        disagreeing,
+        config=PropagationConfig(rounds=1, minimum_cross_modality_agreement=0.9),
+        bounds_min_ras_mm=torch.tensor([-5.0] * 3), bounds_max_ras_mm=torch.tensor([5.0] * 3),
+    )
+    assert rejected.memory_hash == disagreeing_memory.memory_hash
+    assert rejected_transactions[0].rejected_no_meaningful_gain > 0

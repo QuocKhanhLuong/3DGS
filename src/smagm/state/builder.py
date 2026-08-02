@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 
 from ..anchors import AnchorBatch
+from ..gaussians import GaussianBatch
 from ..memory import SeedMemoryConfig, initialize_seed_memory
 from .patient import PatientState, patient_state_version
 
@@ -15,8 +16,14 @@ def build_initial_patient_state(
     anchors: AnchorBatch, field_config_hash: str, field_model_hash: str,
     memory_config: SeedMemoryConfig | None = None,
     field_values: torch.Tensor | None = None,
+    volumetric_gaussians: GaussianBatch | None = None,
 ) -> PatientState:
-    memory = initialize_seed_memory(anchors, config=memory_config, field_values=field_values)
+    memory = initialize_seed_memory(
+        anchors,
+        config=memory_config,
+        field_values=field_values,
+        volumetric_gaussians=volumetric_gaussians,
+    )
     payload = dict(
         patient_id=patient_id, manifest_hash=manifest_hash, config_hash=config_hash,
         context_observation_ids=context_observation_ids, cache_key_hashes=cache_key_hashes,

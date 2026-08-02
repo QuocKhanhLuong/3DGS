@@ -4,6 +4,14 @@ Date: 2026-08-01
 Status: **IMPLEMENTATION AUTHORIZED — SCIENTIFIC VALIDATION DEFERRED**  
 Depends on: executable static patient state from T1-C, T2, and T3
 
+Product alignment (2026-08-02): BraTS21 execution is a simulated
+sparse-acquisition task. The renderer queries physical target planes/full grids
+and serializes intensity, support, unsupportedness, and uncertainty. The
+isolated evaluator uses serialized prediction packages and immutable target
+packages, explicit normalized data range, global SSIM policy, and no
+zero-filling of unsupported pixels. ROI and uncertainty analyses remain
+evaluator-only and are skipped when their semantics are unavailable.
+
 ## 1. Purpose
 
 T5 converts a complete static patient-specific Gaussian state into reproducible

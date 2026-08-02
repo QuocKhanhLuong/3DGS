@@ -11,6 +11,7 @@ import tempfile
 from ..evaluation import (
     AuditTarget,
     FreezeRecord,
+    ReconstructionMetricConfig,
     evaluate_audit_targets,
     open_serialized_audit_targets,
     open_serialized_predictions,
@@ -69,19 +70,27 @@ def run(
             for volume in predictions.volumes
         )
         diagnostic_only = True
-    elif target_mode == "immutable_tensor_file":
-        if plan["sealed_audit"] is not True or plan["diagnostic_only"] is not False:
-            raise ValueError("immutable audit targets require a sealed non-diagnostic plan")
+    elif target_mode in ("immutable_tensor_file", "external_tensor_file"):
+        if target_mode == "external_tensor_file":
+            if plan["sealed_audit"] is not False or plan["diagnostic_only"] is not True:
+                raise ValueError("external tensor targets must remain explicitly diagnostic and unsealed")
+        else:
+            if plan["sealed_audit"] is not True or plan["diagnostic_only"] is not False:
+                raise ValueError("immutable audit targets require a sealed non-diagnostic plan")
         target_file = plan.get("target_file")
         if not isinstance(target_file, str) or not target_file:
-            raise ValueError("immutable_tensor_file mode requires target_file in the frozen plan")
+            raise ValueError(f"{target_mode} mode requires target_file in the frozen plan")
         target_path = Path(target_file)
         if not target_path.is_absolute():
             target_path = plan_path.parent / target_path
+        expected_target_hash = plan.get("target_file_sha256")
+        if expected_target_hash is not None:
+            if not isinstance(expected_target_hash, str) or hashlib.sha256(target_path.read_bytes()).hexdigest() != expected_target_hash:
+                raise ValueError("evaluation target file does not match the frozen target_file_sha256")
         targets = open_serialized_audit_targets(target_path)
-        diagnostic_only = False
+        diagnostic_only = target_mode == "external_tensor_file"
     else:
-        raise ValueError("evaluation plan must explicitly select self_prediction_smoke or immutable_tensor_file")
+        raise ValueError("evaluation plan must explicitly select self_prediction_smoke, external_tensor_file, or immutable_tensor_file")
     freeze = FreezeRecord(
         predictions.package.package_hash,
         predictions.package.config_hash,
@@ -89,7 +98,15 @@ def run(
         True,
         True,
     )
-    metrics = evaluate_audit_targets(predictions, targets, freeze_record=freeze)
+    raw_metric_config = plan.get("metric_config", {})
+    if not isinstance(raw_metric_config, dict):
+        raise ValueError("metric_config must be an object when present")
+    metric_config = ReconstructionMetricConfig(
+        data_range=None if raw_metric_config.get("data_range") is None else float(raw_metric_config["data_range"]),
+        ssim_window_policy=str(raw_metric_config.get("ssim_window_policy", "global")),
+        edge_threshold=float(raw_metric_config.get("edge_threshold", 0.05)),
+    )
+    metrics = evaluate_audit_targets(predictions, targets, freeze_record=freeze, metric_config=metric_config)
     output_dir.mkdir(parents=True, exist_ok=False)
     report = {
         "package_hash": predictions.package.package_hash,

@@ -2,6 +2,21 @@
 
 ## 1. Scope
 
+### Active 2026-08-02 interpretation
+
+The canonical implementation is the physical-volume method in
+[`STRUCTURE_CONSTRAINED_INTERIOR_PROPAGATION.md`](STRUCTURE_CONSTRAINED_INTERIOR_PROPAGATION.md).
+BraTS21 dense volumes construct a simulated sparse-acquisition task; they are
+not exposed as dense training targets. The maintained first protocol is five
+aligned physical axial positions per modality, one target at the exact physical
+midpoint of a legal context gap (with fractional source-index interpolation at
+receipt), context-only robust normalization, local-frame anchors, a shared
+anchor-local field, dual structural/volumetric banks, and bounded P0/P1
+propagation. Any
+older static description that implies global-z interior motion, one anchor per
+pixel, or recursive unbounded children is historical and superseded. T4
+remains a separate blocked extension.
+
 This document defines the complete research flow for reconstructing registered
 multi-sequence MRI volumes from permanently sparse observations. The static
 support-anchor representation is the primary method; active acquisition is an

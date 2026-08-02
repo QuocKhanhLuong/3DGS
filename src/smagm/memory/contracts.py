@@ -84,19 +84,33 @@ def _hash_tensor(digest: "hashlib._Hash", value: torch.Tensor) -> None:
 
 
 def gaussian_memory_hash(structural: GaussianMemoryBank, volumetric: GaussianMemoryBank, modality_ids: tuple[str, ...]) -> str:
-    digest = hashlib.sha256(json.dumps({
+    banks = (structural, volumetric)
+    metadata = {
         "modality_ids": modality_ids,
-        "structural_ids": structural.gaussians.primitive_id,
-        "structural_parents": structural.parent_primitive_ids,
-        "volumetric_ids": volumetric.gaussians.primitive_id,
-        "volumetric_parents": volumetric.parent_primitive_ids,
-    }, sort_keys=True, separators=(",", ":")).encode())
+        "banks": [
+            {
+                "kind": bank.kind.value,
+                "anchor_ids": bank.anchor_ids,
+                "parent_primitive_ids": bank.parent_primitive_ids,
+                "provenance_hashes": bank.provenance_hashes,
+                "primitive_kind": bank.gaussians.primitive_kind,
+                "primitive_id": bank.gaussians.primitive_id,
+                "covariance_epsilon": bank.gaussians.covariance_epsilon,
+                "gauge_policy": bank.gaussians.gauge_policy.value,
+                "gauge_config_hash": bank.gaussians.gauge_config_hash,
+            }
+            for bank in banks
+        ],
+    }
+    digest = hashlib.sha256(json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode())
     for bank in (structural, volumetric):
         for tensor in (
             bank.gaussians.centers_ras_mm, bank.gaussians.covariance_factor,
             bank.gaussians.log_support_amplitude, bank.gaussians.appearance,
-            bank.gaussians.appearance_valid.to(torch.uint8), bank.observability.uncertainty,
-            bank.observability.propagation_depth,
+            bank.gaussians.appearance_valid.to(torch.uint8),
+            bank.observability.evidence_count, bank.observability.coverage,
+            bank.observability.disagreement, bank.observability.uncertainty,
+            bank.observability.propagation_depth, bank.observability.update_round,
         ):
             _hash_tensor(digest, tensor)
     return digest.hexdigest()

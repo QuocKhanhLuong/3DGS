@@ -1,0 +1,50 @@
+{
+  "schema": "smagm-brats21-data-v2",
+  "dataset_root": "data/preprocessed/BraTS21",
+  "cohort_hash": "5cdad558031dcf34dd4cbc2a705fa383945d08c018a9f8d80238170d447c4fdf",
+  "inventory_report": "experiments/reports/brats21_dataset_inventory.json",
+  "split_hash": "ec99c3d1beff77e1b733300db01f381f3010e73dee648d7d19df4f334c26c8cc",
+  "modalities": ["t1", "t1ce", "t2", "flair"],
+  "segmentation_modality": "seg",
+  "require_segmentation": false,
+  "source_orientation": "axial",
+  "inplane_stride_vu": [4, 4],
+  "sampling": {
+    "orientation": "axial",
+    "context_planes_per_modality": 5,
+    "quantile_min": 0.15,
+    "quantile_max": 0.85,
+    "modality_alignment": "aligned",
+    "train_jitter_fraction": 0.15,
+    "validation_jitter_fraction": 0.0,
+    "target_policy": "gap_midpoint",
+    "targets_per_episode": 1
+  },
+  "normalization": {
+    "policy": "robust_percentile",
+    "epsilon": 1e-6,
+    "minimum_context_scale": 1e-3,
+    "degenerate_scale_policy": "identity_scale",
+    "frozen_population_statistics": {},
+    "unseen_modality_policy": "reject",
+    "lower_percentile": 1.0,
+    "upper_percentile": 99.0,
+    "output_min": 0.0,
+    "output_max": 1.0
+  },
+  "split_seed": 20260802,
+  "split_fractions": {
+    "train": 0.8,
+    "validation": 0.1,
+    "t1_lesion_validation": 0.05,
+    "t5_final_audit": 0.05
+  },
+  "source_root_not_copied": true,
+  "segmentation_training_access": "forbidden",
+  "target_access": "evaluator-only-after-prediction-receipt",
+  "claims": {
+    "task": "simulated sparse-acquisition reconstruction",
+    "clinical_validity": false,
+    "scanner_acceleration": false
+  }
+}

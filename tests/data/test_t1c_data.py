@@ -165,6 +165,35 @@ def test_input_content_hash_binds_payload_mask_and_preprocessing_record() -> Non
     assert apply_preprocessing(first_record, first).input_content_hash != apply_preprocessing(identity_record, first).input_content_hash
 
 
+def test_robust_percentile_preprocessing_is_context_only_and_modality_specific() -> None:
+    t1_context = decode_observation(_array_payload(np.arange(42, dtype=np.float32).reshape(7, 6)), _metadata("t1-context", "T1"))
+    flair_context = decode_observation(_array_payload((100.0 + np.arange(42)).astype(np.float32).reshape(7, 6)), _metadata("flair-context", "FLAIR"))
+    target = decode_observation(_array_payload(np.full((7, 6), 500.0, dtype=np.float32)), _metadata("target", "T1"))
+    config = NormalizationConfig(policy="robust_percentile", lower_percentile=10.0, upper_percentile=90.0)
+    record = fit_preprocessing((t1_context, flair_context), context_ids=("t1-context", "flair-context"), config=config)
+    repeated = fit_preprocessing((t1_context, flair_context), context_ids=("t1-context", "flair-context"), config=config)
+    assert record.record_hash == repeated.record_hash
+    assert {item.modality_id for item in record.modality_parameters} == {"T1", "FLAIR"}
+    normalized_target = apply_preprocessing(record, target)
+    assert torch.isfinite(normalized_target.image).all()
+    target_changed = decode_observation(_array_payload(np.full((7, 6), -500.0, dtype=np.float32)), _metadata("target-2", "T1"))
+    assert record.record_hash == fit_preprocessing((t1_context, flair_context), context_ids=("t1-context", "flair-context"), config=config).record_hash
+    assert not torch.equal(normalized_target.image, apply_preprocessing(record, target_changed).image)
+
+
+def test_robust_percentile_degenerate_range_uses_declared_fallback() -> None:
+    context = decode_observation(_payload(4.0), _metadata("robust-context", "T2"))
+    record = fit_preprocessing(
+        (context,),
+        context_ids=("robust-context",),
+        config=NormalizationConfig(policy="robust_percentile", degenerate_scale_policy="identity_scale"),
+    )
+    parameter = record.modality_parameters[0]
+    assert parameter.fallback_reason == "CONTEXT_SCALE_BELOW_MINIMUM"
+    assert parameter.clip_low is None and parameter.clip_high is None
+    assert torch.allclose(apply_preprocessing(record, context).image, torch.zeros_like(context.image))
+
+
 def test_episode_schedule_is_deterministic_metadata_only_and_patient_bound() -> None:
     entries = tuple(_metadata(f"obs-{index}") for index in range(4))
     digests = {entry.observation_id: hashlib.sha256(entry.observation_id.encode()).hexdigest() for entry in entries}

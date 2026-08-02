@@ -1,6 +1,18 @@
 # Consolidated Static Pipeline Evaluation Plan — 2026-08-01
 
-Status: **PLANNED FINAL EVALUATION — NOT YET EXECUTED**
+Status: **PLANNED FINAL EVALUATION — PRODUCT EXECUTION BLOCKED BY CUDA ENVIRONMENT**
+
+## Product protocol clarification — 2026-08-02
+
+The first real-data execution is BraTS21 as a simulated sparse-acquisition
+task: five aligned physical axial context positions per modality, one
+strictly-interior gap target, context-only robust percentile normalization,
+E2/R4 with the retained P1 bounded propagation path for the full run. P0
+remains a code-level regression switch, not a product launch stage. Metrics use an explicit normalized data
+range and global SSIM policy. The inventory is complete, but no CUDA full-run,
+checkpoint/resume, or online W&B result may be reported until the host
+exposes a working NVIDIA driver. This document remains an evaluation plan, not
+a scientific pass.
 
 ## 1. Objective
 

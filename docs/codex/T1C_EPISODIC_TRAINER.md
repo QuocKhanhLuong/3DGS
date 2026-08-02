@@ -66,5 +66,7 @@ artifact-digest manifest. These artifacts document software execution only.
 Synthetic execution and finite gradients do not establish reconstruction
 quality, real-MRI training success, lesion fidelity, clinical validity,
 calibrated uncertainty, or superiority of E2. T1-F, T1-R, and T1-M evidence
-remain absent. T2 and later phases remain blocked. No anchor, field,
-propagation, topology, routing, or full-volume package is introduced.
+remain absent. T2, bounded-static T3 P0/P1, and T5 are now separately
+authorized active implementation candidates under the fast-track decision. T4
+routing remains absent and blocked. This T1-C handoff still owns only the
+legal context-to-target episode path; it does not make a scientific claim.

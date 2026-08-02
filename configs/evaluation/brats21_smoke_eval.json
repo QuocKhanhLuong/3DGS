@@ -1,0 +1,12 @@
+{
+  "schema": "smagm-full-static-evaluation-v1",
+  "claim_scope": "serialized-prediction diagnostic only",
+  "metrics": ["mae", "rmse", "nmse", "psnr", "ssim", "ncc", "gradient_mae", "frequency_error"],
+  "patient_level": true,
+  "calibration": false,
+  "sealed_audit": false,
+  "diagnostic_only": true,
+  "target_mode": "external_tensor_file",
+  "unsupported_policy": "report_explicitly",
+  "target_file": "evaluator_targets.pt"
+}

@@ -82,7 +82,10 @@ def consolidate_candidates(
     reference = candidates.centers_ras_mm
     return AnchorGeometryBatch(
         anchor_ids=tuple(anchor_ids), centers_ras_mm=torch.stack(centers), frame_axes_ras=torch.stack(frames),
-        frame_validity=torch.tensor([[True, True, False]] * count, dtype=torch.bool, device=reference.device),
+        # Every anchor owns a complete local (t1, t2, n) frame.  The source
+        # plane basis is the deterministic fallback until a supported
+        # structural gradient refines the normal; it is not a global-z frame.
+        frame_validity=torch.tensor([[True, True, True]] * count, dtype=torch.bool, device=reference.device),
         support_scales_mm=torch.full((count, 3), config.support_scale_mm, dtype=reference.dtype, device=reference.device),
         geometry_confidence=torch.stack(confidences), disagreement=torch.stack(disagreements),
         contributing_observation_ids=tuple(observation_groups), contributing_plane_hashes=tuple(plane_groups),

@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 import secrets
 import threading
 from types import MappingProxyType
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 import numpy as np
 import torch
@@ -409,6 +409,7 @@ class EpisodeLedger:
         root: str | Path,
         *,
         split_registry: PatientSplitRegistry,
+        deferred_target_readers: Mapping[str, Callable[[], bytes]] | None = None,
     ) -> None:
         if not isinstance(manifest, SparseAvailabilityManifest) or not isinstance(assignment, EpisodeAssignment) or not isinstance(split_registry, PatientSplitRegistry):
             raise TypeError("manifest, assignment, and split_registry must use T0.5 contracts")
@@ -428,6 +429,12 @@ class EpisodeLedger:
                 )
         self._manifest, self._assignment, self._split_registry = manifest, assignment, split_registry
         self._provider = _AvailabilityFileProvider(root, manifest)
+        readers = dict(deferred_target_readers or {})
+        if set(readers) - set(assignment.target_ids):
+            raise ValueError("deferred target readers may bind only assigned target observations")
+        if any(not callable(reader) for reader in readers.values()):
+            raise TypeError("deferred target readers must be callable")
+        self._deferred_target_readers = readers
         self._nonce, self._lock = object(), threading.RLock()
         self._ledger_id = _hash({
             "assignment_hash": assignment.assignment_hash,
@@ -593,7 +600,15 @@ class EpisodeLedger:
         return sequence
 
     def _open(self, entry: AvailabilityObservationMeta, role: str, event: str) -> bytes:
-        payload = self._provider.read_bytes(entry)
+        if role == "TARGET" and entry.observation_id in self._deferred_target_readers:
+            # Product data preparation may bind a target reference without
+            # materializing target intensity.  The callback is reachable only
+            # from reveal_target, after prediction receipt registration.
+            payload = self._deferred_target_readers[entry.observation_id]()
+            if not isinstance(payload, bytes):
+                raise TypeError("deferred target reader must return bytes")
+        else:
+            payload = self._provider.read_bytes(entry)
         self._record_event(event, entry.observation_id, {})
         self._audit.append(EpisodeOpenedFileAudit(len(self._audit), entry.observation_id, entry.relative_path, role, hashlib.sha256(payload).hexdigest()))
         return payload

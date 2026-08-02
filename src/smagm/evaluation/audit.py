@@ -13,9 +13,9 @@ from pathlib import Path
 
 import torch
 
-from ..contracts.coordinates import TargetGrid
+from ..contracts.coordinates import PhysicalPlane, SourceAffineTransform, SourceConvention, TargetGrid
 from ..contracts.outputs import ReconstructionPackage, VolumeReconstruction
-from .metrics import ReconstructionMetrics, compute_reconstruction_metrics
+from .metrics import ReconstructionMetricConfig, ReconstructionMetrics, compute_reconstruction_metrics
 
 
 @dataclass(frozen=True)
@@ -42,6 +42,23 @@ class AuditTarget:
     grid: TargetGrid
     values: torch.Tensor
     valid_mask: torch.Tensor
+    context_planes: tuple[PhysicalPlane, ...] = ()
+    context_gap_mm: float | None = None
+    local_observability: torch.Tensor | None = None
+    segmentation: torch.Tensor | None = None
+
+
+def _plane(raw: dict[str, object]) -> PhysicalPlane:
+    source = raw.get("source_transform")
+    transform = None
+    if source is not None:
+        source = dict(source)
+        transform = SourceAffineTransform(source["plane_index_to_source_mm"], SourceConvention(source["convention"]))
+    return PhysicalPlane(
+        raw["pixel_center_origin_ras_mm"], raw["axis_u_ras"], raw["axis_v_ras"], raw["spacing_uv_mm"],
+        raw["thickness_mm"], raw["shape_hw"], raw["signed_normal_ras"], source_transform=transform,
+        observation_id=raw.get("observation_id"),
+    )
 
 
 def _hash_file(path: Path) -> str:
@@ -103,6 +120,11 @@ def open_serialized_audit_targets(path: str | Path) -> tuple[AuditTarget, ...]:
     raw_targets = payload.get("targets")
     if not isinstance(raw_targets, list) or not raw_targets:
         raise ValueError("audit target file must contain a non-empty target list")
+    shared_segmentation = payload.get("segmentation")
+    if shared_segmentation is not None and not isinstance(shared_segmentation, torch.Tensor):
+        raise ValueError("serialized evaluator segmentation must be a tensor label map")
+    if shared_segmentation is not None and payload.get("segmentation_evaluator_only") is not True:
+        raise PermissionError("serialized segmentation must be explicitly evaluator-only")
     targets = []
     for raw in raw_targets:
         grid_raw = raw["grid"]
@@ -113,11 +135,21 @@ def open_serialized_audit_targets(path: str | Path) -> tuple[AuditTarget, ...]:
         targets.append(AuditTarget(
             str(raw["patient_id"]), str(raw["split_hash"]), str(raw["modality_id"]),
             grid, raw["values"], raw["valid_mask"],
+            tuple(_plane(item) for item in raw.get("context_planes", ())),
+            None if raw.get("context_gap_mm") is None else float(raw["context_gap_mm"]),
+            raw.get("local_observability"),
+            raw.get("segmentation", shared_segmentation),
         ))
     return tuple(targets)
 
 
-def evaluate_audit_targets(predictions: SerializedPredictions, targets: tuple[AuditTarget, ...], *, freeze_record: FreezeRecord) -> tuple[ReconstructionMetrics, ...]:
+def evaluate_audit_targets(
+    predictions: SerializedPredictions,
+    targets: tuple[AuditTarget, ...],
+    *,
+    freeze_record: FreezeRecord,
+    metric_config: ReconstructionMetricConfig | None = None,
+) -> tuple[ReconstructionMetrics, ...]:
     if not isinstance(predictions, SerializedPredictions):
         raise TypeError("audit evaluation accepts serialized predictions only")
     if not freeze_record.architecture_frozen or not freeze_record.analysis_plan_frozen:
@@ -133,5 +165,16 @@ def evaluate_audit_targets(predictions: SerializedPredictions, targets: tuple[Au
         prediction = by_modality[target.modality_id]
         if target.grid.canonical_json() != prediction.grid.canonical_json():
             raise ValueError("audit target physical grid does not match prediction")
-        results.append(compute_reconstruction_metrics(prediction, target.values, target.valid_mask))
+        results.append(
+            compute_reconstruction_metrics(
+                prediction,
+                target.values,
+                target.valid_mask,
+                metric_config=metric_config,
+                context_planes=target.context_planes,
+                context_gap_mm=target.context_gap_mm,
+                local_observability=target.local_observability,
+                segmentation=target.segmentation,
+            )
+        )
     return tuple(results)

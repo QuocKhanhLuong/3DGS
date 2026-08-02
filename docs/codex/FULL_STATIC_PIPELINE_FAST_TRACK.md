@@ -1,13 +1,21 @@
 # Codex Handoff — Full Static Pipeline Fast-Track
 
 Status: **ACTIVE IMPLEMENTATION CANDIDATE — DEVELOPMENT AUTOMATED EVIDENCE PASS**
-Target branch: `feature/full-static-reconstruction-pipeline`  
+Target branch: `feature/structure-constrained-brats-full-pipeline`
 Excluded phase: T4 routing
 
 Current branch evidence: S0–S10 have executable CPU contracts and the synthetic
 train → reconstruct → evaluate → audit chain passes. S11 real-data evaluation,
 all Human Gate decisions, and merge acceptance remain pending. The evaluator's
 default self-target smoke plan is explicitly unsealed and diagnostic-only.
+
+The 2026-08-02 product-readiness tranche adds a metadata-only BraTS21
+inventory, geometry-only aligned/staggered sampling, context-only robust
+normalization, and GPU-only streamed product control. The active launch policy
+has one full-training entry point, `scripts/train_brats21_full.sh`; the former
+separate smoke/pilot launches and readiness gate are retired. CUDA,
+checkpoint interruption/resume, and W&B online evidence remain
+environment-dependent and must not be fabricated when unavailable.
 
 ## Mission
 
@@ -87,7 +95,10 @@ Never:
 - hide unsupported pixels or voxels;
 - implement T4 candidate scoring, utility, acquisition, or routing;
 - mark any scientific Human Gate as passed;
-- claim that synthetic smoke proves reconstruction quality.
+- claim that synthetic smoke proves reconstruction quality;
+- treat a patient-disjoint validation sweep as training: it must load the
+  final global checkpoint and perform inference/evaluation without backward or
+  optimizer updates.
 
 ## Required variants
 

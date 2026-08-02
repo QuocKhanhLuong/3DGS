@@ -46,8 +46,11 @@ def _atomic_json(payload: object, path: Path) -> None:
 
 def _write_nifti_float32(volume: VolumeReconstruction, path: Path) -> None:
     """Write a minimal single-file NIfTI-1 image without a new dependency."""
-    data = volume.intensity.detach().cpu().to(torch.float32).contiguous().numpy()
-    d, h, w = data.shape
+    # Volume tensors are [d, h, w], while the NIfTI header and byte order are
+    # [x, y, z] == [w, h, d].  Preserve the grid affine columns in that same
+    # source order instead of serializing a transposed tensor under the header.
+    data = volume.intensity.detach().cpu().to(torch.float32).permute(2, 1, 0).contiguous().numpy()
+    w, h, d = data.shape
     affine = np.asarray(volume.grid.index_to_ras_mm, dtype=np.float32)
     spacing = [float(np.linalg.norm(affine[:3, index])) for index in range(3)]
     header = bytearray(348)

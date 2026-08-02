@@ -1,5 +1,11 @@
 # Phase 2 — Initial Anchor Bootstrap
 
+Current status (2026-08-02): implemented software candidate under the
+authorized static fast-track; Human Gate pending. The active BraTS21 protocol
+uses geometry-only aligned physical axial context positions, RAS-mm local
+frames, and a shared anchor-local StructuralField. Dense source values and
+segmentation do not participate in bootstrap decisions.
+
 ## 1. Objective
 
 Create the first patient-specific structural scaffold and Gaussian memory from a small set of legally selected MRI slices.

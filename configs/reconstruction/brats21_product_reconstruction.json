@@ -1,0 +1,27 @@
+{
+  "schema": "smagm-brats21-product-reconstruction-v1",
+  "query_semantics": "physical-volume-profile-aware-gaussian-renderer",
+  "renderer": {
+    "support_epsilon": 1e-10,
+    "minimum_supported_psf_mass": 0.999,
+    "pixel_chunk_size": 1024,
+    "gaussian_chunk_size": 128,
+    "profile": "delta"
+  },
+  "runner": {
+    "target_grid": "held_out_target_plane",
+    "depth_chunk_size": 1,
+    "full_grid_depth_chunk_size": 1,
+    "write_nifti": false
+  },
+  "chunking": {
+    "query_pixel_chunk_size": 1024,
+    "query_gaussian_chunk_size": 128,
+    "full_grid_depth_chunk_size": 1
+  },
+  "support_policy": {
+    "unsupported_intensity": "NaN",
+    "unsupported_is_not_zero_filled": true,
+    "support_mask_serialized": true
+  }
+}

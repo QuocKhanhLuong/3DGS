@@ -18,6 +18,10 @@
 - One receipt-gated R0–R5/P0–P1 dispatcher, exact ablation module inventories,
   full E2+R4+P1 synthetic train/reconstruct/evaluate/audit CLI chain, resolved
   configs, checkpoint-to-state binding, and synthetic accounting diagnostics.
+- R4 now carries the context-derived shared StructuralField through the live
+  volumetric seed center path as a bounded local-normal offset, preserving
+  non-zero field autograd on sparse interior target planes while keeping the
+  Gaussian head responsible for volumetric appearance and covariance.
 
 T4 routing, adaptive acquisition, residual assimilation, and learned topology
 remain absent. All T1-C/T2/T3/T5 Human Gates remain pending; these additions do

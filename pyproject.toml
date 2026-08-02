@@ -14,6 +14,12 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=7.4,<10"]
+real-data = [
+  "nibabel>=5.2,<6",
+  "scipy>=1.11,<2",
+  "scikit-image>=0.22,<1",
+]
+wandb = ["wandb>=0.17,<1"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
