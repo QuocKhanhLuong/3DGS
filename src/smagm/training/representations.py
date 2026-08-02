@@ -210,9 +210,12 @@ def build_representation_episode_step(
     source_shape_xyz: tuple[int, int, int] | None = None,
     anchor_evidence_projector: AnchorEvidenceProjector | None = None,
     gaussian_head_input_adapter: str = "anchor_evidence_projector",
+    collect_phase_timing: bool = False,
 ) -> RepresentationEpisodeResult:
     """Run one receipt-gated episode while constructing only selected modules."""
 
+    if not isinstance(collect_phase_timing, bool):
+        raise TypeError("collect_phase_timing must be bool")
     config = config or LegalEpisodeConfig()
     plan = resolve_representation_plan(representation_variant, propagation_variant=propagation_variant)
     if target_id not in assignment.target_ids:
@@ -296,6 +299,7 @@ def build_representation_episode_step(
         source_shape_xyz=source_shape_xyz,
         anchor_evidence_projector=anchor_evidence_projector,
         gaussian_head_input_adapter=gaussian_head_input_adapter,
+        collect_phase_timing=collect_phase_timing,
     )
     return RepresentationEpisodeResult(
         plan,

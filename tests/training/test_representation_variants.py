@@ -313,6 +313,45 @@ def test_anchor_representation_dispatcher_preserves_p1_transactions(tmp_path) ->
     assert transaction.child_memory_hash == result.patient_state.memory.memory_hash
 
 
+def test_anchor_representation_dispatcher_forwards_phase_timing_to_static_r4(tmp_path) -> None:
+    """Keep the product R4 diagnostic keyword on the dispatcher contract."""
+
+    torch.manual_seed(31)
+    ledger, assignment = _episode(tmp_path, "r4-phase-timing")
+    encoder, head = _encoder_head()
+    projector = _anchor_projector(head)
+    field = SharedStructuralField(StructuralFieldConfig(evidence_dim=52, hidden_width=16))
+    result = build_representation_episode_step(
+        ledger=ledger,
+        assignment=assignment,
+        target_id="target",
+        representation_variant="r4",
+        propagation_variant="p0",
+        config=_config(),
+        encoder=encoder,
+        gaussian_head=head,
+        anchor_evidence_projector=projector,
+        local_field=field,
+        bootstrap_config=AnchorBootstrapConfig(candidate=CandidateSelectionConfig(maximum_candidates=4)),
+        propagation_config=PropagationConfig(variant="p0"),
+        collect_phase_timing=True,
+    )
+    assert result.phase_timing_ms is not None
+    expected = {
+        "encoder_wall_time_ms",
+        "anchor_build_wall_time_ms",
+        "field_query_wall_time_ms",
+        "propagation_wall_time_ms",
+        "renderer_wall_time_ms",
+        "loss_wall_time_ms",
+    }
+    assert expected <= result.phase_timing_ms.keys()
+    assert all(
+        isinstance(result.phase_timing_ms[name], float) and result.phase_timing_ms[name] >= 0.0
+        for name in expected
+    )
+
+
 def test_static_memory_channel_order_follows_explicit_mapping_not_modality_sort(tmp_path) -> None:
     torch.manual_seed(14)
     ledger, assignment = _multimodal_episode(tmp_path)
