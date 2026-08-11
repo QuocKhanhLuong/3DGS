@@ -2,32 +2,61 @@
   "schema_version": 1,
   "workspace_root": ".",
   "default_access": "deny",
-  "description": "Task-scoped navigation and edit policy for the point-guided MRI frontend.",
+  "description": "Default-deny task-scoped navigation and edit policy for the point-guided MRI frontend; PLAN Phases 1–5 are authorized, while Phase 6+ remains research-gated.",
   "tasks": {
     "frontend": {
-      "purpose": "Implement the locked semantic-prior, point-refinement, and sparse PoU forward path.",
+      "purpose": "Implement the current locked frontend and only authorized PLAN Phases 1–5: shared MedicalNet taps, detach/tap controls, the three-class contract, static base planes B, and diagnostic composition; never anchor A or reconstruction.",
       "entrypoints": [
         "src/smagm/features/point_guided/model.py",
         "src/smagm/features/point_guided/contracts.py",
-        "src/smagm/features/point_guided/config.py"
+        "src/smagm/features/point_guided/config.py",
+        "src/smagm/features/point_guided/medicalnet_resnet10.py",
+        "src/smagm/features/point_guided/semantic_prior.py",
+        "src/smagm/features/point_guided/triplane_projection.py"
       ],
       "read_paths": [
-        "src/smagm/features/point_guided/**",
-        "configs/model_config.py",
-        "src/smagm/contracts/coordinates.py",
-        "src/smagm/features/contracts.py",
-        "tests/features/point_guided/**",
+        "AGENTS.md",
+        "PLAN.md",
+        "CODEBASE.md",
         "CODEGRAPH.json",
-        "docs/architecture/POINT_GUIDED_FRONTEND.md"
+        "docs/architecture/POINT_GUIDED_FRONTEND.md",
+        "src/smagm/features/point_guided/__init__.py",
+        "src/smagm/features/point_guided/config.py",
+        "src/smagm/features/point_guided/contracts.py",
+        "src/smagm/features/point_guided/directional.py",
+        "src/smagm/features/point_guided/interfaces.py",
+        "src/smagm/features/point_guided/medicalnet_resnet10.py",
+        "src/smagm/features/point_guided/model.py",
+        "src/smagm/features/point_guided/offset_predictor.py",
+        "src/smagm/features/point_guided/points.py",
+        "src/smagm/features/point_guided/pou.py",
+        "src/smagm/features/point_guided/refinement.py",
+        "src/smagm/features/point_guided/sampling.py",
+        "src/smagm/features/point_guided/semantic_affinity.py",
+        "src/smagm/features/point_guided/semantic_prior.py",
+        "src/smagm/features/point_guided/spatial_affinity.py",
+        "src/smagm/features/point_guided/triplane_projection.py",
+        "tests/features/point_guided/test_affinity_pou.py",
+        "tests/features/point_guided/test_frontend_boundaries.py",
+        "tests/features/point_guided/test_frontend_forward.py",
+        "tests/features/point_guided/test_points_refinement.py",
+        "tests/features/point_guided/test_semantic_prior.py",
+        "tests/features/point_guided/test_triplane_projection.py"
       ],
       "write_paths": [
-        "src/smagm/features/point_guided/**",
-        "configs/model_config.py",
-        "tests/features/point_guided/**",
+        "PLAN.md",
         "docs/architecture/POINT_GUIDED_FRONTEND.md",
-        "CODEBASE.md",
-        "README.md",
-        "CHANGELOG.md"
+        "src/smagm/features/point_guided/config.py",
+        "src/smagm/features/point_guided/contracts.py",
+        "src/smagm/features/point_guided/medicalnet_resnet10.py",
+        "src/smagm/features/point_guided/model.py",
+        "src/smagm/features/point_guided/semantic_prior.py",
+        "src/smagm/features/point_guided/triplane_projection.py",
+        "tests/features/point_guided/test_frontend_boundaries.py",
+        "tests/features/point_guided/test_frontend_forward.py",
+        "tests/features/point_guided/test_points_refinement.py",
+        "tests/features/point_guided/test_semantic_prior.py",
+        "tests/features/point_guided/test_triplane_projection.py"
       ],
       "blocked_paths": [
         "src/smagm/anchors/**",
@@ -42,12 +71,14 @@
       ]
     },
     "medicalnet": {
-      "purpose": "Implement or audit the checkpoint-compatible MedicalNet ResNet10 semantic prior.",
+      "purpose": "Implement or audit the checkpoint-compatible MedicalNet ResNet10 semantic prior and the authorized Phase 1 intermediate-feature API only.",
       "entrypoints": [
         "src/smagm/features/point_guided/medicalnet_resnet10.py",
         "src/smagm/features/point_guided/semantic_prior.py"
       ],
       "read_paths": [
+        "AGENTS.md",
+        "PLAN.md",
         "src/smagm/features/point_guided/medicalnet_resnet10.py",
         "src/smagm/features/point_guided/semantic_prior.py",
         "src/smagm/features/point_guided/config.py",
@@ -96,20 +127,47 @@
       ]
     },
     "tests": {
-      "purpose": "Add small synthetic invariant and smoke tests for the locked frontend only.",
+      "purpose": "Add small synthetic invariant and smoke tests for the current frontend and only authorized PLAN Phases 1–5; never approve Phase 6+ research-gated behavior.",
       "entrypoints": [
-        "tests/features/point_guided/",
+        "tests/features/point_guided/test_semantic_prior.py",
+        "tests/features/point_guided/test_frontend_forward.py",
+        "tests/features/point_guided/test_triplane_projection.py",
         "tests/test_codegraph.py"
       ],
       "read_paths": [
-        "src/smagm/features/point_guided/**",
-        "src/smagm/contracts/coordinates.py",
-        "tests/features/point_guided/**",
+        "AGENTS.md",
+        "PLAN.md",
+        "CODEGRAPH.json",
+        "docs/architecture/POINT_GUIDED_FRONTEND.md",
+        "src/smagm/features/point_guided/config.py",
+        "src/smagm/features/point_guided/contracts.py",
+        "src/smagm/features/point_guided/directional.py",
+        "src/smagm/features/point_guided/medicalnet_resnet10.py",
+        "src/smagm/features/point_guided/model.py",
+        "src/smagm/features/point_guided/offset_predictor.py",
+        "src/smagm/features/point_guided/points.py",
+        "src/smagm/features/point_guided/pou.py",
+        "src/smagm/features/point_guided/refinement.py",
+        "src/smagm/features/point_guided/sampling.py",
+        "src/smagm/features/point_guided/semantic_affinity.py",
+        "src/smagm/features/point_guided/semantic_prior.py",
+        "src/smagm/features/point_guided/spatial_affinity.py",
+        "src/smagm/features/point_guided/triplane_projection.py",
+        "tests/features/point_guided/test_affinity_pou.py",
+        "tests/features/point_guided/test_frontend_boundaries.py",
+        "tests/features/point_guided/test_frontend_forward.py",
+        "tests/features/point_guided/test_points_refinement.py",
+        "tests/features/point_guided/test_semantic_prior.py",
+        "tests/features/point_guided/test_triplane_projection.py",
         "tests/test_codegraph.py",
-        "CODEGRAPH.json"
+        "src/smagm/contracts/coordinates.py"
       ],
       "write_paths": [
-        "tests/features/point_guided/**",
+        "tests/features/point_guided/test_frontend_boundaries.py",
+        "tests/features/point_guided/test_frontend_forward.py",
+        "tests/features/point_guided/test_points_refinement.py",
+        "tests/features/point_guided/test_semantic_prior.py",
+        "tests/features/point_guided/test_triplane_projection.py",
         "tests/test_codegraph.py"
       ],
       "blocked_paths": [
@@ -165,8 +223,28 @@
     },
     {
       "from": "src/smagm/features/point_guided/model.py",
-      "to": "src/smagm/features/point_guided/{semantic_prior,points,refinement,pou}.py",
-      "kind": "locked frontend composition"
+      "to": "src/smagm/features/point_guided/semantic_prior.py",
+      "kind": "semantic-prior composition"
+    },
+    {
+      "from": "src/smagm/features/point_guided/model.py",
+      "to": "src/smagm/features/point_guided/points.py",
+      "kind": "deterministic point composition"
+    },
+    {
+      "from": "src/smagm/features/point_guided/model.py",
+      "to": "src/smagm/features/point_guided/refinement.py",
+      "kind": "bounded refinement composition"
+    },
+    {
+      "from": "src/smagm/features/point_guided/model.py",
+      "to": "src/smagm/features/point_guided/pou.py",
+      "kind": "sparse PoU composition"
+    },
+    {
+      "from": "src/smagm/features/point_guided/model.py",
+      "to": "src/smagm/features/point_guided/triplane_projection.py",
+      "kind": "authorized Phase 5 base-plane composition only; not current implementation or anchor A"
     },
     {
       "from": "src/smagm/data/brats21.py",

@@ -4,9 +4,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Sequence
+from typing import TYPE_CHECKING, Final, Sequence
 
 import torch
+
+if TYPE_CHECKING:
+    from .triplane_projection import BaseTriPlanes
+
+
+COARSE_SEMANTIC_CLASS_NAMES: Final[tuple[str, str, str]] = (
+    "normal brain",
+    "edema",
+    "tumor-core candidate",
+)
+"""The ordered production coarse-semantic contract."""
+
+NUM_COARSE_SEMANTIC_CLASSES: Final[int] = len(COARSE_SEMANTIC_CLASS_NAMES)
 
 
 class PointGuidedGeometryError(ValueError):
@@ -271,21 +284,24 @@ class SparsePoU:
 class FrontendOutput:
     """Typed output of the fully implemented frontend-only forward path."""
 
-    s_coarse: torch.Tensor  # [B, K, D, H, W], soft probabilities
+    s_coarse: torch.Tensor  # [B, 3, D, H, W], soft probabilities
     initial_points_ras_mm: torch.Tensor  # [B, N, 3]
     refined_points_ras_mm: torch.Tensor  # [B, N, 3]
     displacement_ras_mm: torch.Tensor  # [B, N, 3]
-    point_semantic: torch.Tensor  # [B, N, K]
+    point_semantic: torch.Tensor  # [B, N, 3]
     sparse_pou: SparsePoU
     geometry: VolumeGeometry
+    base_planes: BaseTriPlanes
 
     def __post_init__(self) -> None:
         _float_tensor("s_coarse", self.s_coarse, 5)
         for name in ("initial_points_ras_mm", "refined_points_ras_mm", "displacement_ras_mm", "point_semantic"):
             _float_tensor(name, getattr(self, name), 3)
         batch, classes, depth, height, width = self.s_coarse.shape
-        if classes <= 1 or tuple(self.geometry.shape_dhw) != (depth, height, width):
-            raise ValueError("s_coarse and geometry must agree on [D, H, W] with K > 1")
+        if classes != NUM_COARSE_SEMANTIC_CLASSES:
+            raise ValueError("s_coarse must have exactly 3 production coarse semantic classes")
+        if tuple(self.geometry.shape_dhw) != (depth, height, width):
+            raise ValueError("s_coarse and geometry must agree on [D, H, W]")
         validate_probability_simplex("s_coarse", self.s_coarse, class_dimension=1)
         points = self.initial_points_ras_mm
         if points.shape != (batch, points.shape[1], 3) or self.refined_points_ras_mm.shape != points.shape or self.displacement_ras_mm.shape != points.shape:
@@ -302,6 +318,23 @@ class FrontendOutput:
             raise ValueError("displacement_ras_mm must be measured from initial_points_ras_mm")
         if bool((torch.linalg.vector_norm(self.displacement_ras_mm, dim=-1) > 2.0 + 1e-6).any()):
             raise ValueError("FrontendOutput displacement_ras_mm is locked to at most 2.0 mm from initial points")
+        # Import locally: config imports this module while the Phase 4
+        # projector imports config, so a top-level import would form a cycle.
+        from .triplane_projection import BaseTriPlanes
+
+        if not isinstance(self.base_planes, BaseTriPlanes):
+            raise TypeError("base_planes must be a BaseTriPlanes instance")
+        for name, plane in (
+            ("base_planes.xy", self.base_planes.xy),
+            ("base_planes.xz", self.base_planes.xz),
+            ("base_planes.yz", self.base_planes.yz),
+        ):
+            if plane.shape[0] != batch:
+                raise ValueError(f"{name} batch dimension must match s_coarse")
+            if plane.device != self.s_coarse.device:
+                raise ValueError(f"{name} device must match s_coarse")
+            if plane.dtype != self.s_coarse.dtype:
+                raise ValueError(f"{name} dtype must match s_coarse")
 
     @property
     def S_coarse(self) -> torch.Tensor:

@@ -6,14 +6,29 @@ Build the next research-locked stages of the point-guided MRI frontend continuou
 
 Codex execution contract:
 
-1. Read `PLAN.md` first.
+1. Resolve the smallest applicable codegraph scope first, then read `PLAN.md`
+   within that declared scope.
 2. Resolve actual HEAD before editing; never reset newer user changes.
-3. Execute every **UNBLOCKED** phase in order without asking for confirmation between phases.
+3. Execute only a phase explicitly assigned by the active task. `AUTHORIZED —
+   NOT IMPLEMENTED` grants scope but never triggers automatic progression.
 4. For each phase: inspect the smallest relevant codegraph scope, implement only the locked design, add focused tests, run verification, fix failures, then update the phase log in this file.
 5. Never invent a decision marked **OPEN / BLOCKED**.
-6. Stop only when all currently unblocked phases pass, the next phase is a research gate, or a failure cannot be fixed without changing a locked scientific contract.
+6. Stop at the active task's terminal condition, at a research gate, or when a
+   failure cannot be fixed without changing a locked scientific contract.
 7. Preserve fail-closed behavior: no fake T1ce, no silent random/pretrained fallback, no hidden reuse of legacy 3DGS modules.
 8. Do not implement trajectory/decoder/reconstruction until explicitly unlocked.
+
+### M0 authority reconciliation
+
+M0 policy explicitly authorized implementation Phases 1–5 in the sequence
+below: shared MedicalNet feature exposure, detach/tap controls, the exact
+three-class semantic contract, static feature-only base planes `Bxy/Bxz/Byz`,
+and their diagnostic frontend composition. Their completed implementation
+status is recorded in the phase log below. This authorization is bounded by
+`AGENTS.md` and `CODEGRAPH.json`; it never authorizes a second encoder, legacy
+reuse, target-derived conditioning, anchor `A`, cross-plane fusion, dynamic
+trajectory, decoder, reconstruction loss, or T1ce synthesis. Phases 6+ remain
+blocked by their corresponding research gates.
 
 Immediate target:
 
@@ -69,8 +84,8 @@ Plan authored against:
 ```text
 repository: QuocKhanhLuong/3DGS
 branch: main
-commit: 4ccffcef0d3df0b2734335c34223fc98eda900af
-message: Refactor code
+commit: d623d179e6626a54deefcf3f4c5a8d9e9f0a33c1
+message: docs: add phased point-guided spectral frontend plan
 ```
 
 Before implementation, compare current HEAD with this commit. If newer, inspect the diff, preserve compatible changes, and update this section.
@@ -376,7 +391,7 @@ No implementation beyond interfaces.
 
 ## Phase 0 — Rebase plan on actual HEAD
 
-**Status: UNBLOCKED**
+**Status: COMPLETE — policy/architecture reconciliation only; no model implementation.**
 
 ### /phase-goal
 
@@ -384,14 +399,14 @@ Work from actual latest code and never reimplement already merged frontend work.
 
 Tasks:
 
-- [ ] `git status --short`
-- [ ] `git rev-parse HEAD`
-- [ ] compare HEAD with `4ccffcef...`
-- [ ] inspect `CODEBASE.md`
-- [ ] inspect `CODEGRAPH.json`
-- [ ] run `python scripts/codegraph.py --task frontend`
-- [ ] inspect current point-guided public interfaces
-- [ ] update this plan source commit if needed
+- [x] `git status --short`
+- [x] `git rev-parse HEAD`
+- [x] compare HEAD with `4ccffcef...`
+- [x] inspect `CODEBASE.md`
+- [x] inspect `CODEGRAPH.json`
+- [x] run `python scripts/codegraph.py --task frontend`
+- [x] inspect current point-guided public interfaces
+- [x] update this plan source commit
 
 Verify:
 
@@ -399,13 +414,13 @@ Verify:
 git diff --check
 ```
 
-Proceed automatically to Phase 1.
+Stop after M0. Phase 1 requires an explicit active task.
 
 ---
 
 ## Phase 1 — Shared MedicalNet intermediate-feature API
 
-**Status: UNBLOCKED**
+**Status: COMPLETE**
 
 ### /phase-goal
 
@@ -413,15 +428,15 @@ Expose the pre-MaxPool spectral tap and Layer1 ablation tap without duplicating 
 
 Tasks:
 
-- [ ] expose `Conv1→BN→ReLU` pre-MaxPool feature
-- [ ] expose Layer1 feature for ablation
-- [ ] preserve `forward_features()` final-feature compatibility
-- [ ] do not run the stem twice
-- [ ] keep checkpoint state-dict keys unchanged
-- [ ] keep 3-channel stem adaptation unchanged
-- [ ] document tensor shapes
-- [ ] test that the prepool tap is truly before pooling
-- [ ] test that the existing final feature output is unchanged in eval mode
+- [x] expose `Conv1→BN→ReLU` pre-MaxPool feature
+- [x] expose Layer1 feature for ablation
+- [x] preserve `forward_features()` final-feature compatibility
+- [x] do not run the stem twice
+- [x] keep checkpoint state-dict keys unchanged
+- [x] keep 3-channel stem adaptation unchanged
+- [x] document tensor shapes
+- [x] test that the prepool tap is truly before pooling
+- [x] test that the existing final feature output is unchanged in eval mode
 
 Verify:
 
@@ -431,13 +446,13 @@ PYTHONPATH=src .venv/bin/python -m pytest -q tests/features/point_guided
 git diff --check
 ```
 
-Proceed automatically to Phase 2.
+Stop after Phase 1. Phase 2 requires an explicit active task.
 
 ---
 
 ## Phase 2 — Frozen feature detach + ablation controls
 
-**Status: UNBLOCKED**
+**Status: COMPLETE**
 
 ### /phase-goal
 
@@ -445,16 +460,16 @@ Make the frozen observation-encoder contract explicit and reusable by semantic a
 
 Tasks:
 
-- [ ] add config for `detach_backbone_features`
-- [ ] add config for spectral tap
-- [ ] MAIN tap = pre-MaxPool
-- [ ] Layer1 tap = ablation
-- [ ] preserve frozen BN eval behavior
-- [ ] detach branch features when configured
-- [ ] ensure semantic head still receives gradients
-- [ ] ensure future projection receives gradients
-- [ ] add frozen-vs-finetuned and detach-vs-nondetach support
-- [ ] add gradient-path tests
+- [x] add config for `detach_backbone_features`
+- [x] add config for spectral tap
+- [x] MAIN tap = pre-MaxPool
+- [x] Layer1 tap = ablation
+- [x] preserve frozen BN eval behavior
+- [x] detach branch features when configured
+- [x] ensure semantic head still receives gradients
+- [x] ensure future projection receives gradients
+- [x] add frozen-vs-finetuned and detach-vs-nondetach support
+- [x] add gradient-path tests
 
 Required tests:
 
@@ -471,13 +486,13 @@ PYTHONPATH=src .venv/bin/python -m pytest -q tests/features/point_guided
 git diff --check
 ```
 
-Proceed automatically to Phase 3.
+Stop after Phase 2. Phase 3 requires an explicit active task.
 
 ---
 
 ## Phase 3 — Lock 3-class coarse semantics in code
 
-**Status: UNBLOCKED**
+**Status: COMPLETE**
 
 ### /phase-goal
 
@@ -485,14 +500,14 @@ Align the implementation with the final coarse semantic meaning consumed by refi
 
 Tasks:
 
-- [ ] production/main semantic count = exactly 3
-- [ ] define names/order in one explicit contract
-- [ ] reject accidental 4/6-class main configuration
-- [ ] update semantic-prior tests
-- [ ] update point-descriptor shape tests
-- [ ] preserve softmax probabilities
-- [ ] do not add uncertainty channel
-- [ ] do not invent semantic supervision/loss here
+- [x] production/main semantic count = exactly 3
+- [x] define names/order in one explicit contract
+- [x] reject accidental 4/6-class main configuration
+- [x] update semantic-prior tests
+- [x] update point-descriptor shape tests
+- [x] preserve softmax probabilities
+- [x] do not add uncertainty channel
+- [x] do not invent semantic supervision/loss here
 
 Verify:
 
@@ -501,13 +516,13 @@ PYTHONPATH=src .venv/bin/python -m pytest -q tests/features/point_guided
 git diff --check
 ```
 
-Proceed automatically to Phase 4.
+Stop after Phase 3. Phase 4 requires an explicit active task.
 
 ---
 
 ## Phase 4 — Axis-conditioned base tri-plane projector
 
-**Status: UNBLOCKED**
+**Status: COMPLETE**
 
 ### /phase-goal
 
@@ -531,21 +546,21 @@ Zero-init scorer kernels/biases.
 
 Required ablation modes:
 
-- [ ] mean
-- [ ] max
-- [ ] pointwise_weighted
-- [ ] axis_local_weighted MAIN
+- [x] mean
+- [x] max
+- [x] pointwise_weighted
+- [x] axis_local_weighted MAIN
 
 Required tests:
 
-- [ ] exact plane shapes
-- [ ] softmax weights sum to 1 along collapsed axis
-- [ ] zero-init main projector equals mean projection within tolerance
-- [ ] orientation mapping correct using synthetic coordinate ramps
-- [ ] scorer logits are `[B,1,D,H,W]`, not channel-wise attention
-- [ ] gradients reach scorer parameters
-- [ ] detached MedicalNet feature blocks backbone gradients
-- [ ] no second encoder introduced
+- [x] exact plane shapes
+- [x] softmax weights sum to 1 along collapsed axis
+- [x] zero-init main projector equals mean projection within tolerance
+- [x] orientation mapping correct using synthetic coordinate ramps
+- [x] scorer logits are `[B,1,D,H,W]`, not channel-wise attention
+- [x] gradients reach scorer parameters
+- [x] detached MedicalNet feature blocks backbone gradients
+- [x] no second encoder introduced
 
 Verify:
 
@@ -555,13 +570,13 @@ PYTHONPATH=src .venv/bin/python -m compileall -q src/smagm/features/point_guided
 git diff --check
 ```
 
-Proceed automatically to Phase 5.
+Stop after Phase 4. Phase 5 requires an explicit active task.
 
 ---
 
 ## Phase 5 — Compose spectral branch through B only
 
-**Status: UNBLOCKED**
+**Status: COMPLETE — STOPPED AT RESEARCH GATE A**
 
 ### /phase-goal
 
@@ -569,23 +584,23 @@ Wire the shared MedicalNet tap and the base tri-plane projector into the fronten
 
 Tasks:
 
-- [ ] compute shared MedicalNet stem once
-- [ ] route pre-MaxPool feature to spectral branch
-- [ ] continue same feature through semantic branch
-- [ ] respect detach config
-- [ ] produce Bxy/Bxz/Byz
-- [ ] expose base planes through a typed internal/diagnostic output
-- [ ] preserve existing point/refinement/PoU public outputs where practical
-- [ ] do not call B a spectral anchor yet
-- [ ] do not add fake FFT/DWT
-- [ ] do not change point behavior
+- [x] compute shared MedicalNet stem once
+- [x] route the configured selected shared feature to the static B branch
+- [x] continue the same feature bundle through the semantic branch
+- [x] respect detach config
+- [x] produce Bxy/Bxz/Byz
+- [x] expose base planes through typed `FrontendOutput.base_planes`
+- [x] preserve existing point/refinement/PoU public outputs
+- [x] do not call B a spectral anchor yet
+- [x] do not add fake FFT/DWT
+- [x] do not change point behavior
 
 Tests:
 
-- [ ] shared backbone path does not perform two complete MedicalNet forwards
-- [ ] existing frontend invariants remain green
-- [ ] B planes deterministic in eval mode
-- [ ] frozen MedicalNet remains unchanged after projector-only optimizer step
+- [x] shared backbone path does not perform two complete MedicalNet forwards
+- [x] existing frontend invariants remain green
+- [x] B planes deterministic in eval mode
+- [x] frozen MedicalNet remains unchanged after projector-only optimizer step
 
 Verify:
 
@@ -656,23 +671,21 @@ Do not pull in legacy anchor/field/routing implementations automatically.
 
 # 12. Codegraph / ownership update
 
-Current CODEGRAPH predates base-triplane implementation.
+M0 pre-authorizes the exact Phase 1–5 paths in the `frontend` and `tests`
+tasks while preserving default deny. Do not broaden those paths or add a
+separate spectral task merely to bypass their boundary. In particular, do not
+unblock legacy `anchors/**`, `fields/**`, `routing/**`, reconstruction,
+training, or data packages.
 
-When adding the projection module:
-
-- extend `frontend` task read/write paths;
-- optionally add a narrowly scoped `spectral-base` task;
-- preserve default deny;
-- do not unblock legacy `anchors/**`, `fields/**`, `routing/**`, reconstruction, training, or data packages.
-
-Suggested new paths:
+The reserved Phase 4 paths are:
 
 ```text
 src/smagm/features/point_guided/triplane_projection.py
 tests/features/point_guided/test_triplane_projection.py
 ```
 
-Do not create wavelet files until Gate A.
+Do not create wavelet, cross-plane fusion, dynamic trajectory, decoder, or
+reconstruction files until the corresponding research gate is resolved.
 
 ---
 
@@ -775,12 +788,37 @@ Do not claim reconstruction or clinical performance from software tests.
 # 16. Phase completion log
 
 ```text
-Phase 0: PENDING
-Phase 1: PENDING
-Phase 2: PENDING
-Phase 3: PENDING
-Phase 4: PENDING
-Phase 5: PENDING
+Phase 0: COMPLETE — M0 policy/architecture reconciliation at d623d179e6626a54deefcf3f4c5a8d9e9f0a33c1; policy/docs/permissions only
+Phase 1: COMPLETE — shared typed MedicalNet shallow/Layer1/deep feature API; no later phase started
+  status: COMPLETE
+  HEAD: d623d179e6626a54deefcf3f4c5a8d9e9f0a33c1
+  files changed: medicalnet_resnet10.py, semantic_prior.py, test_semantic_prior.py, PLAN.md
+  verification: 13 focused tests passed; 45 point-guided tests passed; compileall and git diff --check passed
+  remaining assumptions: Phase 2 detach/tap controls and all later phases remain unimplemented
+Phase 2: COMPLETE — explicit shared-feature detach/tap and frozen/fine-tuned ablation controls; no later phase started
+  status: COMPLETE
+  HEAD: d623d179e6626a54deefcf3f4c5a8d9e9f0a33c1
+  files changed: config.py, semantic_prior.py, test_semantic_prior.py, PLAN.md
+  verification: 27 focused tests passed; 59 point-guided tests passed; compileall and git diff --check passed
+  remaining assumptions: Phase 3 exact semantic-class contract and all later phases remain unimplemented
+Phase 3: COMPLETE — exact ordered three-class coarse semantics; no later phase started
+  status: COMPLETE
+  HEAD: d623d179e6626a54deefcf3f4c5a8d9e9f0a33c1
+  files changed: config.py, contracts.py, test_semantic_prior.py, test_points_refinement.py, test_frontend_forward.py, POINT_GUIDED_FRONTEND.md, PLAN.md
+  verification: 32 semantic-prior focused tests passed; 9 refinement tests passed; 4 frontend smoke tests passed; 65 point-guided tests passed; compileall and git diff --check passed
+  remaining assumptions: Phase 4 base-plane projection and all later phases remain unimplemented
+Phase 4: COMPLETE — PLAN-locked static base tri-plane projector; no later phase started
+  status: COMPLETE
+  HEAD: d623d179e6626a54deefcf3f4c5a8d9e9f0a33c1
+  files changed: config.py, triplane_projection.py, test_triplane_projection.py, PLAN.md
+  verification: 15 focused tri-plane tests passed; 4 frontend smoke tests passed; 80 point-guided tests passed; compileall, codegraph, and git diff --check passed
+  remaining assumptions: Phase 5 diagnostic frontend B composition and all later phases remain unimplemented
+Phase 5: COMPLETE — shared one-pass MedicalNet composition with static typed diagnostic B planes; stopped at Research Gate A
+  status: COMPLETE
+  HEAD: d623d179e6626a54deefcf3f4c5a8d9e9f0a33c1 (working tree implementation)
+  files changed: semantic_prior.py, model.py, contracts.py, test_frontend_forward.py, test_frontend_boundaries.py, POINT_GUIDED_FRONTEND.md, README.md, CODEBASE.md, PLAN.md
+  verification: 18 frontend tests passed; 42 frontend/boundary/projector tests passed; 94 point-guided tests passed; compileall and git diff --check passed
+  remaining assumptions: Research Gate A wavelet details and all Phase 6+ work remain blocked
 
 Research Gate A — wavelet: BLOCKED
 Phase 6: BLOCKED

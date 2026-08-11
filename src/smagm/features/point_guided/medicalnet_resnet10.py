@@ -22,6 +22,7 @@ __all__ = [
     "BasicBlock",
     "MedicalNetCheckpointError",
     "MedicalNetCheckpointProvenance",
+    "MedicalNetFeatures",
     "MedicalNetResNet10",
     "MedicalNetResNet10Backbone",
     "APPROVED_OFFICIAL_MEDICALNET_RESNET10_SHA256",
@@ -63,6 +64,22 @@ class MedicalNetCheckpointProvenance:
         """Return JSON-ready provenance without exposing checkpoint contents."""
 
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class MedicalNetFeatures:
+    """Feature maps emitted by one MedicalNet ResNet10 traversal.
+
+    For an input ``[B, C, D, H, W]``, ``shallow`` is the 64-channel
+    ``Conv1 -> BN -> ReLU`` map before ``MaxPool`` at spatial scale
+    ``ceil((D, H, W) / 2)``.  ``layer1`` is the 64-channel map after
+    ``MaxPool -> Layer1`` at scale ``ceil((D, H, W) / 4)``.  ``deep`` is the
+    existing 512-channel final map at scale ``ceil((D, H, W) / 8)``.
+    """
+
+    shallow: Tensor
+    layer1: Tensor
+    deep: Tensor
 
 
 def _conv3x3x3(
@@ -212,8 +229,8 @@ class MedicalNetResNet10(nn.Module):
                 nn.init.ones_(module.weight)
                 nn.init.zeros_(module.bias)
 
-    def forward_features(self, x: Tensor) -> Tensor:
-        """Return the final, stride-eight, 512-channel feature volume."""
+    def forward_intermediate_features(self, x: Tensor) -> MedicalNetFeatures:
+        """Return shared pre-pool, Layer1, and final features from one pass."""
 
         if not isinstance(x, Tensor):
             raise TypeError("MedicalNet ResNet10 expects a torch.Tensor input")
@@ -227,12 +244,18 @@ class MedicalNetResNet10(nn.Module):
 
         x = self.conv1(x)
         x = self.bn1(x)
-        x = self.relu(x)
-        x = self.maxpool(x)
-        x = self.layer1(x)
-        x = self.layer2(x)
+        shallow = self.relu(x)
+        x = self.maxpool(shallow)
+        layer1 = self.layer1(x)
+        x = self.layer2(layer1)
         x = self.layer3(x)
-        return self.layer4(x)
+        deep = self.layer4(x)
+        return MedicalNetFeatures(shallow=shallow, layer1=layer1, deep=deep)
+
+    def forward_features(self, x: Tensor) -> Tensor:
+        """Return the existing final, stride-eight, 512-channel feature volume."""
+
+        return self.forward_intermediate_features(x).deep
 
     def forward(self, x: Tensor) -> Tensor:
         """Alias for :meth:`forward_features` for normal ``nn.Module`` use."""

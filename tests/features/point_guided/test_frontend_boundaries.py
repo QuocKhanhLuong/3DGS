@@ -15,6 +15,7 @@ from smagm.features.point_guided.interfaces import (
     StoppingPolicyBase,
     TrajectoryHistory,
 )
+from smagm.features.point_guided.triplane_projection import BaseTriPlanes
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -30,6 +31,7 @@ FORBIDDEN_IMPORT_PREFIXES = (
     "smagm.cli",
     "smagm.data",
 )
+FORBIDDEN_FUTURE_IMPORT_TOKENS = ("wavelet", "dwt", "pywt")
 
 
 def _small_model() -> PointGuidedMRIModel:
@@ -80,6 +82,7 @@ def test_frontend_forward_performs_no_checkpoint_or_filesystem_io(
     with torch.no_grad():
         output = model.forward_frontend(torch.randn(1, 3, 7, 7, 7))
     assert output.s_coarse.shape == (1, 3, 7, 7, 7)
+    assert isinstance(output.base_planes, BaseTriPlanes)
 
 
 def test_frontend_does_not_persist_patient_state_or_mutate_inputs() -> None:
@@ -102,6 +105,9 @@ def test_frontend_does_not_persist_patient_state_or_mutate_inputs() -> None:
     torch.testing.assert_close(first_output.s_coarse, first_replayed.s_coarse)
     torch.testing.assert_close(first_output.refined_points, first_replayed.refined_points)
     torch.testing.assert_close(first_output.sparse_pou.normalized_weight, first_replayed.sparse_pou.normalized_weight)
+    torch.testing.assert_close(first_output.base_planes.xy, first_replayed.base_planes.xy)
+    torch.testing.assert_close(first_output.base_planes.xz, first_replayed.base_planes.xz)
+    torch.testing.assert_close(first_output.base_planes.yz, first_replayed.base_planes.yz)
 
 
 def test_frontend_preserves_a_float64_contract() -> None:
@@ -111,6 +117,9 @@ def test_frontend_preserves_a_float64_contract() -> None:
     assert output.s_coarse.dtype == torch.float64
     assert output.refined_points.dtype == torch.float64
     assert output.sparse_pou.raw_affinity.dtype == torch.float64
+    assert output.base_planes.xy.dtype == torch.float64
+    assert output.base_planes.xz.dtype == torch.float64
+    assert output.base_planes.yz.dtype == torch.float64
 
 
 def test_future_only_types_cannot_construct_empty_runtime_state() -> None:
@@ -127,12 +136,21 @@ def test_frontend_static_import_boundary_rejects_future_and_data_packages() -> N
             module: str | None = None
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    if alias.name == "importlib" or alias.name.startswith(FORBIDDEN_IMPORT_PREFIXES):
+                    if (
+                        alias.name == "importlib"
+                        or alias.name.startswith(FORBIDDEN_IMPORT_PREFIXES)
+                        or any(token in alias.name.lower() for token in FORBIDDEN_FUTURE_IMPORT_TOKENS)
+                    ):
                         violations.append(f"{path.name}: import {alias.name}")
             elif isinstance(node, ast.ImportFrom):
                 module = node.module
                 if module == "importlib" or (
                     module is not None and module.startswith(FORBIDDEN_IMPORT_PREFIXES)
+                ) or (
+                    module is not None
+                    and any(token in module.lower() for token in FORBIDDEN_FUTURE_IMPORT_TOKENS)
+                ) or (
+                    module == "torch" and any(alias.name == "fft" for alias in node.names)
                 ):
                     violations.append(f"{path.name}: from {module}")
             elif isinstance(node, ast.Call):
@@ -140,4 +158,11 @@ def test_frontend_static_import_boundary_rejects_future_and_data_packages() -> N
                     violations.append(f"{path.name}: dynamic {node.func.id}")
                 elif isinstance(node.func, ast.Attribute) and node.func.attr in {"import_module", "reload"}:
                     violations.append(f"{path.name}: dynamic {node.func.attr}")
+            elif (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "torch"
+                and node.attr == "fft"
+            ):
+                violations.append(f"{path.name}: torch.fft")
     assert not violations, "\n".join(violations)

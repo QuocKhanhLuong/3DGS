@@ -2,11 +2,14 @@
 
 ## Current boundary
 
-The implemented boundary is only:
+The implemented boundary is:
 
 ```text
-T1 / T2 / FLAIR volume -> coarse semantic prior -> bounded refined points
--> semantic-aware compact-support PoU
+T1 / T2 / FLAIR volume
+        -> one shared MedicalNet ResNet10 traversal
+           -> deep feature -> coarse semantic prior -> bounded refined points
+                            -> semantic-aware compact-support PoU
+           -> configured selected feature -> static diagnostic Bxy/Bxz/Byz
 ```
 
 The input tensor order is `[B, 3, D, H, W]` with channels `(T1, T2, FLAIR)`.
@@ -18,7 +21,34 @@ adaption belongs to a future data-adapter decision.
 
 `PointGuidedMRIModel.forward_frontend` returns soft semantic probabilities,
 initial and refined physical point centres, bounded displacements, point-centre
-semantics, and a sparse PoU edge list. It does not synthesize T1ce.
+semantics, a sparse PoU edge list, and typed static `BaseTriPlanes`. The
+projector consumes the Phase-2 selected shared map once; it never feeds the
+point/refinement/PoU path. It does not synthesize T1ce.
+
+## Implemented locked frontend scope
+
+`PLAN.md` Phases 1–5 are implemented engineering work. They do not authorize
+full reconstruction:
+
+1. expose one shared MedicalNet pre-MaxPool shallow feature and an optional
+   Layer1 ablation feature;
+2. add explicit detach/tap and frozen/fine-tuned ablation controls;
+3. lock the production coarse semantic state to `normal brain`, `edema`, and
+   `tumor-core candidate`;
+4. project the configured selected shared feature into static base planes
+   `Bxy`, `Bxz`, and `Byz`; and
+5. expose those base planes only as typed diagnostic frontend data.
+
+`B` is a feature-only base projection, not wavelet spectral anchor `A`,
+cross-plane fusion, a dynamic tri-plane, or a decoder input. The shared
+MedicalNet forward must not run twice and no second encoder is permitted.
+Its Phase 4 implementation may use only PLAN's locked axis-conditioned
+collapse; it may not introduce an FFT/DCT alternative, learned 3-D support,
+or an unapproved residual spectral adapter.
+For `[B, C, D, H, W]`, `Bxy` collapses `D/Z` to `[B, C, H, W]`, `Bxz`
+collapses `H/Y` to `[B, C, D, W]`, and `Byz` collapses `W/X` to
+`[B, C, D, H]`. These names preserve the existing RAS `XYZ` and tensor `DHW`
+mapping; they create no separate coordinate convention.
 
 ## Locked rules
 
@@ -29,6 +59,10 @@ semantics, and a sparse PoU edge list. It does not synthesize T1ce.
   A shape-compatible local file is recorded as a custom checkpoint, never
   called verified official pretrained weights. No official digest is bundled
   in this scaffold.
+- The Phase 3 production semantic contract is exactly three soft classes:
+  `normal brain`, `edema`, and `tumor-core candidate`. It is implemented and
+  fail-closed: `PointGuidedConfig` accepts only this class count, and the
+  public frontend output requires the corresponding three-channel tensors.
 - Initial point selection depends only on geometry and the optional brain mask.
   It is deterministic, quasi-uniform, and produces the configured count. For
   a voxel mask, a point is legal when its nearest voxel centre is a valid mask
@@ -48,17 +82,23 @@ semantics, and a sparse PoU edge list. It does not synthesize T1ce.
   no positive edge anywhere, construction raises `EmptySparseSupportError`
   and attaches those sparse unsupported records; it never returns an invalid
   all-zero PoU object.
+- T1ce, ground truth, segmentation labels, and every target-derived value are
+  forbidden from the observation input and all frontend branches, including
+  the semantic prior, points, PoU, and authorized base-plane projection. An
+  optional brain mask is admissible only with non-target-derived provenance.
 
 This implementation is a sparse software-contract reference. It has no
 default-scale (`N=2048` or `N=3072`) runtime or memory-performance evidence,
 and makes no throughput, reconstruction-quality, or clinical claim.
 
-## Intentional non-implementations
+## Research-gated non-implementations
 
-Spectral anchors, dynamic tri-planes, trajectory selection and updates,
-history, stopping, final decoding, and reconstruction losses are interfaces
-only. They must not read a target, open a dataset path, mutate patient state,
-or return a fake T1ce volume.
+Wavelet spectral anchor `A`, cross-plane query/consistency fusion,
+reliability-aware fusion, initial dynamic tri-plane `Z0`, trajectory selection
+and updates, history, stopping, final decoding, reconstruction losses, and full
+T1ce synthesis are interfaces only. They must not read a target, open a dataset
+path, mutate patient state, or return a fake T1ce volume. No Phase 6+ code is
+authorized until its corresponding research gate is resolved.
 
 ## BraTS21 boundary
 
