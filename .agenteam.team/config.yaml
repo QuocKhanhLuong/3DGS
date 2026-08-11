@@ -1,246 +1,217 @@
 version: "2"
 isolation: worktree
 
+# Shared roles and pipeline for the locked point-guided MRI frontend. The
+# Human Gate is deliberately represented as the final human-gated stage; this
+# configuration creates no approval record and does not authorize later work.
 roles:
   researcher:
-    description: "ISBI/MICCAI full-mechanism novelty, theory-to-code, and primary-source literature lead"
-    participates_in: [research, strategy]
-    can_write: true
-    write_scope: ["docs/research/**"]
+    description: "Primary-source MedicalNet and locked-frontend method-boundary researcher"
+    participates_in: [medicalnet, frontend_quality_review]
+    can_write: false
+    sandbox_mode: read-only
     handoff_contract:
-      produces: "Primary-source evidence map: theoretical claim -> reconstruction module -> stable software owner -> experiment or falsification"
-      expects: "Current strategy, relevant docs/reconstruction sections, CODEBASE ownership, and a focused research question"
-      passes_to: "pm for thesis and gate decisions, or architect for module and interface mapping"
+      produces: "Evidence map for the coarse semantic prior or locked frontend contract, including uncertainty and falsification need"
+      expects: "An applicable codegraph task, a focused point-guided question, and the current pending-Human-Gate boundary"
+      passes_to: "architect for contract mapping, reviewer for adversarial review, or pm for a future human decision"
 
   pm:
-    description: "Scientific-program thesis, claim-to-evidence, Human Gate, and stop-rule lead"
-    participates_in: [strategy, t1_decision]
-    can_write: true
-    write_scope: ["docs/strategies/**"]
+    description: "Locked-frontend scope, stop-rule, and pending-Human-Gate governance lead"
+    participates_in: [frontend_design, pending_human_gate]
+    can_write: false
+    sandbox_mode: read-only
     handoff_contract:
-      produces: "Governance record with falsifiable thesis, claim-to-evidence matrix, authorization boundary, stop/demotion/rollback rule, and unresolved decision"
-      expects: "Research evidence, architecture mapping, executable status, and human authorization context"
-      passes_to: "architect for software-boundary decisions, experiment_lead for matched tests, or Human for gate approval"
+      produces: "Authorized frontend slice, explicit non-goals, required human decision, and stop condition"
+      expects: "Focused implementation and verification evidence without reconstruction or clinical claims"
+      passes_to: "architect, reviewer, and Human; never self-approves the gate"
 
   architect:
-    description: "Final software blueprint, package ownership, dependency, geometry, and tensor-contract lead"
-    participates_in: [design, t1a_implement, t1b_implement, t1_smoke_review]
+    description: "Point-guided frontend package, geometry, and tensor-contract lead"
+    participates_in: [frontend_design, frontend_model, medicalnet, data_boundary_review, frontend_quality_review]
     can_write: true
-    write_scope: ["CODEBASE.md", "docs/designs/**"]
+    write_scope:
+      - "CODEBASE.md"
+      - "docs/architecture/POINT_GUIDED_FRONTEND.md"
     handoff_contract:
-      produces: "Architecture decision with stable owner, dependency direction, typed interfaces, preserved contracts, migration boundary, risks, and verification needs"
-      expects: "Strategy authorization, research theory-to-code mapping, and relevant CODEBASE/reconstruction contracts"
-      passes_to: "dev for the authorized implementation slice, qa for contract tests, and reviewer for architecture conformance"
+      produces: "Locked owner/dependency/geometry decision with affected point-guided paths and verification needs"
+      expects: "A codegraph-scoped question and the T1/T2/FLAIR frontend boundary"
+      passes_to: "dev for a bounded frontend change, qa for invariants, and reviewer for conformance"
 
   dev:
-    description: "CODEBASE-mapped PyTorch medical-imaging research implementation lead"
-    participates_in: [t05_implement, t1a_implement, t1b_implement]
+    description: "Point-guided MRI frontend and MedicalNet implementation lead"
+    participates_in: [frontend_model, medicalnet]
     can_write: true
     write_scope:
-      - "src/**"
-      - "lib/**"
-      - "scripts/check_phase.py"
-      - ".github/workflows/**"
-      - "pyproject.toml"
+      - "src/smagm/features/point_guided/**"
+      - "configs/model_config.py"
+      - "tests/features/point_guided/**"
+      - "docs/architecture/POINT_GUIDED_FRONTEND.md"
+      - "CODEBASE.md"
+      - "README.md"
       - "CHANGELOG.md"
-      - "docs/plans/**"
-      - "docs/codex/**"
     handoff_contract:
-      produces: "Implemented CODEBASE responsibility with changed files, preserved contracts, focused tests, executable status update, and remaining boundary"
-      expects: "Authorized tranche, stable CODEBASE owner, typed interface decisions, and current executable status"
-      passes_to: "qa for focused verification, reviewer for adversarial review, and reproducibility_auditor for evidence"
+      produces: "Bounded frontend implementation, preserved contracts, focused synthetic-test evidence, and remaining boundary"
+      expects: "The exact codegraph task, locked contract, and no permission for T1ce/reconstruction/trajectory work"
+      passes_to: "qa for focused tests, reviewer for boundary review, and reproducibility_auditor for evidence audit"
 
   qa:
-    description: "Architecture-contract, scientific-invariant, leakage, numeric, and regression verification lead"
-    participates_in: [t05_implement, t1a_implement, t1b_implement, t1_experiment]
+    description: "CPU synthetic invariant, smoke, and frontend-quality verification lead"
+    participates_in: [frontend_tests, frontend_quality_review]
     can_write: true
     write_scope:
-      - "tests/**"
-      - "**/*.test.*"
+      - "tests/features/point_guided/**"
+      - "tests/test_codegraph.py"
       - "quality/**"
       - "tests/quality/**"
-      - "docs/checklists/**"
+      - "scripts/check_phase.py"
     handoff_contract:
-      produces: "Blocking test and invariant report naming the stable module, legal/scientific contract, evidence, and remaining boundary"
-      expects: "Implemented authorized slice with explicit interfaces and claimed invariants"
-      passes_to: "reviewer for adversarial interpretation and Human for any gate decision"
+      produces: "Focused invariant and quality evidence naming the locked frontend contract and remaining boundary"
+      expects: "A codegraph-scoped frontend or quality change with explicit expected behavior"
+      passes_to: "reviewer and reproducibility_auditor; Human only for an unresolved gate decision"
 
   reviewer:
-    description: "Independent adversarial scientific and CODEBASE-conformance reviewer"
-    participates_in: [t05_review, t1a_review, t1_smoke_review, t1_decision]
+    description: "Independent adversarial reviewer for point-guided scope, data boundary, and quality evidence"
+    participates_in: [data_boundary_review, frontend_quality_review, pending_human_gate]
     can_write: false
+    sandbox_mode: read-only
     handoff_contract:
-      produces: "Structured BLOCK/WARN/NOTE review with theoretical contract, affected code module, evidence, and required fix or decision"
-      expects: "Implementation, focused tests, CODEBASE mapping, strategy boundary, and claim-to-evidence record"
-      passes_to: "Human for final approval or dev/architect for bounded fixes"
+      produces: "BLOCK/WARN/NOTE findings against locked frontend contracts and the pending Human Gate"
+      expects: "Focused codegraph-scoped change, test evidence, and data-boundary report where applicable"
+      passes_to: "dev/architect for bounded fixes or Human for a decision"
 
   medical_data_steward:
-    description: "Sparse-data legality, ownership mapping, registration, and audit-isolation lead"
-    participates_in: [research, design, t05_implement, t05_review, t1b_implement, t1_smoke_review, t1_experiment, t1_decision]
-    can_write: true
-    write_scope: ["docs/protocols/**"]
+    description: "Read-only BraTS21 sparse-plane and T1ce-exposure boundary auditor"
+    participates_in: [data_boundary_review, pending_human_gate]
+    can_write: false
+    sandbox_mode: read-only
     handoff_contract:
-      produces: "Data-legality and code-mapping review covering manifests, normalization, cache, router metadata, missing modalities, licenses, and audit isolation"
-      expects: "Relevant CODEBASE ownership, data/protocol changes, opened-file evidence, and preprocessing provenance"
-      passes_to: "dev/qa for fail-closed fixes, reviewer for review, and Human for any legality veto or gate decision"
+      produces: "Fail-closed data-boundary report: legacy protocol evidence, prohibited T1ce path, and unresolved adapter decision"
+      expects: "The data-boundary-audit codegraph task and no request to implement a volume adapter"
+      passes_to: "reviewer and Human; dev only for a bounded fail-closed correction"
 
   experiment_lead:
-    description: "Matched full-lifecycle experiments, ablations, statistics, and external-evaluation lead"
-    participates_in: [strategy, t1_experiment]
-    can_write: true
-    write_scope:
-      - "experiments/**"
-      - "configs/t1/**"
-      - "configs/experiments/**"
-      - "docs/experiments/**"
+    description: "Read-only software-evidence and scientific-claim boundary lead"
+    participates_in: [frontend_quality_review, pending_human_gate]
+    can_write: false
+    sandbox_mode: read-only
     handoff_contract:
-      produces: "Matched experiment manifest and report locking legal data, geometry, budgets, primitive/complexity accounting, seeds, hardware, evaluation, and claim interpretation"
-      expects: "Authorized hypothesis, stable CODEBASE module mapping, resolved configuration, and confounder policy"
-      passes_to: "qa for validation, reproducibility_auditor for provenance, and pm/reviewer for scientific decision"
+      produces: "Statement of what CPU software evidence supports and what reconstruction or clinical claims remain unsupported"
+      expects: "Focused frontend outputs and verification evidence, not an experiment authorization"
+      passes_to: "pm, reviewer, and Human for a future decision"
 
   reproducibility_auditor:
-    description: "Independent CODEBASE, state-schema, provenance, environment, compute, and artifact auditor"
-    participates_in:
-      - design
-      - t05_review
-      - t1a_review
-      - t1b_implement
-      - t1_smoke_review
-      - t1_experiment
-      - t1_decision
-    can_write: true
-    write_scope: ["docs/reproducibility/**"]
+    description: "Read-only frontend configuration, provenance, and evidence auditor"
+    participates_in: [frontend_quality_review, pending_human_gate]
+    can_write: false
+    sandbox_mode: read-only
     handoff_contract:
-      produces: "Independent provenance report with commit, CODEBASE/state schema, config, manifest, cache, artifact, environment, hardware, serialization, trajectory, and audit-isolation evidence"
-      expects: "Resolved implementation/experiment artifacts, authorization record, opened-file ledger, and serialized outputs"
-      passes_to: "reviewer and Human for gate evidence; dev/experiment_lead for bounded reproducibility fixes"
+      produces: "Independent config/geometry/checkpoint/test/diff evidence audit with unresolved boundary"
+      expects: "Resolved frontend configuration and commands actually run"
+      passes_to: "reviewer and Human; dev or qa for bounded reproducibility fixes"
 
 final_verify:
-  - "python3 -m pytest -q"
-  - "python3 -m compileall -q src tests"
-  - "python3 scripts/check_phase.py --list"
-  - "python3 -m pytest -q tests/quality --tb=short"
+  - "PYTHONPATH=src .venv/bin/python -m pytest -q tests/features/point_guided"
+  - "PYTHONPATH=src .venv/bin/python -m compileall -q src/smagm/features/point_guided"
   - "git diff --check"
 final_verify_policy: block
 final_verify_max_retries: 1
 
 pipeline:
   stages:
-    - name: research
-      roles: [researcher, medical_data_steward]
+    - name: frontend_design
+      roles: [architect, pm]
       gate: auto
+      verify: "python scripts/codegraph.py --task frontend"
 
-    - name: strategy
-      roles: [pm, researcher, experiment_lead]
-      gate: auto
-
-    - name: design
-      roles: [architect, medical_data_steward, reproducibility_auditor]
-      gate: human
-      verify: "test -f CODEBASE.md && test -f docs/README.md"
-
-    - name: t05_implement
-      roles: [dev, qa, medical_data_steward]
+    - name: frontend_model
+      roles: [dev, architect]
       gate: auto
       max_retries: 2
       criteria:
-        max_files_changed: 20
+        max_files_changed: 16
         scope_paths:
-          - "src/**"
-          - "tests/**"
-          - ".github/workflows/**"
+          - "src/smagm/features/point_guided/**"
+          - "configs/model_config.py"
+          - "tests/features/point_guided/**"
+          - "docs/architecture/POINT_GUIDED_FRONTEND.md"
+          - "CODEBASE.md"
+          - "README.md"
           - "CHANGELOG.md"
         requires_tests: true
-      verify: "python3 -m pytest -q"
+      verify: "PYTHONPATH=src .venv/bin/python -m pytest -q tests/features/point_guided/test_frontend_forward.py"
 
-    - name: t05_review
-      roles: [reviewer, medical_data_steward, reproducibility_auditor]
-      gate: human
-      rework_to: t05_implement
-      verify: "python3 -m pytest -q"
-
-    - name: t1a_implement
-      roles: [dev, qa, architect]
+    - name: medicalnet
+      roles: [dev, qa, researcher]
       gate: auto
       max_retries: 2
       criteria:
-        max_files_changed: 24
+        max_files_changed: 10
         scope_paths:
-          - "src/smagm/features/**"
-          - "src/smagm/baselines/**"
-          - "tests/**"
-          - "CHANGELOG.md"
+          - "src/smagm/features/point_guided/medicalnet_resnet10.py"
+          - "src/smagm/features/point_guided/semantic_prior.py"
+          - "src/smagm/features/point_guided/config.py"
+          - "tests/features/point_guided/test_semantic_prior.py"
+          - "docs/architecture/POINT_GUIDED_FRONTEND.md"
         requires_tests: true
-      verify: "python3 -m pytest -q"
+      verify: "PYTHONPATH=src .venv/bin/python -m pytest -q tests/features/point_guided/test_semantic_prior.py"
 
-    - name: t1a_review
-      roles: [reviewer, reproducibility_auditor]
-      gate: human
-      rework_to: t1a_implement
-      verify: "python3 -m pytest -q"
-
-    - name: t1b_implement
-      roles: [dev, qa, architect, medical_data_steward, reproducibility_auditor]
+    - name: frontend_tests
+      roles: [qa]
       gate: auto
-      max_retries: 2
+      max_retries: 1
       criteria:
-        max_files_changed: 30
+        max_files_changed: 14
         scope_paths:
-          - "src/smagm/features/**"
-          - "src/smagm/losses/structural.py"
-          - "src/smagm/baselines/**"
-          - "src/smagm/cli/t1b.py"
-          - "tests/features/**"
-          - "tests/losses/**"
-          - "tests/baselines/**"
+          - "tests/features/point_guided/**"
+          - "tests/test_codegraph.py"
+        requires_tests: true
+      verify: "PYTHONPATH=src .venv/bin/python -m pytest -q tests/features/point_guided/test_frontend_forward.py"
+
+    - name: data_boundary_review
+      roles: [medical_data_steward, architect, reviewer]
+      gate: auto
+      verify: "python scripts/codegraph.py --task data-boundary-audit"
+
+    - name: frontend_quality_review
+      roles: [qa, reviewer, experiment_lead, reproducibility_auditor]
+      gate: auto
+      max_retries: 1
+      criteria:
+        max_files_changed: 18
+        scope_paths:
+          - "src/smagm/features/point_guided/**"
+          - "tests/features/point_guided/**"
+          - "tests/test_codegraph.py"
           - "quality/**"
           - "tests/quality/**"
-          - "docs/codex/**"
-          - "docs/checklists/**"
           - "scripts/check_phase.py"
-          - "CHANGELOG.md"
-        requires_tests: true
-      verify: "python3 -m pytest -q"
+          - "docs/architecture/POINT_GUIDED_FRONTEND.md"
+      verify: "PYTHONPATH=src .venv/bin/python -m pytest -q tests/features/point_guided"
 
-    - name: t1_smoke_review
-      roles: [reviewer, architect, medical_data_steward, reproducibility_auditor]
+    - name: pending_human_gate
+      roles: [pm, reviewer, medical_data_steward, experiment_lead, reproducibility_auditor]
       gate: human
-      rework_to: t1b_implement
-      verify: "python3 -m pytest -q"
-
-    - name: t1_experiment
-      roles: [experiment_lead, qa, medical_data_steward, reproducibility_auditor]
-      gate: auto
-
-    - name: t1_decision
-      roles: [reviewer, pm, medical_data_steward, reproducibility_auditor]
-      gate: human
-      rework_to: t1_experiment
+      verify: "PYTHONPATH=src .venv/bin/python -m pytest -q tests/features/point_guided"
 
   profiles:
-    discovery:
-      stages: [research, strategy, design]
-      hints: [full-mechanism novelty, CODEBASE theory-to-code mapping, architecture, paper scope]
-    t05:
-      stages: [t05_implement, t05_review]
-      hints: [CODEBASE contracts/data ownership, episode assignment, prediction receipt, amplitude gauge, legality]
-    t1a:
-      stages: [t1a_implement, t1a_review]
-      hints: [features and baselines ownership, analytic features, feature alignment, fixed support, safe Gaussian]
-    t1:
-      stages: [t1b_implement, t1_smoke_review, t1_experiment, t1_decision]
-      hints: [CODEBASE-mapped T1-B feature/loss ownership, teacher-free encoder, matched baseline fairness, quality evidence, reproducibility]
-    paper:
-      stages:
-        - research
-        - strategy
-        - design
-        - t05_implement
-        - t05_review
-        - t1a_implement
-        - t1a_review
-        - t1b_implement
-        - t1_smoke_review
-        - t1_experiment
-        - t1_decision
-      hints: [ISBI, CODEBASE lifecycle, reconstruction, ablation, external evaluation, submission]
+    frontend:
+      stages: [frontend_design, frontend_model, medicalnet, frontend_tests, data_boundary_review, frontend_quality_review, pending_human_gate]
+      hints: [point-guided frontend, T1 T2 FLAIR, coarse semantics, points, sparse PoU]
+    model:
+      stages: [frontend_design, frontend_model, frontend_tests, frontend_quality_review, pending_human_gate]
+      hints: [PointGuidedMRIModel, forward_frontend, refinement, sparse PoU]
+    medicalnet:
+      stages: [medicalnet, frontend_tests, frontend_quality_review, pending_human_gate]
+      hints: [MedicalNet, ResNet10, semantic prior, checkpoint]
+    tests:
+      stages: [frontend_tests, frontend_quality_review, pending_human_gate]
+      hints: [synthetic invariant, frontend smoke, PoU test]
+    data_boundary_audit:
+      stages: [data_boundary_review, pending_human_gate]
+      hints: [BraTS21, affine, T1ce exposure, volume adapter]
+    quality:
+      stages: [frontend_quality_review, pending_human_gate]
+      hints: [quality gate, codegraph, frontend-only verification]
+    review:
+      stages: [data_boundary_review, frontend_quality_review, pending_human_gate]
+      hints: [adversarial review, fake T1ce, boundary violation, Human Gate]

@@ -1,99 +1,16 @@
-# Sparse Multi-Sequence MRI Gaussian Reconstruction
+# Point-guided multi-modal brain MRI scaffold
 
-Research repository for an ISBI 2027 medical-imaging project that reconstructs
-a patient-specific 3D Gaussian representation from permanently sparse
-multi-sequence MRI observations.
-
-## Core idea
-
-The primary thesis is a static sparse support-anchor representation:
+This repository is being rebuilt as a research-grade PyTorch scaffold for:
 
 ```text
-permanently sparse multi-sequence MRI slices
-    → analytic differential scaffold
-    → compact teacher-free structural evidence
-    → physical support anchors
-    → one shared tiny anchor-local structural field
-    → anchored seed Gaussians
-    → anchor–Gaussian propagation
-    → latent patient-specific 3D Gaussian representation
-    → full-volume reconstruction
+T1 + T2 + FLAIR full 3-D volumes -> full T1ce volume
 ```
 
-T0 provides legal data access, physical geometry, and the through-plane
-profile-aware Gaussian reference renderer. It is enabling infrastructure, not
-the representation novelty. Active trajectory and adaptive acquisition are
-later extensions after the static representation has passed matched baselines.
+Only the frontend through the frozen refined point field and semantic-aware
+compact-support partition of unity is currently implemented. The trajectory
+and decoder are deliberately interfaces, so this code does not yet produce a
+T1ce reconstruction.
 
-## Start here
-
-- [`docs/README.md`](docs/README.md) — canonical active-document index.
-- [`docs/strategies/2026-07-31-execution-status-addendum.md`](docs/strategies/2026-07-31-execution-status-addendum.md) — current executable status.
-- [`docs/reconstruction/README.md`](docs/reconstruction/README.md) — theoretical reconstruction backbone.
-- [`CODEBASE.md`](CODEBASE.md) — final software architecture and ownership.
-- [`docs/codex/README.md`](docs/codex/README.md) — executable status and maintained handoffs.
-- [`quality/README.md`](quality/README.md) — machine-readable and human-readable gate evidence.
-
-The authority and reading order is:
-
-```text
-strategy/addendum → docs/reconstruction → CODEBASE.md → docs/codex → quality system
-```
-
-## Current primary task
-
-**T1-C software is implemented with its Human Gate pending. T2, bounded-static
-T3 P0/P1, and T5 are active implementation candidates under the 2026-08-01
-fast-track authorization; T4 remains blocked.**
-
-The main method learns from permanently sparse patient manifests. It does not require teacher distillation or complete-volume targets. Within a training episode, only context slices enter the patient state; acquired sparse target slices are revealed only after rendering. Fully sampled volumes, when available, are isolated for audit evaluation and privileged upper-bound ablations.
-
-## Current locked decisions
-
-- permanently sparse main training supervision;
-- episode context/target roles separated from permanent availability;
-- render and prediction receipt registered before target reveal;
-- analytic differential scaffold plus teacher-free high-resolution micro-CNN;
-- no teacher distillation in the main architecture;
-- one shared tiny MLP for anchor-local structural-field decoding;
-- cached evidence encoding once per queried slice;
-- patient-specific adaptive anchors and Gaussian memory;
-- structural surface Gaussians plus volumetric appearance Gaussians;
-- physical-plane rendering rather than camera-view rendering;
-- explicit unsupported coverage and failure reporting;
-- active routing deferred until the static representation passes its gates.
-
-## Reconstruction package map
-
-| Document | Scope |
-|---|---|
-| `docs/reconstruction/FULL_FLOW.md` | Complete system flow and global state contracts |
-| `docs/reconstruction/phases/01_DIRECT_SPARSE_TRAINING.md` | Teacher-free permanently sparse training |
-| `docs/reconstruction/phases/02_INITIAL_ANCHOR_BOOTSTRAP.md` | Initial observation selection, provisional anchors, local fields, and Gaussian initialization |
-| `docs/reconstruction/phases/03_ACTIVE_TRAJECTORY_UPDATE.md` | Multi-wave query selection and incremental state update |
-| `docs/reconstruction/phases/04_FINAL_RECONSTRUCTION.md` | Full-volume, arbitrary-plane, geometry, and uncertainty reconstruction |
-| `docs/reconstruction/modules/EVIDENCE_ENCODER.md` | Teacher-free structural evidence encoder |
-| `docs/reconstruction/modules/ANCHOR_LOCAL_FIELD.md` | Shared tiny local MLP and field blending |
-| `docs/reconstruction/modules/SDF_GAUSSIAN_MEMORY.md` | Structural and volumetric Gaussian memory |
-| `docs/reconstruction/modules/TRAJECTORY_ROUTER.md` | Reconstruction-driven active routing |
-| `docs/reconstruction/modules/PLANE_RENDERER_RECONSTRUCTOR.md` | MRI plane rendering and continuous 3D output |
-
-## Current implementation order
-
-1. **T0 — implemented software contract:** legal physical operator.
-2. **T0.5 — implemented software contract:** legal episodic contracts.
-3. **T1-A — implemented software contract:** analytic evidence and fixed Gaussian reference.
-4. **T1-B — implemented software tranche; Human Gate passed:** teacher-free encoder, cache, structural objectives, and fixed-topology baseline.
-5. **T1-C — implemented software tranche; Human Gate pending:** legal episodic trainer and matched synthetic E0/E1/E2 diagnostics.
-6. **T2 — active implementation candidate; Human Gate pending:** physical anchors, shared/local-global field attribution, and seed memory.
-7. **T3 P0/P1 — active implementation candidate; Human Gate pending:** bounded static propagation and immutable state updates.
-8. **T4 — blocked:** routing and adaptive acquisition.
-9. **T5 — active implementation candidate; Human Gate pending:** reconstruction, export, and isolated serialized evaluation.
-
-## Status
-
-T0, T0.5, and T1-A are implemented software contracts. T1-B software is merged
-and its Human Gate is passed. T1-C is implemented; T2, T3 P0/P1, and T5 have
-active branch implementations under fast-track authorization. All four Human
-Gates remain pending, T4 remains blocked, and software execution is not
-reconstruction success.
+Start with [the frontend contract](docs/architecture/POINT_GUIDED_FRONTEND.md)
+and use the task-scoped [codegraph](CODEGRAPH.json) rather than scanning the
+whole repository.

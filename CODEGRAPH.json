@@ -1,0 +1,177 @@
+{
+  "schema_version": 1,
+  "workspace_root": ".",
+  "default_access": "deny",
+  "description": "Task-scoped navigation and edit policy for the point-guided MRI frontend.",
+  "tasks": {
+    "frontend": {
+      "purpose": "Implement the locked semantic-prior, point-refinement, and sparse PoU forward path.",
+      "entrypoints": [
+        "src/smagm/features/point_guided/model.py",
+        "src/smagm/features/point_guided/contracts.py",
+        "src/smagm/features/point_guided/config.py"
+      ],
+      "read_paths": [
+        "src/smagm/features/point_guided/**",
+        "configs/model_config.py",
+        "src/smagm/contracts/coordinates.py",
+        "src/smagm/features/contracts.py",
+        "tests/features/point_guided/**",
+        "CODEGRAPH.json",
+        "docs/architecture/POINT_GUIDED_FRONTEND.md"
+      ],
+      "write_paths": [
+        "src/smagm/features/point_guided/**",
+        "configs/model_config.py",
+        "tests/features/point_guided/**",
+        "docs/architecture/POINT_GUIDED_FRONTEND.md",
+        "CODEBASE.md",
+        "README.md",
+        "CHANGELOG.md"
+      ],
+      "blocked_paths": [
+        "src/smagm/anchors/**",
+        "src/smagm/fields/**",
+        "src/smagm/memory/**",
+        "src/smagm/routing/**",
+        "src/smagm/training/**",
+        "src/smagm/evaluation/**",
+        "src/smagm/reconstruction/**",
+        "src/smagm/cli/**",
+        "src/smagm/data/**"
+      ]
+    },
+    "medicalnet": {
+      "purpose": "Implement or audit the checkpoint-compatible MedicalNet ResNet10 semantic prior.",
+      "entrypoints": [
+        "src/smagm/features/point_guided/medicalnet_resnet10.py",
+        "src/smagm/features/point_guided/semantic_prior.py"
+      ],
+      "read_paths": [
+        "src/smagm/features/point_guided/medicalnet_resnet10.py",
+        "src/smagm/features/point_guided/semantic_prior.py",
+        "src/smagm/features/point_guided/config.py",
+        "tests/features/point_guided/test_semantic_prior.py",
+        "docs/architecture/POINT_GUIDED_FRONTEND.md",
+        "CODEGRAPH.json"
+      ],
+      "write_paths": [
+        "src/smagm/features/point_guided/medicalnet_resnet10.py",
+        "src/smagm/features/point_guided/semantic_prior.py",
+        "tests/features/point_guided/test_semantic_prior.py",
+        "docs/architecture/POINT_GUIDED_FRONTEND.md"
+      ],
+      "blocked_paths": [
+        "data/**",
+        "src/smagm/data/**",
+        "src/smagm/training/**",
+        "src/smagm/cli/**"
+      ]
+    },
+    "data-boundary-audit": {
+      "purpose": "Audit the legacy BraTS21 sparse-plane protocol without implementing an unapproved 3-D volume adapter.",
+      "entrypoints": [
+        "src/smagm/data/brats21.py",
+        "src/smagm/data/io.py",
+        "src/smagm/data/normalization.py"
+      ],
+      "read_paths": [
+        "src/smagm/data/brats21.py",
+        "src/smagm/data/io.py",
+        "src/smagm/data/normalization.py",
+        "src/smagm/contracts/coordinates.py",
+        "tests/data/test_brats21.py",
+        "CODEGRAPH.json"
+      ],
+      "write_paths": [
+        "docs/architecture/POINT_GUIDED_FRONTEND.md"
+      ],
+      "blocked_paths": [
+        "src/smagm/data/point_guided_volume.py",
+        "tests/data/test_point_guided_volume.py",
+        "src/smagm/features/point_guided/model.py",
+        "src/smagm/training/**",
+        "src/smagm/evaluation/**",
+        "src/smagm/cli/**"
+      ]
+    },
+    "tests": {
+      "purpose": "Add small synthetic invariant and smoke tests for the locked frontend only.",
+      "entrypoints": [
+        "tests/features/point_guided/",
+        "tests/test_codegraph.py"
+      ],
+      "read_paths": [
+        "src/smagm/features/point_guided/**",
+        "src/smagm/contracts/coordinates.py",
+        "tests/features/point_guided/**",
+        "tests/test_codegraph.py",
+        "CODEGRAPH.json"
+      ],
+      "write_paths": [
+        "tests/features/point_guided/**",
+        "tests/test_codegraph.py"
+      ],
+      "blocked_paths": [
+        "data/**",
+        "experiments/**",
+        "src/smagm/data/**",
+        "src/smagm/training/**",
+        "src/smagm/cli/**"
+      ]
+    },
+    "quality": {
+      "purpose": "Maintain the frontend-only automated gate without reviving retired phase authority.",
+      "entrypoints": [
+        "quality/checklists.json",
+        "scripts/check_phase.py",
+        "tests/quality/test_phase_gate.py"
+      ],
+      "read_paths": [
+        "quality/**",
+        "scripts/check_phase.py",
+        "tests/quality/**",
+        "tests/features/point_guided/**",
+        "CODEGRAPH.json"
+      ],
+      "write_paths": [
+        "quality/**",
+        "scripts/check_phase.py",
+        "tests/quality/**"
+      ],
+      "blocked_paths": [
+        "src/smagm/anchors/**",
+        "src/smagm/fields/**",
+        "src/smagm/memory/**",
+        "src/smagm/routing/**",
+        "src/smagm/training/**",
+        "src/smagm/evaluation/**",
+        "src/smagm/reconstruction/**",
+        "src/smagm/cli/**",
+        "src/smagm/data/**"
+      ]
+    }
+  },
+  "edges": [
+    {
+      "from": "src/smagm/features/point_guided/contracts.py",
+      "to": "src/smagm/contracts/coordinates.py",
+      "kind": "geometry contract"
+    },
+    {
+      "from": "src/smagm/features/point_guided/semantic_prior.py",
+      "to": "src/smagm/features/point_guided/medicalnet_resnet10.py",
+      "kind": "backbone composition"
+    },
+    {
+      "from": "src/smagm/features/point_guided/model.py",
+      "to": "src/smagm/features/point_guided/{semantic_prior,points,refinement,pou}.py",
+      "kind": "locked frontend composition"
+    },
+    {
+      "from": "src/smagm/data/brats21.py",
+      "to": "docs/architecture/POINT_GUIDED_FRONTEND.md",
+      "kind": "legacy-protocol boundary audit only"
+    }
+  ]
+}

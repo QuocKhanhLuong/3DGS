@@ -1,226 +1,40 @@
 {
-  "schema_version": 2,
-  "project": "Sparse multi-sequence MRI Gaussian reconstruction",
-  "allowed_implementation_statuses": ["implemented", "active", "planned"],
-  "allowed_human_gate_statuses": ["pending", "blocked", "retrospective_unrecorded", "passed", "passed_with_conditions", "failed"],
-  "allowed_automated_verdicts": ["PASS", "FAIL", "INCOMPLETE", "BLOCKED", "NOT_RUN"],
-  "allowed_phase_verdicts": ["PASS", "PASS_WITH_CONDITIONS", "REWORK", "FAIL", "BLOCKED", "PENDING_HUMAN_GATE", "NOT_RUN"],
-  "allowed_bindings": ["invariant", "contract", "evidence"],
-  "allowed_severities": ["blocker", "major", "minor", "info"],
-  "allowed_modes": ["command", "pytest", "human", "planned", "file"],
-  "human_gate_policy": {
-    "next_phase_rule": "Previous automated gate must pass, the previous Human Gate must be PASS or PASS_WITH_CONDITIONS, all conditions must be tracked, and the strategy must authorize the next tranche.",
-    "agent_limit": "Agents may collect evidence and recommend READY_FOR_HUMAN_REVIEW, but may not write the final Human Gate decision.",
-    "no_score_compensation": "A blocker failure cannot be offset by aggregate scores or a larger number of passing minor checks."
-  },
-  "global_checks": [
-    {"id":"G-AUTH-001","category":"authorization","binding":"invariant","severity":"blocker","mode":"human","description":"The phase is explicitly authorized by the current strategy and previous Human Gate.","reviewer_role":"pm"},
-    {"id":"G-SCOPE-001","category":"scope","binding":"invariant","severity":"blocker","mode":"human","description":"No implementation or placeholder API for a blocked later phase is introduced.","reviewer_role":"reviewer"},
-    {"id":"G-ARCH-001","category":"architecture","binding":"contract","severity":"blocker","mode":"human","description":"Changed files follow CODEBASE.md ownership and dependency direction.","reviewer_role":"reviewer"},
-    {"id":"G-TEST-001","category":"regression","binding":"evidence","severity":"blocker","mode":"command","description":"The complete CPU pytest suite passes.","command":["python","-m","pytest","-q"],"timeout_seconds":900},
-    {"id":"G-COMPILE-001","category":"regression","binding":"evidence","severity":"blocker","mode":"command","description":"Python source and tests compile.","command":["python","-m","compileall","-q","src","tests"],"timeout_seconds":180},
-    {"id":"G-DIFF-001","category":"repository","binding":"evidence","severity":"blocker","mode":"command","description":"The unstaged Git diff has no whitespace errors.","command":["git","diff","--check"],"timeout_seconds":60},
-    {"id":"G-DIFF-002","category":"repository","binding":"evidence","severity":"blocker","mode":"command","description":"The staged Git diff has no whitespace errors.","command":["git","diff","--cached","--check"],"timeout_seconds":60},
-    {"id":"G-LEGAL-001","category":"legality","binding":"invariant","severity":"blocker","mode":"human","description":"Target, sealed-audit, and unqueried candidate pixels remain behind declared access barriers.","reviewer_role":"reviewer"},
-    {"id":"G-RENDER-001","category":"renderer","binding":"invariant","severity":"blocker","mode":"human","description":"The low-level renderer remains pure, differentiable, and free of ledger or reveal ownership.","reviewer_role":"reviewer"},
-    {"id":"G-FINITE-001","category":"numerics","binding":"contract","severity":"blocker","mode":"human","description":"New public numeric outputs reject or expose non-finite values instead of silently propagating them.","reviewer_role":"qa"},
-    {"id":"G-CLAIM-001","category":"claims","binding":"invariant","severity":"blocker","mode":"human","description":"Tests and smoke runs are described as software evidence, not clinical or scientific validation.","reviewer_role":"reviewer"},
-    {"id":"G-REPRO-001","category":"reproducibility","binding":"contract","severity":"major","mode":"human","description":"Exact commit, dirty state, resolved configuration, seeds, environment, and relevant artifact hashes are recorded.","reviewer_role":"reproducibility_auditor"},
-    {"id":"G-DOCS-001","category":"documentation","binding":"contract","severity":"blocker","mode":"pytest","description":"Active documentation links resolve, retired documents stay absent, and active status prose does not use stale phase claims.","target":"tests/quality/test_document_hygiene.py"}
-  ],
-  "phases": {
-    "T0": {
-      "title":"Physical coordinates, Gaussian tensor contract, and reference renderer",
-      "implementation_status":"implemented",
-      "human_gate_status":"retrospective_unrecorded",
-      "prerequisites":[],
-      "authoritative_documents":["docs/reconstruction/modules/PLANE_RENDERER_RECONSTRUCTOR.md","CODEBASE.md"],
-      "checks":[
-        {"id":"T0-GEOM-001","category":"geometry","binding":"invariant","severity":"blocker","mode":"pytest","description":"Physical planes use canonical RAS millimetres with explicit [v,u] indexing, spacing, thickness, and signed normal.","target":"tests/contracts"},
-        {"id":"T0-GAUSS-001","category":"gaussians","binding":"contract","severity":"blocker","mode":"pytest","description":"Gaussian covariance factors are valid and support amplitudes carry explicit gauge provenance.","target":"tests/contracts"},
-        {"id":"T0-RENDER-001","category":"renderer","binding":"contract","severity":"blocker","mode":"pytest","description":"Analytic plane and slab references match the renderer and unsupported pixels remain explicit.","target":"tests/render"},
-        {"id":"T0-GRAD-001","category":"differentiability","binding":"evidence","severity":"blocker","mode":"pytest","description":"Finite gradients reach Gaussian parameters through the renderer.","target":"tests/render"},
-        {"id":"T0-PURE-001","category":"renderer","binding":"invariant","severity":"blocker","mode":"human","description":"Rendering does not mutate episode or patient state.","reviewer_role":"reviewer"}
-      ],
-      "human_review_questions":["Are coordinate and through-plane assumptions physically correct for the intended MRI data?","Is the renderer kept as a reference forward operator rather than overclaimed as ordinary camera-view 3DGS?"],
-      "pass_criteria":["Focused tests and global checks pass; geometry and renderer semantics receive human approval."],
-      "non_claims":["T0 does not establish reconstruction accuracy, clinical validity, or scanner acceleration."]
+  "schema_version": 1,
+  "gate": {
+    "id": "POINT_GUIDED_FRONTEND",
+    "title": "Locked point-guided T1/T2/FLAIR MRI frontend",
+    "automated_checks": [
+      {
+        "id": "PGF-CPU-TESTS-001",
+        "description": "Run the CPU synthetic point-guided suite, including the frontend smoke and refusal to synthesize T1ce.",
+        "command": ["python", "-m", "pytest", "-q", "tests/features/point_guided", "--tb=short"],
+        "timeout_seconds": 600
+      },
+      {
+        "id": "PGF-COMPILE-001",
+        "description": "Compile the point-guided frontend and its focused tests.",
+        "command": ["python", "-m", "compileall", "-q", "src/smagm/features/point_guided", "tests/features/point_guided"],
+        "timeout_seconds": 180
+      },
+      {
+        "id": "PGF-DIFF-001",
+        "description": "Reject whitespace errors in the working-tree diff.",
+        "command": ["git", "diff", "--check"],
+        "timeout_seconds": 60
+      }
+    ],
+    "human_gate": {
+      "status": "pending",
+      "policy": "Automated checks collect software evidence only. This runner cannot approve the Human Gate; a human must review the locked boundary and record any decision outside this runner.",
+      "questions": [
+        "Does the implementation preserve the T1/T2/FLAIR input, RAS-mm coordinates, explicit spacing, deterministic points, bounded 2 mm displacement, fixed 4 mm supports, and compact semantic-aware PoU contracts?",
+        "Does the public boundary stop at coarse semantics, points, point-centre semantics, and sparse PoU without creating a T1ce volume or adding unresolved downstream behavior?"
+      ]
     },
-    "T05": {
-      "title":"Legal sparse episodes, receipts, costs, splits, and amplitude gauge",
-      "implementation_status":"implemented",
-      "human_gate_status":"retrospective_unrecorded",
-      "prerequisites":["T0"],
-      "authoritative_documents":["docs/strategies/2026-07-29-isbi-realignment.md","CODEBASE.md"],
-      "checks":[
-        {"id":"T05-MANIFEST-001","category":"legality","binding":"invariant","severity":"blocker","mode":"pytest","description":"Permanent availability remains role-free; context and target roles belong only to immutable episode assignment.","target":"tests/contracts"},
-        {"id":"T05-RECEIPT-001","category":"legality","binding":"invariant","severity":"blocker","mode":"pytest","description":"Prediction registration precedes target reveal and receipts are exact, bound, and single-use.","target":"tests/contracts"},
-        {"id":"T05-STATE-001","category":"state","binding":"contract","severity":"blocker","mode":"pytest","description":"Frozen state binds context provenance, Gaussian digest, and episode identity and detects mutation.","target":"tests/integration"},
-        {"id":"T05-COST-001","category":"cost","binding":"contract","severity":"blocker","mode":"pytest","description":"Offline role assignment is separate from exact Decimal deployment acquisition cost.","target":"tests/contracts"},
-        {"id":"T05-SPLIT-001","category":"cohorts","binding":"invariant","severity":"blocker","mode":"pytest","description":"Training cannot access lesion-development or sealed final-audit cohorts.","target":"tests/contracts"},
-        {"id":"T05-GAUGE-001","category":"gaussians","binding":"invariant","severity":"blocker","mode":"pytest","description":"Every raw-to-runtime Gaussian conversion applies the declared amplitude gauge exactly once.","target":"tests/integration"}
-      ],
-      "human_review_questions":["Can any legal-looking path reveal target pixels before a renderer-minted prediction?","Are development and sealed-audit cohort boundaries understandable to a new contributor?"],
-      "pass_criteria":["Legality, state, split, cost, and gauge barriers pass adversarial review."],
-      "non_claims":["T0.5 proves enforcement contracts, not absence of every possible leakage in future code."]
-    },
-    "T1A": {
-      "title":"Analytic evidence to fixed Gaussian executable reference",
-      "implementation_status":"implemented",
-      "human_gate_status":"retrospective_unrecorded",
-      "prerequisites":["T05"],
-      "authoritative_documents":["docs/codex/T1A_EXECUTABLE_REFERENCE.md","CODEBASE.md"],
-      "checks":[
-        {"id":"T1A-ANALYTIC-001","category":"features","binding":"contract","severity":"blocker","mode":"pytest","description":"Analytic channels use physical spacing, explicit valid topology, and zero-consistent differential semantics.","target":"tests/features"},
-        {"id":"T1A-GRID-001","category":"geometry","binding":"invariant","severity":"blocker","mode":"pytest","description":"Feature centres follow locked half-pixel align_corners=False geometry for strides 1, 2, and 4.","target":"tests/features"},
-        {"id":"T1A-SUPPORT-001","category":"supports","binding":"invariant","severity":"blocker","mode":"pytest","description":"Support indices are deterministic, value-independent, and exclude padded or invalid centres.","target":"tests/baselines"},
-        {"id":"T1A-PROV-001","category":"provenance","binding":"contract","severity":"blocker","mode":"pytest","description":"Each support binds observation identity, canonical source-plane hash, and local physical basis.","target":"tests/baselines"},
-        {"id":"T1A-COV-001","category":"gaussians","binding":"contract","severity":"blocker","mode":"pytest","description":"Local centre and covariance predictions are transformed into canonical RAS consistently.","target":"tests/baselines"},
-        {"id":"T1A-END2END-001","category":"integration","binding":"evidence","severity":"blocker","mode":"command","description":"Synthetic reconstruction loss backpropagates through renderer, Gaussian head, supports, and analytic evidence.","command":["python","-m","smagm.cli.t1a","--steps","4"],"timeout_seconds":180}
-      ],
-      "human_review_questions":["Does T1-A isolate the downstream bridge without learned topology or later-phase mechanisms?","Are unsupported regions and provenance visible enough for scientific attribution?"],
-      "pass_criteria":["Focused tests, diagnostic CLI, and global checks pass; fixed topology is accepted as a software baseline."],
-      "non_claims":["T1-A does not establish real-MRI reconstruction quality or representation benefit."]
-    },
-    "T1B": {
-      "title":"Teacher-free E0/E1/E2 evidence encoders, cache, and structural objectives",
-      "implementation_status":"implemented",
-      "human_gate_status":"passed",
-      "human_gate_record":"docs/strategies/2026-07-31-t1b-human-gate-decision.md",
-      "prerequisites":["T1A"],
-      "authoritative_documents":["docs/codex/T1B_TEACHER_FREE_ENCODER.md","CODEBASE.md"],
-      "checks":[
-        {"id":"T1B-CONTRACT-001","category":"encoder","binding":"contract","severity":"blocker","mode":"pytest","description":"E0, E1, and E2 emit the same structural, appearance, reliability, geometry, and valid-mask contract.","target":"tests/features/test_encoder.py"},
-        {"id":"T1B-GEOM-001","category":"geometry","binding":"invariant","severity":"blocker","mode":"pytest","description":"Batch items retain independent physical planes and no transform is silently broadcast.","target":"tests/features/test_feature_alignment.py"},
-        {"id":"T1B-TOPO-001","category":"supports","binding":"invariant","severity":"blocker","mode":"pytest","description":"Reliability cannot change support topology and all variants share legal support indices.","target":"tests/features/test_feature_alignment.py"},
-        {"id":"T1B-CACHE-001","category":"cache","binding":"contract","severity":"blocker","mode":"pytest","description":"Cache retrieval is exact-key and rejects plane, preprocessing, state, dtype, mask, or target-derived mismatches.","target":"tests/features/test_feature_cache.py"},
-        {"id":"T1B-LOSS-001","category":"losses","binding":"contract","severity":"blocker","mode":"pytest","description":"Teacher-free structural objectives respect legal masks, reject unregistered comparisons, and expose collapse.","target":"tests/losses/test_structural_losses.py"},
-        {"id":"T1B-E0-001","category":"integration","binding":"evidence","severity":"blocker","mode":"command","description":"E0 runs through fixed supports, common head, renderer, and backward.","command":["python","-m","smagm.cli.t1b","--variant","e0"],"timeout_seconds":180},
-        {"id":"T1B-E1-001","category":"integration","binding":"evidence","severity":"blocker","mode":"command","description":"E1 runs through the same path with finite encoder gradients.","command":["python","-m","smagm.cli.t1b","--variant","e1"],"timeout_seconds":180},
-        {"id":"T1B-E2-001","category":"integration","binding":"evidence","severity":"blocker","mode":"command","description":"E2 runs through the same path with finite encoder gradients.","command":["python","-m","smagm.cli.t1b","--variant","e2"],"timeout_seconds":180},
-        {"id":"T1B-COMPUTE-001","category":"accounting","binding":"evidence","severity":"major","mode":"human","description":"Parameter and compute accounting does not hide E0 adapter cost.","reviewer_role":"reproducibility_auditor"}
-      ],
-      "human_review_questions":["Are E0/E1/E2 fair in dimensions, downstream head, support topology, initialization, and optimization opportunity?","Does Z_str retain geometry without being overclaimed as perfectly modality invariant?","Could reliability collapse, shortcut, or indirectly select topology?","Are structural objectives treated as warm-up evidence rather than proof of a useful representation?"],
-      "pass_criteria":["Focused tests and three diagnostic CLIs pass; fairness and claim discipline receive Human Gate approval."],
-      "non_claims":["T1-B does not establish reconstruction accuracy, disentanglement, clinical utility, or superiority."]
-    },
-    "T1C": {
-      "title":"Legal sparse episodic trainer and matched E0/E1/E2 experiments",
-      "implementation_status":"active",
-      "human_gate_status":"pending",
-      "prerequisites":["T1B"],
-      "authoritative_documents":["docs/strategies/2026-07-31-t1c-implementation-authorization.md","docs/codex/T1C_EPISODIC_TRAINER.md","docs/reconstruction/phases/01_DIRECT_SPARSE_TRAINING.md","CODEBASE.md"],
-      "checks":[
-        {"id":"T1C-AUTH-001","category":"authorization","binding":"invariant","severity":"blocker","mode":"file","description":"A recorded Human authorization opens only the T1-C implementation tranche.","path":"docs/strategies/2026-07-31-t1c-implementation-authorization.md"},
-        {"id":"T1C-EPISODE-001","category":"legality","binding":"invariant","severity":"blocker","mode":"pytest","description":"Episode assignment is fixed before payload access and state construction opens context only.","target":"tests/training/test_t1c_episode.py"},
-        {"id":"T1C-REVEAL-001","category":"legality","binding":"invariant","severity":"blocker","mode":"pytest","description":"Target pixels are revealed only after render and exact prediction receipt.","target":"tests/training/test_t1c_episode.py"},
-        {"id":"T1C-STATE-001","category":"state","binding":"invariant","severity":"blocker","mode":"pytest","description":"No target tensor or target-derived feature enters patient-state construction.","target":"tests/training/test_t1c_episode.py"},
-        {"id":"T1C-LOSS-001","category":"losses","binding":"contract","severity":"blocker","mode":"pytest","description":"Loss uses target-valid and renderer-supported pixels; empty legal masks produce typed skip or failure.","target":"tests/losses/test_reconstruction_losses.py"},
-        {"id":"T1C-GRAD-001","category":"differentiability","binding":"evidence","severity":"blocker","mode":"pytest","description":"A legal training step produces finite gradients to authorized encoder and Gaussian-head parameters.","target":"tests/training/test_t1c_episode.py"},
-        {"id":"T1C-FAIR-001","category":"experiments","binding":"contract","severity":"blocker","mode":"pytest","description":"E0/E1/E2 execute the same split, episode schedule, support topology, head, targets, budget, and checkpoint-selection rule.","target":"tests/training/test_t1c_cli.py"},
-        {"id":"T1C-WEIGHT-001","category":"experiments","binding":"invariant","severity":"blocker","mode":"pytest","description":"Each variant trains independent weights without cross-run cache contamination.","target":"tests/training/test_t1c_episode.py"},
-        {"id":"T1C-REPRO-001","category":"reproducibility","binding":"contract","severity":"blocker","mode":"pytest","description":"Trainer binds checkpoint resume to run/manifest/split/schedule identity and records commit, dirty state, config, preprocessing, opened-file ledger, encoder/head, renderer/gauge, environment, and artifact hashes.","target":"tests/training/test_t1c_provenance.py"},
-        {"id":"T1C-CONFIG-002","category":"experiments","binding":"contract","severity":"blocker","mode":"pytest","description":"The config file is resolved by the CLI, overrides are persisted, and required run artifacts are produced.","target":"tests/training/test_t1c_cli.py"},
-        {"id":"T1C-CONFIG-001","category":"experiments","binding":"evidence","severity":"blocker","mode":"file","description":"The matched synthetic E0/E1/E2 configuration is explicit.","path":"configs/experiments/t1c_synthetic.json"},
-        {"id":"T1C-E0-001","category":"integration","binding":"evidence","severity":"blocker","mode":"command","description":"E0 executes one legal synthetic optimizer step with provenance.","command":["python","scripts/train.py","--variant","e0","--json"],"development_allow_dirty_argument":"--allow-dirty","timeout_seconds":180},
-        {"id":"T1C-E1-001","category":"integration","binding":"evidence","severity":"blocker","mode":"command","description":"E1 executes the same legal synthetic path with finite encoder gradients.","command":["python","scripts/train.py","--variant","e1","--json"],"development_allow_dirty_argument":"--allow-dirty","timeout_seconds":180},
-        {"id":"T1C-E2-001","category":"integration","binding":"evidence","severity":"blocker","mode":"command","description":"E2 executes the same legal synthetic path with finite encoder gradients.","command":["python","scripts/train.py","--variant","e2","--json"],"development_allow_dirty_argument":"--allow-dirty","timeout_seconds":180},
-        {"id":"T1C-SCOPE-AUTO-001","category":"scope","binding":"invariant","severity":"blocker","mode":"pytest","description":"No T2 or later production package is introduced by T1-C.","target":"tests/training/test_t1c_episode.py"},
-        {"id":"T1C-SCOPE-001","category":"scope","binding":"invariant","severity":"blocker","mode":"human","description":"No anchor, field, propagation, learned topology, routing, or full-volume export is introduced.","reviewer_role":"reviewer"}
-      ],
-      "human_review_questions":["Does the episode protocol reflect permanent sparsity rather than artificial dense supervision?","Could target metadata or batching leak appearance?","Are variants matched strongly enough for attribution?","Does the objective admit a trivial smooth or unsupported solution?"],
-      "pass_criteria":["Legal reproducible synthetic steps pass for E0/E1/E2; bounded real-data smoke and the matched scientific protocol remain Human Gate evidence."],
-      "non_claims":["Loss reduction or a synthetic example alone does not validate the representation."]
-    },
-    "T2": {
-      "title":"Physical anchor bootstrap, aggregation, and shared local structural field",
-      "implementation_status":"active",
-      "human_gate_status":"pending",
-      "prerequisites":["T1C"],
-      "authoritative_documents":["docs/strategies/2026-08-01-full-static-pipeline-fast-track-authorization.md","docs/designs/2026-08-01-t2-fast-track-addendum.md","docs/reconstruction/modules/ANCHOR_LOCAL_FIELD.md","docs/reconstruction/phases/02_INITIAL_ANCHOR_BOOTSTRAP.md","CODEBASE.md"],
-      "checks":[
-        {"id":"T2-CAND-001","category":"anchors","binding":"invariant","severity":"blocker","mode":"pytest","description":"Candidates derive only from legal cached context evidence and physical topology.","target":"tests/anchors/test_t2_anchors.py"},
-        {"id":"T2-NMS-001","category":"geometry","binding":"contract","severity":"blocker","mode":"pytest","description":"Suppression and merge distances use RAS millimetres with explicit spacing and orientation.","target":"tests/anchors/test_t2_anchors.py"},
-        {"id":"T2-CONTRACT-001","category":"anchors","binding":"contract","severity":"blocker","mode":"pytest","description":"Centre, frame, scale, evidence, confidence, observability, and provenance are distinct typed fields.","target":"tests/anchors/test_t2_anchors.py"},
-        {"id":"T2-AGG-001","category":"aggregation","binding":"invariant","severity":"blocker","mode":"pytest","description":"Aggregation samples the exact cache and does not rerun the encoder at patient inference.","target":"tests/anchors/test_t2_anchors.py"},
-        {"id":"T2-REG-001","category":"aggregation","binding":"invariant","severity":"blocker","mode":"pytest","description":"Cross-plane or cross-modality evidence requires declared registration and confidence.","target":"tests/anchors/test_t2_anchors.py"},
-        {"id":"T2-FIELD-001","category":"fields","binding":"contract","severity":"blocker","mode":"pytest","description":"One shared low-capacity MLP maps local coordinates plus compact evidence to a scalar structural field.","target":"tests/fields/test_t2_fields.py"},
-        {"id":"T2-BLEND-001","category":"fields","binding":"contract","severity":"blocker","mode":"pytest","description":"Local predictions blend with stable differentiable normalized weights and explicit empty-support behavior.","target":"tests/fields/test_t2_fields.py"},
-        {"id":"T2-GRAD-001","category":"differentiability","binding":"evidence","severity":"blocker","mode":"pytest","description":"Finite gradients pass through bootstrap, aggregation, field, Gaussian construction, and rendering where authorized.","target":"tests/training/test_static_pipeline.py"},
-        {"id":"T2-NAME-001","category":"claims","binding":"invariant","severity":"blocker","mode":"human","description":"Public APIs use structural_field or level_set_field until sign, distance, and Eikonal evidence justify SDF terminology.","reviewer_role":"reviewer"},
-        {"id":"T2-COMPLEX-001","category":"accounting","binding":"evidence","severity":"major","mode":"pytest","description":"Anchor count, field parameters, cache bytes, runtime, and coverage are bounded and reported.","target":"tests/integration/test_full_static_cli.py"}
-      ],
-      "human_review_questions":["Are anchors genuine physical supports rather than renamed feature tokens?","Does the shared field add value over fixed supports and interpolation?","Could candidate scoring or consolidation erase small lesions?","Are partial observability and unsupported areas represented honestly?"],
-      "pass_criteria":["Geometry and cache legality pass; field is stable and differentiable; development evidence beats the fixed-support baseline under a frozen protocol."],
-      "non_claims":["T2 does not justify true-SDF language or unseen-pathology recovery without separate evidence."]
-    },
-    "T3": {
-      "title":"Patient Gaussian memory and bounded static P0/P1 propagation",
-      "implementation_status":"active",
-      "human_gate_status":"pending",
-      "prerequisites":["T2"],
-      "authoritative_documents":["docs/strategies/2026-08-01-full-static-pipeline-fast-track-authorization.md","docs/plans/2026-08-01-t3-anchor-gaussian-propagation-plan.md","docs/reconstruction/modules/SDF_GAUSSIAN_MEMORY.md","CODEBASE.md"],
-      "checks":[
-        {"id":"T3-BANK-001","category":"memory","binding":"contract","severity":"blocker","mode":"pytest","description":"Structural and volumetric Gaussian banks remain typed, distinguishable, and separately ablatable.","target":"tests/memory/test_t2_memory_state.py"},
-        {"id":"T3-STATE-001","category":"state","binding":"invariant","severity":"blocker","mode":"pytest","description":"Global parameters and patient state are separated; every update is versioned and hashed.","target":"tests/memory/test_t3_propagation.py"},
-        {"id":"T3-PROV-001","category":"propagation","binding":"contract","severity":"blocker","mode":"pytest","description":"Every propagated primitive retains parent, depth, evidence, and update-round provenance.","target":"tests/memory/test_t3_propagation.py"},
-        {"id":"T3-UNC-001","category":"uncertainty","binding":"invariant","severity":"blocker","mode":"pytest","description":"Uncertainty does not decrease merely with propagation depth and unsupported jumps are rejected.","target":"tests/memory/test_t3_propagation.py"},
-        {"id":"T3-BOUND-001","category":"propagation","binding":"contract","severity":"blocker","mode":"pytest","description":"Propagation uses bounded neighborhoods and a finite stop condition.","target":"tests/memory/test_t3_propagation.py"},
-        {"id":"T3-ASSIM-001","category":"assimilation","binding":"invariant","severity":"major","mode":"planned","description":"Residual assimilation is outside the authorized P0/P1 implementation and remains absent.","planned_owner":"future explicitly authorized T3 extension"},
-        {"id":"T3-GEOM-001","category":"assimilation","binding":"contract","severity":"major","mode":"planned","description":"Learned geometry assimilation remains outside the authorized P0/P1 implementation.","planned_owner":"future explicitly authorized T3 extension"},
-        {"id":"T3-TOPO-001","category":"topology","binding":"contract","severity":"blocker","mode":"pytest","description":"The P0/P1 tranche exposes no adaptive topology or anchor-move API.","target":"tests/memory/test_t3_propagation.py"},
-        {"id":"T3-PRUNE-001","category":"topology","binding":"invariant","severity":"blocker","mode":"pytest","description":"P0/P1 contains no amplitude- or uncertainty-triggered deletion path.","target":"tests/memory/test_t3_propagation.py"},
-        {"id":"T3-NUM-001","category":"numerics","binding":"contract","severity":"blocker","mode":"pytest","description":"Covariance, gauge, finite-state, and deterministic invariants hold across update rounds and dtypes.","target":"tests/memory/test_t3_propagation.py"}
-      ],
-      "human_review_questions":["Is propagation scientifically motivated rather than generic feature diffusion?","What evidence permits support to move into unobserved regions?","Does uncertainty reflect observability and provenance?","Can topology adaptation hallucinate or erase pathology?","Does improvement remain after matching primitive count and compute?"],
-      "pass_criteria":["Bounded versioned updates pass; provenance and uncertainty remain intact; matched-compute development experiments improve static reconstruction without unacceptable hallucination evidence."],
-      "non_claims":["T3 does not prove safe propagation into unseen anatomy or calibrated uncertainty."]
-    },
-    "T4": {
-      "title":"Legal active sequence-slice routing and stopping",
-      "implementation_status":"planned",
-      "human_gate_status":"blocked",
-      "prerequisites":["T3"],
-      "authoritative_documents":["docs/reconstruction/modules/TRAJECTORY_ROUTER.md","CODEBASE.md"],
-      "checks":[
-        {"id":"T4-NOPIX-001","category":"routing","binding":"invariant","severity":"blocker","mode":"planned","description":"Router receives only legal metadata and patient-state descriptors, never unqueried candidate pixels.","planned_owner":"tests/routing/"},
-        {"id":"T4-CAND-001","category":"routing","binding":"contract","severity":"blocker","mode":"planned","description":"Candidate set contains only permanently available legal observations and excludes observed or committed items.","planned_owner":"src/smagm/routing/candidates.py"},
-        {"id":"T4-COST-001","category":"cost","binding":"contract","severity":"blocker","mode":"planned","description":"Acquisition cost uses the exact declared schedule and budget cannot be exceeded.","planned_owner":"tests/routing/"},
-        {"id":"T4-UTIL-001","category":"routing","binding":"contract","severity":"blocker","mode":"planned","description":"Quality, uncertainty, coverage, redundancy, and cost components are explicit, finite, and separately logged.","planned_owner":"src/smagm/routing/utility.py"},
-        {"id":"T4-TIE-001","category":"determinism","binding":"contract","severity":"blocker","mode":"planned","description":"Candidate permutation and score ties follow a declared deterministic policy.","planned_owner":"tests/routing/"},
-        {"id":"T4-ORDER-001","category":"legality","binding":"invariant","severity":"blocker","mode":"planned","description":"Commit, render-before-update, receipt, reveal, cache append, and local update ordering is enforced end to end.","planned_owner":"src/smagm/routing/controller.py"},
-        {"id":"T4-STOP-001","category":"routing","binding":"contract","severity":"blocker","mode":"planned","description":"Stopping is finite, budget-safe, and exposes its reason.","planned_owner":"src/smagm/routing/stopping.py"},
-        {"id":"T4-BASE-001","category":"baselines","binding":"evidence","severity":"blocker","mode":"planned","description":"Random, uniform, metadata-balanced, uncertainty-only, and coverage-only baselines use matched access and budget.","planned_owner":"src/smagm/routing/baselines.py"},
-        {"id":"T4-METRIC-001","category":"experiments","binding":"evidence","severity":"blocker","mode":"planned","description":"Quality-cost area, redundancy, stability, decision runtime, and matched-budget quality are reported per patient.","planned_owner":"experiments/reports/"},
-        {"id":"T4-SCOPE-001","category":"claims","binding":"invariant","severity":"blocker","mode":"human","description":"Routing success is not inferred from one attractive trajectory or hidden target-derived utility.","reviewer_role":"reviewer"}
-      ],
-      "human_review_questions":["Could slice index, scanner protocol, or dataset naming provide a shortcut?","Is uncertainty sufficiently calibrated for utility use?","Is the active setting plausible in the intended MRI workflow?","Does routing amplify bias for rare pathology?"],
-      "pass_criteria":["Multiple-seed patient-level quality-cost evidence beats matched routing baselines; legality and stopping pass Human Gate."],
-      "non_claims":["T4 does not establish clinical acquisition benefit from retrospective simulation alone."]
-    },
-    "T5": {
-      "title":"Full reconstruction, export, uncertainty, and isolated audit evaluation",
-      "implementation_status":"active",
-      "human_gate_status":"pending",
-      "prerequisites":["T3"],
-      "authoritative_documents":["docs/strategies/2026-08-01-full-static-pipeline-fast-track-authorization.md","docs/plans/2026-08-01-t5-reconstruction-export-evaluation-plan.md","docs/reconstruction/modules/PLANE_RENDERER_RECONSTRUCTOR.md","docs/reconstruction/phases/04_FINAL_RECONSTRUCTION.md","CODEBASE.md"],
-      "checks":[
-        {"id":"T5-STATE-001","category":"reconstruction","binding":"invariant","severity":"blocker","mode":"pytest","description":"Full volume and arbitrary planes are generated only from serialized patient state and frozen global parameters.","target":"tests/reconstruction/test_t5_reconstruction.py"},
-        {"id":"T5-CHUNK-001","category":"reconstruction","binding":"contract","severity":"blocker","mode":"pytest","description":"Chunked and bounded non-chunked references agree within declared tolerance.","target":"tests/reconstruction/test_t5_reconstruction.py"},
-        {"id":"T5-AFFINE-001","category":"geometry","binding":"contract","severity":"blocker","mode":"pytest","description":"Shape, affine, spacing, orientation, dtype, and through-plane semantics survive reconstruction and export.","target":"tests/reconstruction/test_t5_reconstruction.py"},
-        {"id":"T5-UNSUP-001","category":"coverage","binding":"invariant","severity":"blocker","mode":"pytest","description":"Unsupported regions remain explicit and are never silently filled with confident intensity.","target":"tests/reconstruction/test_t5_reconstruction.py"},
-        {"id":"T5-UNC-001","category":"uncertainty","binding":"contract","severity":"blocker","mode":"pytest","description":"Uncertainty aligns with reconstruction and binds observability, propagation, model, and calibration provenance.","target":"tests/reconstruction/test_t5_reconstruction.py"},
-        {"id":"T5-SER-001","category":"serialization","binding":"contract","severity":"blocker","mode":"pytest","description":"Round-trip artifacts preserve hashes, affine, config, manifest, renderer profile, and state schema.","target":"tests/reconstruction/test_t5_reconstruction.py"},
-        {"id":"T5-CORRUPT-001","category":"serialization","binding":"invariant","severity":"blocker","mode":"pytest","description":"Partial, stale, corrupt, or placeholder-provenance artifacts fail closed.","target":"tests/reconstruction/test_t5_reconstruction.py"},
-        {"id":"T5-ISO-001","category":"evaluation","binding":"invariant","severity":"blocker","mode":"pytest","description":"Evaluator reads serialized predictions and audit targets only and cannot mutate model, route, or patient state.","target":"tests/reconstruction/test_t5_reconstruction.py"},
-        {"id":"T5-SEAL-001","category":"cohorts","binding":"invariant","severity":"blocker","mode":"pytest","description":"The evaluator distinguishes unsealed self-target diagnostics from sealed immutable-target audit plans.","target":"tests/integration/test_full_static_cli.py"},
-        {"id":"T5-STATS-001","category":"statistics","binding":"evidence","severity":"blocker","mode":"pytest","description":"Metrics are aggregated per patient with uncertainty intervals and declared missing or failure handling.","target":"tests/reconstruction/test_t5_reconstruction.py"},
-        {"id":"T5-MED-001","category":"medical_fidelity","binding":"evidence","severity":"blocker","mode":"pytest","description":"Intensity, structure, gradient or frequency, coverage, runtime, memory, and complexity diagnostics are executable; lesion/ROI evidence remains dataset-dependent.","target":"tests/reconstruction/test_t5_reconstruction.py"},
-        {"id":"T5-CLAIM-001","category":"claims","binding":"invariant","severity":"blocker","mode":"human","description":"Headline claims map to immutable manifests, serialized artifacts, patient-level statistics, and reviewed failure cases.","reviewer_role":"reviewer"}
-      ],
-      "human_review_questions":["Do metrics capture medical fidelity rather than reward smoothness?","Could dense-looking output conceal unsupported or hallucinated regions?","Are baselines matched in access, compute, and selection opportunity?","Was final audit isolated after protocol freeze?","Do terms such as reconstruction, uncertainty, structural field, and SDF match the evidence?"],
-      "pass_criteria":["PASS_FOR_PAPER requires software and audit isolation, frozen protocol, matched baselines, patient-level statistics, medical-fidelity evidence, compute accounting, and claim-level Human Gate approval."],
-      "non_claims":["A successful export, attractive image, or aggregate metric alone is insufficient for paper-level validation."]
-    }
+    "non_claims": [
+      "A passing automated gate is software-contract evidence only, not reconstruction, clinical, or novelty validation.",
+      "This frontend does not synthesize, reconstruct, export, or claim a T1ce volume.",
+      "Spectral anchors, dynamic tri-planes, selection, updates, history, stopping, decoding, and reconstruction losses remain unresolved interfaces."
+    ]
   }
 }

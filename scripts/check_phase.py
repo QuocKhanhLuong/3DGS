@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Validate and execute repository phase-gate evidence.
+"""Validate the locked point-guided MRI frontend quality gate.
 
-The runner distinguishes implementation state from Human Gate state. It can
-collect evidence and write reports, but it never records a Human Gate PASS.
+The runner records automated software evidence.  Its Human Gate is deliberately
+pending: this program has no approval path and cannot make a human decision.
 """
 
 from __future__ import annotations
@@ -15,194 +15,89 @@ import subprocess
 import sys
 from typing import Any
 
+
 ROOT = Path(__file__).resolve().parents[1]
 CATALOG_PATH = ROOT / "quality" / "checklists.json"
-AGENT_DIR = ROOT / ".codex" / "agents"
-PHASE_ALIASES = {
-    "T0.5": "T05",
-    "T0_5": "T05",
-    "T1-A": "T1A",
-    "T1-B": "T1B",
-    "T1-C": "T1C",
-}
-IMPLEMENTATION_STATUSES = {"implemented", "active", "planned"}
-HUMAN_GATE_STATUSES = {
-    "pending",
-    "blocked",
-    "retrospective_unrecorded",
-    "passed",
-    "passed_with_conditions",
-    "failed",
-}
-AUTOMATED_VERDICTS = {"PASS", "FAIL", "INCOMPLETE", "BLOCKED", "NOT_RUN"}
-PHASE_VERDICTS = {
-    "PASS",
-    "PASS_WITH_CONDITIONS",
-    "REWORK",
-    "FAIL",
-    "BLOCKED",
-    "PENDING_HUMAN_GATE",
-    "NOT_RUN",
-}
+GATE_ID = "POINT_GUIDED_FRONTEND"
 
 
 class CatalogError(ValueError):
-    """Raised when the machine-readable gate catalog is malformed."""
-
-
-def _configured_role_ids() -> set[str]:
-    return {path.stem for path in AGENT_DIR.glob("*.toml")}
+    """Raised when the machine-readable quality-gate catalog is malformed."""
 
 
 def _load_catalog(path: Path = CATALOG_PATH) -> dict[str, Any]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        catalog = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise CatalogError(f"checklist catalog not found: {path}") from exc
     except json.JSONDecodeError as exc:
         raise CatalogError(f"invalid checklist JSON: {exc}") from exc
-    _validate_catalog(data)
-    return data
+    _validate_catalog(catalog)
+    return catalog
 
 
-def _validate_catalog(data: dict[str, Any]) -> None:
-    required = {
-        "schema_version",
-        "allowed_implementation_statuses",
-        "allowed_human_gate_statuses",
-        "allowed_automated_verdicts",
-        "allowed_phase_verdicts",
-        "allowed_bindings",
-        "allowed_severities",
-        "allowed_modes",
-        "global_checks",
-        "phases",
-        "human_gate_policy",
-    }
-    missing = required - data.keys()
-    if missing:
-        raise CatalogError(f"catalog missing keys: {sorted(missing)}")
-    if data["schema_version"] != 2:
+def _validate_string_list(value: Any, label: str, *, nonempty: bool = True) -> None:
+    if not isinstance(value, list) or (nonempty and not value):
+        raise CatalogError(f"{label} must be a non-empty list")
+    if not all(isinstance(item, str) and item.strip() for item in value):
+        raise CatalogError(f"{label} must contain non-empty strings")
+
+
+def _validate_catalog(catalog: Any) -> None:
+    if not isinstance(catalog, dict):
+        raise CatalogError("catalog must be an object")
+    if set(catalog) != {"schema_version", "gate"}:
+        raise CatalogError("catalog must contain only schema_version and gate")
+    if catalog["schema_version"] != 1:
         raise CatalogError("unsupported schema_version")
-    if set(data["allowed_implementation_statuses"]) != IMPLEMENTATION_STATUSES:
-        raise CatalogError("implementation status vocabulary is not exact")
-    if set(data["allowed_human_gate_statuses"]) != HUMAN_GATE_STATUSES:
-        raise CatalogError("Human Gate status vocabulary is not exact")
-    if set(data["allowed_automated_verdicts"]) != AUTOMATED_VERDICTS:
-        raise CatalogError("automated verdict vocabulary is not exact")
-    if set(data["allowed_phase_verdicts"]) != PHASE_VERDICTS:
-        raise CatalogError("phase verdict vocabulary is not exact")
-    if not isinstance(data["phases"], dict) or not data["phases"]:
-        raise CatalogError("phases must be a non-empty object")
 
-    expected_phases = {"T0", "T05", "T1A", "T1B", "T1C", "T2", "T3", "T4", "T5"}
-    if set(data["phases"]) != expected_phases:
-        raise CatalogError(f"catalog phases must be exactly {sorted(expected_phases)}")
+    gate = catalog["gate"]
+    if not isinstance(gate, dict):
+        raise CatalogError("gate must be an object")
+    required_gate_keys = {"id", "title", "automated_checks", "human_gate", "non_claims"}
+    if set(gate) != required_gate_keys:
+        raise CatalogError(f"gate keys must be exactly {sorted(required_gate_keys)}")
+    if gate["id"] != GATE_ID:
+        raise CatalogError(f"gate id must be {GATE_ID}")
+    if not isinstance(gate["title"], str) or not gate["title"].strip():
+        raise CatalogError("gate title must be a non-empty string")
+    _validate_string_list(gate["non_claims"], "gate non_claims")
 
-    bindings = set(data["allowed_bindings"])
-    severities = set(data["allowed_severities"])
-    modes = set(data["allowed_modes"])
-    configured_roles = _configured_role_ids()
+    human_gate = gate["human_gate"]
+    if not isinstance(human_gate, dict):
+        raise CatalogError("human_gate must be an object")
+    if set(human_gate) != {"status", "policy", "questions"}:
+        raise CatalogError("human_gate keys must be exactly status, policy, and questions")
+    if human_gate["status"] != "pending":
+        raise CatalogError("the Human Gate status is immutable pending in this runner")
+    if not isinstance(human_gate["policy"], str) or not human_gate["policy"].strip():
+        raise CatalogError("human_gate policy must be a non-empty string")
+    _validate_string_list(human_gate["questions"], "human_gate questions")
+
+    checks = gate["automated_checks"]
+    if not isinstance(checks, list) or not checks:
+        raise CatalogError("automated_checks must be a non-empty list")
     seen_ids: set[str] = set()
-
-    def validate_check(check: Any, owner: str) -> None:
-        if not isinstance(check, dict):
-            raise CatalogError(f"{owner} contains a non-object check")
-        for key in ("id", "category", "binding", "severity", "mode", "description"):
-            if not isinstance(check.get(key), str) or not check[key].strip():
-                raise CatalogError(f"{owner} check missing non-empty {key}")
+    required_check_keys = {"id", "description", "command", "timeout_seconds"}
+    for check in checks:
+        if not isinstance(check, dict) or set(check) != required_check_keys:
+            raise CatalogError(f"each automated check must have exactly {sorted(required_check_keys)}")
         check_id = check["id"]
+        if not isinstance(check_id, str) or not check_id.startswith("PGF-"):
+            raise CatalogError("automated check id must start with PGF-")
         if check_id in seen_ids:
-            raise CatalogError(f"duplicate check id: {check_id}")
+            raise CatalogError(f"duplicate automated check id: {check_id}")
         seen_ids.add(check_id)
-        if check["binding"] not in bindings:
-            raise CatalogError(f"{check_id} has unsupported binding")
-        if check["severity"] not in severities:
-            raise CatalogError(f"{check_id} has unsupported severity")
-        if check["mode"] not in modes:
-            raise CatalogError(f"{check_id} has unsupported mode")
-        if check["mode"] == "command":
-            command = check.get("command")
-            if not isinstance(command, list) or not command or not all(
-                isinstance(part, str) and part for part in command
-            ):
-                raise CatalogError(f"{check_id} command must be a non-empty string list")
-            dirty_argument = check.get("development_allow_dirty_argument")
-            if dirty_argument is not None and (not isinstance(dirty_argument, str) or not dirty_argument):
-                raise CatalogError(f"{check_id} development_allow_dirty_argument must be a non-empty string")
-        elif check["mode"] == "pytest":
-            if not isinstance(check.get("target"), str) or not check["target"]:
-                raise CatalogError(f"{check_id} pytest check requires target")
-        elif check["mode"] == "human":
-            role = check.get("reviewer_role")
-            if not isinstance(role, str) or not role:
-                raise CatalogError(f"{check_id} human check requires reviewer_role")
-            if role not in configured_roles:
-                raise CatalogError(
-                    f"{check_id} reviewer_role {role!r} has no .codex/agents/{role}.toml"
-                )
-        elif check["mode"] == "planned":
-            if not isinstance(check.get("planned_owner"), str) or not check["planned_owner"]:
-                raise CatalogError(f"{check_id} planned check requires planned_owner")
-        elif check["mode"] == "file":
-            if not isinstance(check.get("path"), str) or not check["path"]:
-                raise CatalogError(f"{check_id} file check requires path")
-
-    if not isinstance(data["global_checks"], list):
-        raise CatalogError("global_checks must be a list")
-    for check in data["global_checks"]:
-        validate_check(check, "global_checks")
-
-    phase_names = set(data["phases"])
-    for phase_name, phase in data["phases"].items():
-        if not isinstance(phase, dict):
-            raise CatalogError(f"phase {phase_name} must be an object")
-        for key in (
-            "title",
-            "implementation_status",
-            "human_gate_status",
-            "prerequisites",
-            "authoritative_documents",
-            "checks",
-            "human_review_questions",
-            "pass_criteria",
-            "non_claims",
-        ):
-            if key not in phase:
-                raise CatalogError(f"phase {phase_name} missing {key}")
-        if phase["implementation_status"] not in IMPLEMENTATION_STATUSES:
-            raise CatalogError(f"phase {phase_name} has invalid implementation_status")
-        if phase["human_gate_status"] not in HUMAN_GATE_STATUSES:
-            raise CatalogError(f"phase {phase_name} has invalid human_gate_status")
-        if phase["implementation_status"] == "planned" and phase["human_gate_status"] != "blocked":
-            raise CatalogError(f"planned phase {phase_name} must have a blocked Human Gate")
-        if phase["implementation_status"] == "implemented" and phase["human_gate_status"] == "blocked":
-            raise CatalogError(f"implemented phase {phase_name} cannot have a blocked Human Gate")
-        if phase["human_gate_status"] in {"passed", "passed_with_conditions", "failed"}:
-            record = phase.get("human_gate_record")
-            if not isinstance(record, str) or not record or not (ROOT / record).is_file():
-                raise CatalogError(f"phase {phase_name} requires a committed human_gate_record")
-        if not isinstance(phase["prerequisites"], list):
-            raise CatalogError(f"phase {phase_name} prerequisites must be a list")
-        unknown = set(phase["prerequisites"]) - phase_names
-        if unknown:
-            raise CatalogError(f"phase {phase_name} has unknown prerequisites: {sorted(unknown)}")
-        for list_key in (
-            "authoritative_documents",
-            "checks",
-            "human_review_questions",
-            "pass_criteria",
-            "non_claims",
-        ):
-            if not isinstance(phase[list_key], list):
-                raise CatalogError(f"phase {phase_name} {list_key} must be a list")
-        for check in phase["checks"]:
-            validate_check(check, phase_name)
+        if not isinstance(check["description"], str) or not check["description"].strip():
+            raise CatalogError(f"{check_id} description must be a non-empty string")
+        _validate_string_list(check["command"], f"{check_id} command")
+        timeout = check["timeout_seconds"]
+        if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
+            raise CatalogError(f"{check_id} timeout_seconds must be a positive integer")
 
 
-def _normalize_phase(value: str) -> str:
-    normalized = value.strip().upper()
-    return PHASE_ALIASES.get(normalized, normalized.replace("-", ""))
+def _normalize_gate(value: str) -> str:
+    return value.strip().upper()
 
 
 def _git_metadata() -> dict[str, Any]:
@@ -227,7 +122,7 @@ def _git_metadata() -> dict[str, Any]:
 
 
 def _resolve_command(command: list[str]) -> list[str]:
-    """Use the interpreter running this process for Python commands."""
+    """Run catalogued Python commands with the interpreter running this script."""
 
     if command and Path(command[0]).name in {"python", "python3"}:
         return [sys.executable, *command[1:]]
@@ -266,162 +161,70 @@ def _run_process(command: list[str], timeout_seconds: int) -> dict[str, Any]:
     }
 
 
-def _evaluate_check(check: dict[str, Any], run: bool, execution_blocked: bool = False) -> dict[str, Any]:
+def _evaluate_check(check: dict[str, Any], *, run: bool, execution_blocked: bool) -> dict[str, Any]:
     result: dict[str, Any] = {
         "id": check["id"],
-        "category": check["category"],
-        "severity": check["severity"],
-        "mode": check["mode"],
         "description": check["description"],
+        "command": _resolve_command(list(check["command"])),
     }
-    mode = check["mode"]
-    if mode == "human":
-        result.update(status="PENDING_HUMAN", reviewer_role=check["reviewer_role"])
-    elif mode == "planned":
-        result.update(status="PLANNED", planned_owner=check.get("planned_owner"))
-    elif mode == "file":
-        exists = (ROOT / check["path"]).exists()
-        result.update(status="PASS" if exists else "FAIL", path=check["path"])
-    elif execution_blocked:
-        result.update(status="BLOCKED", reason="dirty tree; rerun with --allow-dirty for development evidence")
+    if execution_blocked:
+        result.update(
+            status="BLOCKED",
+            reason="dirty tree; rerun with --allow-dirty for development evidence",
+        )
     elif not run:
         result.update(status="NOT_RUN")
     else:
-        if mode == "pytest":
-            command = [sys.executable, "-m", "pytest", "-q", check["target"], "--tb=short"]
-        else:
-            command = list(check["command"])
-        result.update(_run_process(command, int(check.get("timeout_seconds", 300))))
+        result.update(_run_process(_resolve_command(list(check["command"])), check["timeout_seconds"]))
     return result
 
 
-def _automated_verdict(
-    phase_status: str,
-    results: list[dict[str, Any]],
-    run: bool,
-    execution_blocked: bool = False,
-) -> str:
-    if phase_status == "planned":
-        return "BLOCKED"
+def _automated_verdict(results: list[dict[str, Any]], *, run: bool, execution_blocked: bool) -> str:
     if execution_blocked:
         return "BLOCKED"
-    automated = [item for item in results if item["mode"] not in {"human", "planned"}]
     if not run:
         return "NOT_RUN"
-    if any(item["status"] == "FAIL" for item in automated):
+    if any(result["status"] == "FAIL" for result in results):
         return "FAIL"
-    if any(item["status"] in {"NOT_RUN", "BLOCKED"} for item in automated):
-        return "INCOMPLETE"
+    if any(result["status"] != "PASS" for result in results):
+        return "BLOCKED"
     return "PASS"
 
 
-def _phase_verdict(phase: dict[str, Any], automated: str) -> str:
-    if phase["implementation_status"] == "planned" or phase["human_gate_status"] == "blocked":
-        return "BLOCKED"
-    if phase["human_gate_status"] in {"pending", "retrospective_unrecorded"}:
-        if automated in {"PASS", "NOT_RUN"}:
-            return "PENDING_HUMAN_GATE"
-        return automated
-    return automated
+def _gate_verdict(automated_verdict: str) -> str:
+    if automated_verdict == "PASS":
+        return "PENDING_HUMAN_GATE"
+    return automated_verdict
 
 
-def _build_report(
-    catalog: dict[str, Any],
-    phase_name: str,
-    run: bool,
-    allow_dirty: bool = False,
-) -> dict[str, Any]:
-    phase = catalog["phases"][phase_name]
+def _build_report(catalog: dict[str, Any], *, run: bool, allow_dirty: bool = False) -> dict[str, Any]:
+    gate = catalog["gate"]
     before = _git_metadata()
     execution_blocked = run and before["dirty"] and not allow_dirty
-    checks = list(catalog["global_checks"]) + list(phase["checks"])
-    if allow_dirty:
-        resolved_checks = []
-        for check in checks:
-            dirty_argument = check.get("development_allow_dirty_argument")
-            if check["mode"] == "command" and dirty_argument:
-                check = dict(check)
-                check["command"] = [*check["command"], dirty_argument]
-            resolved_checks.append(check)
-        checks = resolved_checks
-    results = []
-    execution_cache: dict[tuple[object, ...], dict[str, Any]] = {}
-    identity_keys = {"id", "category", "severity", "mode", "description"}
-    for check in checks:
-        cache_key: tuple[object, ...] | None = None
-        if check["mode"] == "pytest":
-            cache_key = ("pytest", check["target"])
-        elif check["mode"] == "command":
-            cache_key = ("command", *check["command"])
-        if cache_key is not None and cache_key in execution_cache:
-            shared = execution_cache[cache_key]
-            result = {
-                "id": check["id"],
-                "category": check["category"],
-                "severity": check["severity"],
-                "mode": check["mode"],
-                "description": check["description"],
-                **{key: value for key, value in shared.items() if key not in identity_keys},
-            }
-        else:
-            result = _evaluate_check(check, run=run, execution_blocked=execution_blocked)
-            if cache_key is not None:
-                execution_cache[cache_key] = result
-        results.append(result)
-    if phase["human_gate_status"] in {"passed", "passed_with_conditions", "failed"}:
-        for item in results:
-            if item["status"] == "PENDING_HUMAN":
-                item["status"] = "RECORDED_HUMAN"
-                item["human_gate_record"] = phase["human_gate_record"]
-    after = _git_metadata()
-
+    results = [
+        _evaluate_check(check, run=run, execution_blocked=execution_blocked)
+        for check in gate["automated_checks"]
+    ]
     if execution_blocked:
         results.append(
             {
-                "id": "G-REPO-CLEAN-001",
-                "category": "repository",
-                "severity": "blocker",
-                "mode": "command",
+                "id": "PGF-CLEAN-TREE-001",
                 "description": "--run requires a clean tree unless --allow-dirty is explicitly supplied.",
                 "status": "BLOCKED",
                 "reason": "dirty-before and --allow-dirty was not supplied",
             }
         )
-    if run and not before["dirty"] and after["dirty"]:
-        results.append(
-            {
-                "id": "G-REPO-STABLE-001",
-                "category": "repository",
-                "severity": "blocker",
-                "mode": "command",
-                "description": "Phase checks must not turn a clean checkout dirty.",
-                "status": "FAIL",
-                "reason": "dirty-after became true",
-            }
-        )
-
-    automated = _automated_verdict(
-        phase["implementation_status"],
+    after = _git_metadata()
+    automated_verdict = _automated_verdict(
         results,
-        run,
+        run=run,
         execution_blocked=execution_blocked,
     )
-    phase_verdict = _phase_verdict(phase, automated)
-    pending_roles = sorted(
-        {
-            item["reviewer_role"]
-            for item in results
-            if item["status"] == "PENDING_HUMAN" and "reviewer_role" in item
-        }
-    )
+    human_gate = gate["human_gate"]
     return {
-        "schema_version": 2,
+        "schema_version": catalog["schema_version"],
         "generated_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
-        "phase": phase_name,
-        "title": phase["title"],
-        "implementation_status": phase["implementation_status"],
-        "human_gate_status": phase["human_gate_status"],
-        "human_gate_record": phase.get("human_gate_record"),
+        "gate": {"id": gate["id"], "title": gate["title"]},
         "repository": {
             "commit": after["commit"],
             "before": before,
@@ -430,114 +233,101 @@ def _build_report(
             "dirty_after": after["dirty"],
             "dirty_execution_allowed": allow_dirty,
         },
-        "automated_verdict": automated,
-        "phase_verdict": phase_verdict,
-        "pending_reviewer_roles": pending_roles,
+        "automated_verdict": automated_verdict,
+        "gate_verdict": _gate_verdict(automated_verdict),
         "results": results,
-        "human_review_questions": phase["human_review_questions"],
-        "pass_criteria": phase["pass_criteria"],
-        "non_claims": phase["non_claims"],
-        "final_human_gate": {
-            "status": phase["human_gate_status"],
-            "record": phase.get("human_gate_record"),
+        "human_gate": {
+            "status": human_gate["status"],
+            "policy": human_gate["policy"],
+            "questions": human_gate["questions"],
             "decision": None,
             "decided_by": None,
-            "conditions": [],
-            "notes": None,
         },
+        "non_claims": gate["non_claims"],
     }
 
 
 def _render_markdown(report: dict[str, Any]) -> str:
     repository = report["repository"]
+    gate = report["gate"]
     lines = [
-        f"# Phase Gate Report — {report['phase']}",
+        f"# Quality Gate Report — {gate['id']}",
         "",
-        f"- Title: {report['title']}",
-        f"- Implementation status: `{report['implementation_status']}`",
-        f"- Human Gate status: `{report['human_gate_status']}`",
-        f"- Human Gate record: `{report['human_gate_record'] or 'none'}`",
+        f"- Title: {gate['title']}",
         f"- Commit: `{repository['commit']}`",
         f"- Dirty before: `{repository['dirty_before']}`",
         f"- Dirty after: `{repository['dirty_after']}`",
         f"- Dirty execution allowed: `{repository['dirty_execution_allowed']}`",
         f"- Automated verdict: **{report['automated_verdict']}**",
-        f"- Phase verdict: **{report['phase_verdict']}**",
+        f"- Gate verdict: **{report['gate_verdict']}**",
         "",
-        "## Pending reviewer roles",
+        "## Automated checks",
         "",
+        "| Status | ID | Description |",
+        "|---|---|---|",
     ]
-    lines.extend(f"- `{role}`" for role in report["pending_reviewer_roles"])
-    if not report["pending_reviewer_roles"]:
-        lines.append("- None")
-    lines.extend(["", "## Checks", "", "| Status | ID | Category | Description |", "|---|---|---|---|"])
-    for item in report["results"]:
-        description = item["description"].replace("|", "\\|")
-        lines.append(f"| {item['status']} | `{item['id']}` | {item['category']} | {description} |")
-    lines.extend(["", "## Human review questions", ""])
-    lines.extend(f"- [ ] {question}" for question in report["human_review_questions"])
-    lines.extend(["", "## Pass criteria", ""])
-    lines.extend(f"- {item}" for item in report["pass_criteria"])
-    lines.extend(["", "## Non-claims", ""])
-    lines.extend(f"- {item}" for item in report["non_claims"])
+    for result in report["results"]:
+        description = result["description"].replace("|", "\\|")
+        lines.append(f"| {result['status']} | `{result['id']}` | {description} |")
+    human_gate = report["human_gate"]
+    lines.extend(["", "## Human Gate", ""])
     lines.extend(
         [
-            "",
-            "## Final Human Gate",
-            "",
-            f"Status: `{report['final_human_gate']['status']}`",
-            f"Record: `{report['final_human_gate']['record'] or 'none'}`",
+            f"Status: `{human_gate['status']}`",
+            human_gate["policy"],
             "Decision: not recorded by the automated runner.",
+            "",
+            "### Review questions",
             "",
         ]
     )
+    lines.extend(f"- [ ] {question}" for question in human_gate["questions"])
+    lines.extend(["", "## Non-claims", ""])
+    lines.extend(f"- {item}" for item in report["non_claims"])
+    lines.append("")
     return "\n".join(lines)
 
 
 def _write_report(report: dict[str, Any], report_dir: Path) -> tuple[Path, Path]:
     report_dir.mkdir(parents=True, exist_ok=True)
     commit = report["repository"]["commit"][:12]
-    stem = f"{report['phase']}-{commit}"
+    stem = f"{report['gate']['id']}-{commit}"
     json_path = report_dir / f"{stem}.json"
-    md_path = report_dir / f"{stem}.md"
+    markdown_path = report_dir / f"{stem}.md"
     json_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    md_path.write_text(_render_markdown(report), encoding="utf-8")
-    return json_path, md_path
+    markdown_path.write_text(_render_markdown(report), encoding="utf-8")
+    return json_path, markdown_path
 
 
 def _print_catalog(catalog: dict[str, Any]) -> None:
-    print("Phase  Implementation  Human Gate                 Title")
-    for name, phase in catalog["phases"].items():
-        print(
-            f"{name:5}  {phase['implementation_status']:13}  "
-            f"{phase['human_gate_status']:25}  {phase['title']}"
-        )
+    gate = catalog["gate"]
+    print("Gate                     Human Gate  Title")
+    print(f"{gate['id']:23}  {gate['human_gate']['status']:10}  {gate['title']}")
 
 
 def _print_report(report: dict[str, Any]) -> None:
     repository = report["repository"]
-    print(f"Phase: {report['phase']} — {report['title']}")
-    print(f"Implementation status: {report['implementation_status']}")
-    print(f"Human Gate status: {report['human_gate_status']}")
-    print(f"Human Gate record: {report['human_gate_record'] or 'none'}")
+    gate = report["gate"]
+    print(f"Gate: {gate['id']} — {gate['title']}")
+    print(f"Human Gate status: {report['human_gate']['status']}")
     print(f"Commit: {repository['commit']}")
     print(f"Dirty before: {repository['dirty_before']}")
     print(f"Dirty after: {repository['dirty_after']}")
     print(f"Dirty execution allowed: {repository['dirty_execution_allowed']}")
     print()
-    for item in report["results"]:
-        print(f"[{item['status']:<13}] {item['id']}: {item['description']}")
+    for result in report["results"]:
+        print(f"[{result['status']:<9}] {result['id']}: {result['description']}")
     print()
-    print(f"Pending reviewer roles: {', '.join(report['pending_reviewer_roles']) or 'none'}")
     print(f"AUTOMATED VERDICT: {report['automated_verdict']}")
-    print(f"PHASE VERDICT: {report['phase_verdict']}")
+    print(f"GATE VERDICT: {report['gate_verdict']}")
+    print("HUMAN GATE: pending; no decision is recorded by this runner.")
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", nargs="?", help="Phase name, for example T1B or T0.5")
-    parser.add_argument("--list", action="store_true", help="List available phases")
-    parser.add_argument("--run", action="store_true", help="Execute active command and pytest checks")
+    parser.add_argument("gate", nargs="?", help=f"Gate identifier ({GATE_ID})")
+    parser.add_argument("--list", action="store_true", help="List the available quality gate")
+    parser.add_argument("--run", action="store_true", help="Execute automated checks")
     parser.add_argument(
         "--allow-dirty",
         action="store_true",
@@ -553,30 +343,33 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.list:
+        if args.gate:
+            parser.error("--list does not accept a gate identifier")
         _print_catalog(catalog)
         return 0
-    if not args.phase:
-        parser.error("phase is required unless --list is used")
-    phase_name = _normalize_phase(args.phase)
-    if phase_name not in catalog["phases"]:
-        print(f"unknown phase: {args.phase}", file=sys.stderr)
+    if not args.gate:
+        parser.error("gate is required unless --list is used")
+    if args.allow_dirty and not args.run:
+        parser.error("--allow-dirty requires --run")
+    if _normalize_gate(args.gate) != GATE_ID:
+        print(f"unknown gate: {args.gate}", file=sys.stderr)
         return 2
 
-    report = _build_report(catalog, phase_name, run=args.run, allow_dirty=args.allow_dirty)
+    report = _build_report(catalog, run=args.run, allow_dirty=args.allow_dirty)
     _print_report(report)
     if args.report_dir:
-        json_path, md_path = _write_report(report, args.report_dir)
+        json_path, markdown_path = _write_report(report, args.report_dir)
         try:
             json_label = json_path.relative_to(ROOT)
-            md_label = md_path.relative_to(ROOT)
+            markdown_label = markdown_path.relative_to(ROOT)
         except ValueError:
             json_label = json_path
-            md_label = md_path
-        print(f"Reports: {json_label}, {md_label}")
+            markdown_label = markdown_path
+        print(f"Reports: {json_label}, {markdown_label}")
 
     if args.run and report["automated_verdict"] == "FAIL":
         return 1
-    if args.run and report["automated_verdict"] in {"BLOCKED", "INCOMPLETE"}:
+    if args.run and report["automated_verdict"] == "BLOCKED":
         return 3
     return 0
 
