@@ -337,7 +337,7 @@ Do not replace the MAIN projector with full 3D attention, channel-wise 5D attent
 
 # 4. Research Gate A — CLOSED: fixed SWT-Haar spectral anchor A
 
-**Status: LOCKED / IMPLEMENTABLE**
+**Status: CLOSED / LOCKED — Phase 6 is authorized but not implemented.**
 
 ## 4.1 Anchor concept
 
@@ -532,7 +532,7 @@ Do not confuse `fixed across trajectory` with `frozen from learning`.
 
 # 5. Research Gate B — CLOSED: point spectral query + cross-plane reliability
 
-**Status: LOCKED / IMPLEMENTABLE**
+**Status: CLOSED / LOCKED — Phase 7 is authorized but not implemented.**
 
 Goal: convert the fixed tri-plane anchor and a refined 3D point into one point-level spectral evidence vector:
 
@@ -753,7 +753,7 @@ No implementation beyond placeholder interfaces that already exist.
 
 ## Phase 0 — Resolve actual HEAD
 
-**Status: UNBLOCKED**
+**Status: COMPLETE — HEAD RESOLVED**
 
 ### /phase-goal
 
@@ -782,7 +782,7 @@ Proceed automatically to the first incomplete unblocked phase.
 
 ## Phase 1 — Shared MedicalNet intermediate-feature API
 
-**Status: UNBLOCKED**
+**Status: COMPLETE**
 
 ### /phase-goal
 
@@ -815,7 +815,7 @@ Proceed automatically to Phase 2.
 
 ## Phase 2 — Frozen feature detach + ablation controls
 
-**Status: UNBLOCKED**
+**Status: COMPLETE**
 
 ### /phase-goal
 
@@ -855,7 +855,7 @@ Proceed automatically to Phase 3.
 
 ## Phase 3 — Lock 3-class coarse semantics in code
 
-**Status: UNBLOCKED**
+**Status: COMPLETE**
 
 ### /phase-goal
 
@@ -885,7 +885,7 @@ Proceed automatically to Phase 4.
 
 ## Phase 4 — Axis-conditioned base tri-plane projector B
 
-**Status: UNBLOCKED**
+**Status: COMPLETE**
 
 ### /phase-goal
 
@@ -939,7 +939,7 @@ Proceed automatically to Phase 5.
 
 ## Phase 5 — Compose shared encoder through base planes B
 
-**Status: UNBLOCKED**
+**Status: COMPLETE**
 
 ### /phase-goal
 
@@ -978,7 +978,7 @@ Proceed automatically to Phase 6. Gate A is CLOSED.
 
 ## Phase 6 — 2-level SWT-Haar spectral anchor A
 
-**Status: UNBLOCKED — GATE A CLOSED**
+**Status: AUTHORIZED / IMPLEMENTABLE / UNBLOCKED — NOT IMPLEMENTED — GATE A CLOSED / LOCKED**
 
 ### /phase-goal
 
@@ -1053,7 +1053,7 @@ Proceed automatically to Phase 7. Gate B is CLOSED.
 
 ## Phase 7 — Point spectral query + cross-plane reliability fusion
 
-**Status: UNBLOCKED — GATE B CLOSED**
+**Status: AUTHORIZED / IMPLEMENTABLE / UNBLOCKED — NOT IMPLEMENTED — GATE B CLOSED / LOCKED**
 
 ### /phase-goal
 
@@ -1401,23 +1401,27 @@ Do not claim reconstruction quality, clinical validity, lesion fidelity, or publ
 
 # 14. Phase completion log
 
-Initialize from actual repository state rather than blindly trusting this template:
+Reconciled from the actual merged repository state during M6 governance review:
 
 ```text
-Phase 0: PENDING / RESOLVE ACTUAL HEAD
-Phase 1: PENDING
-Phase 2: PENDING
-Phase 3: PENDING
-Phase 4: PENDING
-Phase 5: PENDING
+Phase 0: COMPLETE — actual HEAD resolved at 6f754eda48de49fac33cdf87c135f9dbdadc76f6
+Phase 1: COMPLETE — shared MedicalNet intermediate features
+Phase 2: COMPLETE — freeze, detach, and tap controls
+Phase 3: COMPLETE — exact three-class coarse semantic contract
+Phase 4: COMPLETE — static axis-conditioned base tri-plane projector B
+Phase 5: COMPLETE — one-pass semantic and B diagnostic composition
+  implementation commit: bc6d2e60ae5d02aae11faaadd115be9b73a0687f
+  merged repository state: 6f754eda48de49fac33cdf87c135f9dbdadc76f6
+  historical software evidence: 94 point-guided tests, compileall, git diff --check
 
-Research Gate A — SWT-Haar anchor: CLOSED
-Phase 6: UNBLOCKED
+Research Gate A — SWT-Haar anchor: CLOSED / LOCKED
+Phase 6: AUTHORIZED / IMPLEMENTABLE — NOT IMPLEMENTED
 
-Research Gate B — point query + cross-plane reliability: CLOSED
-Phase 7: UNBLOCKED
+Research Gate B — point query + cross-plane reliability: CLOSED / LOCKED
+Phase 7: AUTHORIZED / IMPLEMENTABLE — NOT IMPLEMENTED
 
 Research Gate C — dynamic trajectory: BLOCKED
+Human Gate: PENDING
 ```
 
 For every completed phase record:

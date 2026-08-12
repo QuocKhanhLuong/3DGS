@@ -1,5 +1,22 @@
 # Point-guided multimodal MRI frontend
 
+## Repository authority
+
+The repository has three explicit states, which must not be conflated:
+
+- **Implemented:** PLAN Phases 1-5, ending in typed static base planes
+  `Bxy/Bxz/Byz`.
+- **Authorized / locked next, not implemented:** Gate A / Phase 6 (fixed
+  SWT-Haar anchor `A`) and Gate B / Phase 7 (geometry-aware point spectral
+  evidence `f_spec`).
+- **Blocked / default-deny:** Gate C, including dynamic tri-planes,
+  trajectory, decoder, losses, and T1ce synthesis.
+
+Authorization does not create executable behavior. An active task must name
+the authorized phase, and Phase 7 may begin only after Phase 6 is implemented
+and verified. This governance reconciliation changes no runtime behavior. No
+existing frontend output contains `A` or `f_spec`.
+
 ## Current boundary
 
 The implemented boundary is:
@@ -91,14 +108,129 @@ This implementation is a sparse software-contract reference. It has no
 default-scale (`N=2048` or `N=3072`) runtime or memory-performance evidence,
 and makes no throughput, reconstruction-quality, or clinical claim.
 
-## Research-gated non-implementations
+## Authorized and locked next: Gate A / Phase 6
 
-Wavelet spectral anchor `A`, cross-plane query/consistency fusion,
-reliability-aware fusion, initial dynamic tri-plane `Z0`, trajectory selection
-and updates, history, stopping, final decoding, reconstruction losses, and full
-T1ce synthesis are interfaces only. They must not read a target, open a dataset
-path, mutate patient state, or return a fake T1ce volume. No Phase 6+ code is
-authorized until its corresponding research gate is resolved.
+Phase 6 is authorized but not implemented. It may add only the static
+spectral-anchor branch:
+
+```text
+Bxy/Bxz/Byz
+  -> fixed two-level 2-D stationary/undecimated Haar
+  -> seven same-grid bands per plane
+  -> one shared 1x1 Conv2d(64 -> 8), applied per band and plane
+  -> Axy/Axz/Ayz (56 channels each)
+```
+
+The MAIN transform uses fixed normalized filters
+`L = [1, 1] / sqrt(2)` and `H = [1, -1] / sqrt(2)`, stride one, appropriate
+stationary level-2 dilation, no downsampling, and reflect padding. It stores
+exactly this order:
+
+```text
+LL2, LH1, HL1, HH1, LH2, HL2, HH2
+```
+
+`LL1` is an intermediate approximation, not an eighth output. For an input
+plane `[B,C,H,W]`, every stored band remains `[B,C,H,W]`; the future anchors
+are `Axy [B,56,H,W]`, `Axz [B,56,D,W]`, and `Ayz [B,56,D,H]`. MAIN
+normalization is none. The only retained optional ablation is
+`band_gn = GroupNorm(7,56)`, which must default off. The `Conv2d` bias is an
+implementation-detail choice until PLAN explicitly locks parameter count or
+bias behavior.
+
+Band names have a locked axis convention. In `[B,C,H,W]`, the first filter
+symbol is H/the row axis and the second is W/the column axis:
+
+```text
+LL = low H,  low W
+LH = low H,  high W
+HL = high H, low W
+HH = high H, high W
+```
+
+Physically, XY has H/row = Y and W/column = X; XZ has H/row = Z and W/column
+= X; YZ has H/row = Z and W/column = Y. This convention governs synthetic
+orientation tests unless PLAN later explicitly changes it.
+
+Phase 6 is PyTorch-only: fixed Haar tensors must be buffers/constants and use
+grouped `Conv2d` or equivalent PyTorch tensor operations. `pywt`, PyWavelets,
+`pytorch_wavelets`, and `kymatio` are prohibited, as are learned Haar filters,
+seven independent band projectors, three per-plane projectors, hidden spectral
+networks, and `torch.fft`. The shared band projector remains trainable; fixed
+filters do not. The existing B scorers remain the only other authorized
+upstream trainable state.
+
+Reflect padding is locked rather than best-effort. A future implementation
+must validate required plane dimensions and raise a clear `ValueError` or typed
+failure when a required dimension is one. It must not silently use zero,
+replicate, or circular padding.
+
+## Authorized and locked next: Gate B / Phase 7
+
+Phase 7 is authorized but not implemented. Starting from refined physical
+`p_i*` in canonical RAS-mm, it may add deterministic feature-grid geometry
+bookkeeping and query the future static anchors:
+
+```text
+p_i* + input VolumeGeometry + actual convolution/pooling spatial transform
+  -> shallow/B/A feature-grid geometry
+  -> bilinear Axy(x,y), Axz(x,z), Ayz(y,z)
+  -> f_xy, f_xz, f_yz in R^56
+  -> deterministic reliability
+  -> f_spec in R^168
+  -> STOP
+```
+
+The minimal helper may derive feature-grid shape, affine/centre mapping,
+RAS-mm-to-feature-grid voxel coordinates, grid-sample coordinates, and plane
+coordinates. It must support rotated, sheared, anisotropically spaced, and
+translated input affines. Hard-coded feature coordinates such as
+`original_coordinate / 2` are forbidden. This is deterministic geometry
+bookkeeping, not learned registration: learned coordinate transforms,
+deformation fields, target-derived coordinate correction, and semantic-derived
+warps are prohibited.
+
+Each query is single-point bilinear interpolation, not nearest-neighbour,
+patch pooling, sphere pooling, or dense point-to-plane tensors. SWT preserves
+the B-plane grids, so it introduces no extra coordinate rescaling. The raw
+56-d plane features remain intact. Only for reliability, their seven 8-d band
+blocks may form the deterministic 24-d descriptor:
+
+```text
+E1 = sqrt(LH1^2 + HL1^2 + HH1^2 + eps)
+E2 = sqrt(LH2^2 + HL2^2 + HH2^2 + eps)
+q  = concat([LL2, E1, E2]) in R^24
+```
+
+The only MAIN reliability rule is three pairwise cosine similarities, mean
+agreement per plane, then softmax, with nonnegative weights summing to one.
+The only MAIN packing is:
+
+```text
+concat([
+  alpha_xy * f_xy,
+  alpha_xz * f_xz,
+  alpha_yz * f_yz,
+]) in R^168
+```
+
+The 168-d layout permanently preserves XY, then XZ, then YZ 56-d blocks and
+the Gate-A band order within each block. No second encoder, transformer,
+cross-attention, confidence MLP, hard plane drop, 104-d canonical fusion, or
+learned `168 -> 64` compression is authorized. A majority-consistency failure
+mode is known: two incorrect agreeing planes can outvote one correct outlier;
+do not silently add a learned judge or semantic prior to change this rule.
+
+## Gate C remains blocked
+
+After `f_spec`, the frontend must stop. Initial or dynamic `Z0`/`Z_t`, selector
+scores, top-k routing, point revisit, updater, scatter/update overlap handling,
+history, stopping, decoder, reconstruction/spectral/pathology losses, training
+schedule, and T1ce synthesis remain type-only, research-gated interfaces.
+They must not read targets, open a dataset path, mutate patient state, or
+return a fake T1ce volume. This does not authorize legacy `smagm.anchors`,
+`smagm.fields`, `smagm.memory`, `smagm.routing`, reconstruction, training,
+evaluation, CLI, or data packages.
 
 ## BraTS21 boundary
 

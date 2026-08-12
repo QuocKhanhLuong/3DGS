@@ -2,17 +2,21 @@
   "schema_version": 1,
   "workspace_root": ".",
   "default_access": "deny",
-  "description": "Default-deny task-scoped navigation and edit policy for the point-guided MRI frontend; PLAN Phases 1–5 are authorized, while Phase 6+ remains research-gated.",
+  "description": "Default-deny task-scoped navigation and edit policy for the point-guided MRI frontend. Phases 1–5 are implemented; Gate A and Gate B are locked, so Phases 6 and 7 are authorized but not implemented. Gate C remains blocked.",
   "tasks": {
     "frontend": {
-      "purpose": "Implement the current locked frontend and only authorized PLAN Phases 1–5: shared MedicalNet taps, detach/tap controls, the three-class contract, static base planes B, and diagnostic composition; never anchor A or reconstruction.",
+      "purpose": "Maintain the implemented Phase 1–5 frontend and implement only the authorized, locked Phase 6 SWT-Haar anchor A and Phase 7 geometry-aware point spectral evidence. The deterministic feature-grid geometry support stays in the point-guided contracts/sampling boundary. Gate C trajectory, decoding, training, and reconstruction remain blocked.",
       "entrypoints": [
         "src/smagm/features/point_guided/model.py",
         "src/smagm/features/point_guided/contracts.py",
         "src/smagm/features/point_guided/config.py",
         "src/smagm/features/point_guided/medicalnet_resnet10.py",
         "src/smagm/features/point_guided/semantic_prior.py",
-        "src/smagm/features/point_guided/triplane_projection.py"
+        "src/smagm/features/point_guided/triplane_projection.py",
+        "src/smagm/features/point_guided/swt_haar.py",
+        "src/smagm/features/point_guided/spectral_anchor.py",
+        "src/smagm/features/point_guided/spectral_query.py",
+        "src/smagm/features/point_guided/cross_plane_consistency.py"
       ],
       "read_paths": [
         "AGENTS.md",
@@ -35,12 +39,20 @@
         "src/smagm/features/point_guided/semantic_affinity.py",
         "src/smagm/features/point_guided/semantic_prior.py",
         "src/smagm/features/point_guided/spatial_affinity.py",
+        "src/smagm/features/point_guided/swt_haar.py",
+        "src/smagm/features/point_guided/spectral_anchor.py",
+        "src/smagm/features/point_guided/spectral_query.py",
+        "src/smagm/features/point_guided/cross_plane_consistency.py",
         "src/smagm/features/point_guided/triplane_projection.py",
         "tests/features/point_guided/test_affinity_pou.py",
         "tests/features/point_guided/test_frontend_boundaries.py",
         "tests/features/point_guided/test_frontend_forward.py",
         "tests/features/point_guided/test_points_refinement.py",
         "tests/features/point_guided/test_semantic_prior.py",
+        "tests/features/point_guided/test_swt_haar.py",
+        "tests/features/point_guided/test_spectral_anchor.py",
+        "tests/features/point_guided/test_spectral_query.py",
+        "tests/features/point_guided/test_cross_plane_consistency.py",
         "tests/features/point_guided/test_triplane_projection.py"
       ],
       "write_paths": [
@@ -50,12 +62,21 @@
         "src/smagm/features/point_guided/contracts.py",
         "src/smagm/features/point_guided/medicalnet_resnet10.py",
         "src/smagm/features/point_guided/model.py",
+        "src/smagm/features/point_guided/sampling.py",
         "src/smagm/features/point_guided/semantic_prior.py",
+        "src/smagm/features/point_guided/swt_haar.py",
+        "src/smagm/features/point_guided/spectral_anchor.py",
+        "src/smagm/features/point_guided/spectral_query.py",
+        "src/smagm/features/point_guided/cross_plane_consistency.py",
         "src/smagm/features/point_guided/triplane_projection.py",
         "tests/features/point_guided/test_frontend_boundaries.py",
         "tests/features/point_guided/test_frontend_forward.py",
         "tests/features/point_guided/test_points_refinement.py",
         "tests/features/point_guided/test_semantic_prior.py",
+        "tests/features/point_guided/test_swt_haar.py",
+        "tests/features/point_guided/test_spectral_anchor.py",
+        "tests/features/point_guided/test_spectral_query.py",
+        "tests/features/point_guided/test_cross_plane_consistency.py",
         "tests/features/point_guided/test_triplane_projection.py"
       ],
       "blocked_paths": [
@@ -67,11 +88,21 @@
         "src/smagm/evaluation/**",
         "src/smagm/reconstruction/**",
         "src/smagm/cli/**",
-        "src/smagm/data/**"
+        "src/smagm/data/**",
+        "src/smagm/features/point_guided/dynamic_triplane.py",
+        "src/smagm/features/point_guided/trajectory.py",
+        "src/smagm/features/point_guided/selector.py",
+        "src/smagm/features/point_guided/updater.py",
+        "src/smagm/features/point_guided/history.py",
+        "src/smagm/features/point_guided/stopping.py",
+        "src/smagm/features/point_guided/decoder.py",
+        "src/smagm/features/point_guided/losses.py",
+        "src/smagm/features/point_guided/reconstruction.py",
+        "src/smagm/features/point_guided/training.py"
       ]
     },
     "medicalnet": {
-      "purpose": "Implement or audit the checkpoint-compatible MedicalNet ResNet10 semantic prior and the authorized Phase 1 intermediate-feature API only.",
+      "purpose": "Maintain or audit the checkpoint-compatible MedicalNet ResNet10 semantic prior and the implemented Phase 1 intermediate-feature API only.",
       "entrypoints": [
         "src/smagm/features/point_guided/medicalnet_resnet10.py",
         "src/smagm/features/point_guided/semantic_prior.py"
@@ -127,11 +158,15 @@
       ]
     },
     "tests": {
-      "purpose": "Add small synthetic invariant and smoke tests for the current frontend and only authorized PLAN Phases 1–5; never approve Phase 6+ research-gated behavior.",
+      "purpose": "Add small synthetic invariant and smoke tests for implemented Phases 1–5 and the authorized, locked Phase 6 SWT-Haar anchor and Phase 7 geometry-aware spectral evidence. Gate C behavior remains default-deny.",
       "entrypoints": [
         "tests/features/point_guided/test_semantic_prior.py",
         "tests/features/point_guided/test_frontend_forward.py",
         "tests/features/point_guided/test_triplane_projection.py",
+        "tests/features/point_guided/test_swt_haar.py",
+        "tests/features/point_guided/test_spectral_anchor.py",
+        "tests/features/point_guided/test_spectral_query.py",
+        "tests/features/point_guided/test_cross_plane_consistency.py",
         "tests/test_codegraph.py"
       ],
       "read_paths": [
@@ -152,12 +187,20 @@
         "src/smagm/features/point_guided/semantic_affinity.py",
         "src/smagm/features/point_guided/semantic_prior.py",
         "src/smagm/features/point_guided/spatial_affinity.py",
+        "src/smagm/features/point_guided/swt_haar.py",
+        "src/smagm/features/point_guided/spectral_anchor.py",
+        "src/smagm/features/point_guided/spectral_query.py",
+        "src/smagm/features/point_guided/cross_plane_consistency.py",
         "src/smagm/features/point_guided/triplane_projection.py",
         "tests/features/point_guided/test_affinity_pou.py",
         "tests/features/point_guided/test_frontend_boundaries.py",
         "tests/features/point_guided/test_frontend_forward.py",
         "tests/features/point_guided/test_points_refinement.py",
         "tests/features/point_guided/test_semantic_prior.py",
+        "tests/features/point_guided/test_swt_haar.py",
+        "tests/features/point_guided/test_spectral_anchor.py",
+        "tests/features/point_guided/test_spectral_query.py",
+        "tests/features/point_guided/test_cross_plane_consistency.py",
         "tests/features/point_guided/test_triplane_projection.py",
         "tests/test_codegraph.py",
         "src/smagm/contracts/coordinates.py"
@@ -167,6 +210,10 @@
         "tests/features/point_guided/test_frontend_forward.py",
         "tests/features/point_guided/test_points_refinement.py",
         "tests/features/point_guided/test_semantic_prior.py",
+        "tests/features/point_guided/test_swt_haar.py",
+        "tests/features/point_guided/test_spectral_anchor.py",
+        "tests/features/point_guided/test_spectral_query.py",
+        "tests/features/point_guided/test_cross_plane_consistency.py",
         "tests/features/point_guided/test_triplane_projection.py",
         "tests/test_codegraph.py"
       ],
@@ -244,7 +291,42 @@
     {
       "from": "src/smagm/features/point_guided/model.py",
       "to": "src/smagm/features/point_guided/triplane_projection.py",
-      "kind": "authorized Phase 5 base-plane composition only; not current implementation or anchor A"
+      "kind": "implemented Phase 5 static base-plane composition; future Phase 6 consumes B only"
+    },
+    {
+      "from": "src/smagm/features/point_guided/sampling.py",
+      "to": "src/smagm/features/point_guided/contracts.py",
+      "kind": "deterministic RAS-mm and feature-grid geometry support; no learned coordinate transform"
+    },
+    {
+      "from": "src/smagm/features/point_guided/spectral_anchor.py",
+      "to": "src/smagm/features/point_guided/swt_haar.py",
+      "kind": "authorized Phase 6 fixed two-level SWT-Haar and shared per-band projection"
+    },
+    {
+      "from": "src/smagm/features/point_guided/spectral_anchor.py",
+      "to": "src/smagm/features/point_guided/triplane_projection.py",
+      "kind": "authorized Phase 6 static B-plane input only; no second encoder"
+    },
+    {
+      "from": "src/smagm/features/point_guided/spectral_query.py",
+      "to": "src/smagm/features/point_guided/sampling.py",
+      "kind": "authorized Phase 7 deterministic geometry-aware bilinear point query"
+    },
+    {
+      "from": "src/smagm/features/point_guided/cross_plane_consistency.py",
+      "to": "src/smagm/features/point_guided/spectral_query.py",
+      "kind": "authorized Phase 7 deterministic descriptor, reliability, and 168-d packing only"
+    },
+    {
+      "from": "src/smagm/features/point_guided/model.py",
+      "to": "src/smagm/features/point_guided/spectral_anchor.py",
+      "kind": "future authorized Phase 6 frontend composition"
+    },
+    {
+      "from": "src/smagm/features/point_guided/model.py",
+      "to": "src/smagm/features/point_guided/cross_plane_consistency.py",
+      "kind": "future authorized Phase 7 frontend composition; Gate C remains excluded"
     },
     {
       "from": "src/smagm/data/brats21.py",

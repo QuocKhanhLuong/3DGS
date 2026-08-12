@@ -31,7 +31,80 @@ FORBIDDEN_IMPORT_PREFIXES = (
     "smagm.cli",
     "smagm.data",
 )
-FORBIDDEN_FUTURE_IMPORT_TOKENS = ("wavelet", "dwt", "pywt")
+AUTHORIZED_PHASE67_INTERNAL_MODULES = frozenset(
+    {
+        "smagm.features.point_guided.swt_haar",
+        "smagm.features.point_guided.spectral_anchor",
+        "smagm.features.point_guided.spectral_query",
+        "smagm.features.point_guided.cross_plane_consistency",
+    }
+)
+FORBIDDEN_EXTERNAL_WAVELET_IMPORT_PREFIXES = (
+    "pywt",
+    "pywavelets",
+    "pytorch_wavelets",
+    "kymatio",
+)
+FORBIDDEN_GATE_C_IMPORT_PREFIXES = (
+    "smagm.features.point_guided.dynamic_triplane",
+    "smagm.features.point_guided.trajectory",
+    "smagm.features.point_guided.selector",
+    "smagm.features.point_guided.top_k",
+    "smagm.features.point_guided.point_revisit",
+    "smagm.features.point_guided.updater",
+    "smagm.features.point_guided.scatter",
+    "smagm.features.point_guided.overlap",
+    "smagm.features.point_guided.history",
+    "smagm.features.point_guided.stopping",
+    "smagm.features.point_guided.decoder",
+    "smagm.features.point_guided.losses",
+    "smagm.features.point_guided.reconstruction_loss",
+    "smagm.features.point_guided.spectral_loss",
+    "smagm.features.point_guided.pathology_loss",
+    "smagm.features.point_guided.training",
+    "smagm.features.point_guided.reconstruction",
+    "smagm.features.point_guided.synthesis",
+)
+POINT_GUIDED_PACKAGE = "smagm.features.point_guided"
+
+
+def _starts_with_module(name: str, prefixes: tuple[str, ...] | frozenset[str]) -> bool:
+    return any(name == prefix or name.startswith(f"{prefix}.") for prefix in prefixes)
+
+
+def _is_authorized_phase67_module(name: str) -> bool:
+    return _starts_with_module(name, AUTHORIZED_PHASE67_INTERNAL_MODULES)
+
+
+def _is_forbidden_import_module(name: str) -> bool:
+    """Keep the import boundary narrow without banning the word ``wavelet``."""
+
+    normalized = name.lower()
+    return (
+        not _is_authorized_phase67_module(name)
+        and (
+            normalized == "importlib"
+            or _starts_with_module(name, FORBIDDEN_IMPORT_PREFIXES)
+            or _starts_with_module(normalized, FORBIDDEN_EXTERNAL_WAVELET_IMPORT_PREFIXES)
+            or _starts_with_module(name, FORBIDDEN_GATE_C_IMPORT_PREFIXES)
+            or _starts_with_module(name, ("torch.fft",))
+        )
+    )
+
+
+def _import_from_candidates(node: ast.ImportFrom) -> tuple[str, ...]:
+    """Expand only local imports needed to recognize authorized/blocked modules."""
+
+    candidates: list[str] = []
+    if node.module is not None:
+        candidates.append(node.module)
+        if node.level == 1:
+            candidates.append(f"{POINT_GUIDED_PACKAGE}.{node.module}")
+        elif node.module == POINT_GUIDED_PACKAGE:
+            candidates.extend(f"{node.module}.{alias.name}" for alias in node.names)
+    elif node.level == 1:
+        candidates.extend(f"{POINT_GUIDED_PACKAGE}.{alias.name}" for alias in node.names)
+    return tuple(candidates)
 
 
 def _small_model() -> PointGuidedMRIModel:
@@ -128,31 +201,22 @@ def test_future_only_types_cannot_construct_empty_runtime_state() -> None:
             interface()
 
 
-def test_frontend_static_import_boundary_rejects_future_and_data_packages() -> None:
+def test_frontend_static_import_boundary_allows_authorized_phase67_modules_only() -> None:
     violations: list[str] = []
     for path in PACKAGE.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            module: str | None = None
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    if (
-                        alias.name == "importlib"
-                        or alias.name.startswith(FORBIDDEN_IMPORT_PREFIXES)
-                        or any(token in alias.name.lower() for token in FORBIDDEN_FUTURE_IMPORT_TOKENS)
-                    ):
+                    if _is_forbidden_import_module(alias.name):
                         violations.append(f"{path.name}: import {alias.name}")
             elif isinstance(node, ast.ImportFrom):
-                module = node.module
-                if module == "importlib" or (
-                    module is not None and module.startswith(FORBIDDEN_IMPORT_PREFIXES)
-                ) or (
-                    module is not None
-                    and any(token in module.lower() for token in FORBIDDEN_FUTURE_IMPORT_TOKENS)
-                ) or (
-                    module == "torch" and any(alias.name == "fft" for alias in node.names)
+                candidates = _import_from_candidates(node)
+                if any(_is_forbidden_import_module(candidate) for candidate in candidates) or (
+                    node.module == "torch" and any(alias.name == "fft" for alias in node.names)
                 ):
-                    violations.append(f"{path.name}: from {module}")
+                    rendered = node.module if node.module is not None else "."
+                    violations.append(f"{path.name}: from {rendered}")
             elif isinstance(node, ast.Call):
                 if isinstance(node.func, ast.Name) and node.func.id in {"__import__", "eval", "exec"}:
                     violations.append(f"{path.name}: dynamic {node.func.id}")
