@@ -2,35 +2,22 @@
 
 ## /goal
 
-Build the next research-locked stages of the point-guided MRI frontend continuously from the current repository state.
+Build the research-locked point-guided MRI frontend continuously from the current repository state, through the fixed spectral anchor and point-level cross-plane spectral evidence, then stop before the unresolved dynamic trajectory.
 
 Codex execution contract:
 
-1. Resolve the smallest applicable codegraph scope first, then read `PLAN.md`
-   within that declared scope.
-2. Resolve actual HEAD before editing; never reset newer user changes.
-3. Execute only a phase explicitly assigned by the active task. `AUTHORIZED —
-   NOT IMPLEMENTED` grants scope but never triggers automatic progression.
-4. For each phase: inspect the smallest relevant codegraph scope, implement only the locked design, add focused tests, run verification, fix failures, then update the phase log in this file.
+1. Read `PLAN.md` first.
+2. Resolve actual HEAD before editing; never reset or overwrite newer user changes.
+3. Execute every **UNBLOCKED** phase in order without asking for confirmation between phases.
+4. For each phase: inspect the smallest relevant codegraph scope, implement only the locked design, add focused tests, run verification, fix failures, then update the phase completion log in this file.
 5. Never invent a decision marked **OPEN / BLOCKED**.
-6. Stop at the active task's terminal condition, at a research gate, or when a
-   failure cannot be fixed without changing a locked scientific contract.
+6. Stop only when all currently unblocked phases pass, the next phase is a research gate, or verification cannot be fixed without changing a locked scientific contract.
 7. Preserve fail-closed behavior: no fake T1ce, no silent random/pretrained fallback, no hidden reuse of legacy 3DGS modules.
-8. Do not implement trajectory/decoder/reconstruction until explicitly unlocked.
+8. Do not implement trajectory/selector/updater/decoder/reconstruction losses until explicitly unlocked.
+9. Do not replace a locked component with a simpler equivalent merely for implementation convenience.
+10. Preserve MAIN defaults and explicitly retained ablations.
 
-### M0 authority reconciliation
-
-M0 policy explicitly authorized implementation Phases 1–5 in the sequence
-below: shared MedicalNet feature exposure, detach/tap controls, the exact
-three-class semantic contract, static feature-only base planes `Bxy/Bxz/Byz`,
-and their diagnostic frontend composition. Their completed implementation
-status is recorded in the phase log below. This authorization is bounded by
-`AGENTS.md` and `CODEGRAPH.json`; it never authorizes a second encoder, legacy
-reuse, target-derived conditioning, anchor `A`, cross-plane fusion, dynamic
-trajectory, decoder, reconstruction loss, or T1ce synthesis. Phases 6+ remain
-blocked by their corresponding research gates.
-
-Immediate target:
+Immediate locked target:
 
 ```text
 T1 / T2 / FLAIR
@@ -41,25 +28,38 @@ MedicalNet ResNet10 shared observation encoder
        │ post Conv1 + BN + ReLU
        │ BEFORE MaxPool
        │
-       ├───────────────────────────────┐
-       │                               │
-       │                               ▼
-       │                         F_shallow.detach()
-       │                               │
-       │                        spectral branch
-       │                               │
-       │                 ┌─────────────┼─────────────┐
-       │                 │             │             │
-       │                 ▼             ▼             ▼
-       │              Z-local       Y-local       X-local
-       │              scorer        scorer        scorer
-       │               1×1×3         1×3×1         3×1×1
-       │                 │             │             │
-       │              weights       weights       weights
-       │                 │             │             │
-       │            collapse Z    collapse Y    collapse X
-       │                 │             │             │
-       │                Bxy           Bxz           Byz
+       ├──────────────────────────────────────────┐
+       │                                          │
+       │                                          ▼
+       │                                    F_shallow.detach()
+       │                                          │
+       │                                axis-conditioned projection
+       │                                          │
+       │                              Bxy / Bxz / Byz
+       │                                          │
+       │                               2-level 2D SWT-Haar
+       │                                          │
+       │                      7 bands / plane, same spatial grid
+       │                                          │
+       │                        shared 1×1 Conv2d, 64 → 8
+       │                           applied identically per band
+       │                                          │
+       │                               concat → Axy/Axz/Ayz
+       │                                   56 channels / plane
+       │                                          │
+       │                               refined point p_i*
+       │                                          │
+       │                           bilinear query all 3 planes
+       │                                          │
+       │                         f_xy / f_xz / f_yz ∈ R^56
+       │                                          │
+       │                    deterministic q=[LL2,E1,E2] ∈ R^24
+       │                                          │
+       │                         pairwise cosine agreement
+       │                                          │
+       │                            softmax reliability α
+       │                                          │
+       │               weighted concat → f_i^spec ∈ R^168
        │
        ▼
     MaxPool
@@ -73,81 +73,100 @@ MedicalNet ResNet10 shared observation encoder
  existing point refinement + semantic-aware sparse PoU
 ```
 
-The base tri-plane projection above is the last newly locked spectral component. Wavelet details and exact cross-plane consistency fusion remain research gates.
+`A` is a fixed spectral reference within the future trajectory. `P*` is the refined point field. `f_i^spec` is point-level spectral evidence. The dynamic reconstruction state `Z_t` remains unresolved and must not be implemented yet.
 
 ---
 
 # 0. Repository source of truth
 
-Plan authored against:
+Repository:
 
 ```text
 repository: QuocKhanhLuong/3DGS
 branch: main
-commit: d623d179e6626a54deefcf3f4c5a8d9e9f0a33c1
+plan refresh base commit: d623d179e6626a54deefcf3f4c5a8d9e9f0a33c1
 message: docs: add phased point-guided spectral frontend plan
 ```
 
-Before implementation, compare current HEAD with this commit. If newer, inspect the diff, preserve compatible changes, and update this section.
+That base commit only added the previous plan. The source implementation underneath remained based on:
+
+```text
+4ccffcef0d3df0b2734335c34223fc98eda900af
+Refactor code
+```
+
+Before implementation:
+
+- resolve actual HEAD;
+- inspect all commits newer than the plan refresh base;
+- preserve compatible user changes;
+- never assume phases are still pending solely because this file says so;
+- update the completion log based on actual repository state.
 
 ---
 
 # 1. Already implemented — do not redo
 
-Current owner: `src/smagm/features/point_guided/`.
+Current owner:
 
-Already present:
+```text
+src/smagm/features/point_guided/
+```
 
-- `PointGuidedConfig`
-- RAS-mm / voxel geometry contracts
-- full feature-only MedicalNet ResNet10 layout
-- strict local checkpoint loading + SHA256 provenance
-- deterministic 1-channel → 3-channel stem adaptation
-- frozen backbone parameter policy
-- frozen BatchNorm running-stat policy
-- minimal `Conv3d(512,K,1)` semantic head
-- soft full-resolution `S_coarse`
-- quasi-uniform point initialization
-- directional sampling at ±1/±2/±3 mm along XYZ
-- small MLP offset predictor
-- L2 displacement <= 2 mm from original center
-- refined-center semantic sampling
-- fixed 4 mm sphere support
-- quadratic compact spatial affinity
-- L1 semantic affinity
-- multiplicative semantic-spatial affinity
-- sparse normalized PoU
-- frontend-only public forward contract
-- fail-closed full `forward()` before T1ce synthesis
+Already present before this plan:
+
+- `PointGuidedConfig`;
+- RAS-mm / voxel geometry contracts;
+- full feature-only MedicalNet ResNet10 layout;
+- strict local checkpoint loading + SHA256 provenance;
+- deterministic 1-channel → 3-channel stem adaptation;
+- frozen backbone parameter policy;
+- frozen BatchNorm running-stat policy;
+- minimal `Conv3d(512,K,1)` semantic head;
+- soft full-resolution `S_coarse`;
+- quasi-uniform point initialization;
+- directional sampling at ±1/±2/±3 mm along XYZ;
+- small MLP offset predictor;
+- L2 displacement <= 2 mm from original center;
+- refined-center semantic sampling;
+- fixed 4 mm sphere support;
+- quadratic compact spatial affinity;
+- L1 semantic affinity;
+- multiplicative semantic-spatial affinity;
+- sparse normalized PoU;
+- frontend-only public forward contract;
+- fail-closed full `forward()` before T1ce synthesis.
 
 Do not rebuild these from scratch.
 
 ---
 
-# 2. Locked architecture
+# 2. Locked observation + point architecture
 
 ## 2.1 Input
 
 ```text
 x: [B,3,D,H,W]
-0=T1, 1=T2, 2=FLAIR
+0 = T1
+1 = T2
+2 = FLAIR
 ```
 
-T1ce is not an observation input.
+T1ce is the reconstruction/synthesis target and never an observation input.
 
 ## 2.2 Shared MedicalNet encoder
 
-Single MedicalNet ResNet10 serves both branches.
+Use one MedicalNet 3D ResNet10 for both semantic and spectral branches.
 
-Split point is locked:
+Locked split:
 
 ```text
 Conv1(7³,stride=2) → BN → ReLU → F_shallow
 ```
 
-Spectral branch taps **after ReLU, before MaxPool**.
+MAIN spectral tap is **after ReLU and before MaxPool**.
 
-Semantic path continues:
+Semantic path continues through:
 
 ```text
 F_shallow → MaxPool → Layer1 → Layer2 → Layer3 → Layer4
@@ -169,30 +188,30 @@ spectral_tap = conv1_pre_maxpool
 When frozen:
 
 - MedicalNet parameters receive no gradients;
-- BatchNorm running stats stay frozen;
-- exported branch features are detached/stop-gradient when configured.
+- BatchNorm running statistics stay frozen;
+- branch-exported features are detached when configured.
 
-Required ablation support:
+Required ablations:
 
 ```text
 spectral_tap:
   conv1_pre_maxpool   MAIN
-  layer1
+  layer1              ABLATION
 
 backbone:
   frozen              MAIN
-  fine_tuned
+  fine_tuned          ABLATION
 
 feature_detach:
   true                MAIN
-  false
+  false               ABLATION
 ```
 
-Branching and freezing are separate concepts.
+Branching, freezing, and detaching are separate concepts.
 
 ## 2.4 Coarse semantic prior
 
-Locked soft channels:
+Exactly three soft classes:
 
 ```text
 0 normal brain
@@ -200,31 +219,42 @@ Locked soft channels:
 2 tumor-core candidate
 ```
 
-No separate enhancing class. No uncertainty class; derive uncertainty later from entropy if needed.
+No enhancing class because T1ce is unavailable as observation. No uncertainty class; uncertainty may later be derived from entropy/dispersion.
 
-`S_coarse` is for point refinement, point semantic identity, and semantic-aware PoU. It must not become a permanent dense trajectory-conditioning branch.
+`S_coarse` is a prior for point construction/refinement, point semantic identity, and semantic-aware PoU. Do not turn it into an always-on dense trajectory conditioning branch without a later research decision.
 
 ## 2.5 Existing point contract
 
-MAIN defaults remain:
+MAIN defaults:
 
 ```text
 num_points = 2048
-alternative = 3072
+point_count_ablation = 3072
 directional offsets = ±1, ±2, ±3 mm
 support radius = 4 mm
-max displacement = 2 mm
+max displacement = 2 mm from ORIGINAL point center
 semantic distance = L1
-spatial kernel = quadratic compact
+spatial kernel = quadratic compact support
 affinity = spatial × semantic
 PoU = sparse + normalized
 ```
 
-No point split/merge/prune/radius/orientation/covariance learning and no dense `[B,N,D,H,W]`.
+Offset input uses center T1/T2/FLAIR + center `S_coarse` + directional neighbor differences. Sampling is trilinear.
+
+After refinement:
+
+```text
+p_i* = p_i0 + Δ_i
+π_i = S_coarse(p_i*)
+```
+
+No sphere pooling for point semantics.
+
+Do not add point split/merge/prune/radius/orientation/covariance learning and do not create dense `[B,N,D,H,W]` point tensors.
 
 ---
 
-# 3. Newly locked base tri-plane projection
+# 3. Locked base tri-plane projection B
 
 Exact flow:
 
@@ -251,162 +281,494 @@ collapse collapse collapse
  Bxy     Bxz      Byz
 ```
 
-No separate residual spectral adapter. No `mean branch + learned branch` double path.
+No separate residual spectral adapter. No mean-branch + learned-branch double path.
 
-The axis-conditioned scorer starts as a mean-like projection by zero initialization.
-
-For tensor-order clarity, PyTorch input is `[B,C,D,H,W]`:
+Each orientation uses one lightweight scalar scorer:
 
 ```text
-Bxy: collapse D/Z
+logits shape = [B,1,D,H,W]
+```
+
+not channel-wise attention.
+
+For PyTorch tensor order `[B,C,D,H,W]`:
+
+```text
+Bxy: collapse D / physical Z
 score kernel = (3,1,1), padding=(1,0,0)
 output = [B,C,H,W]
 
-Bxz: collapse H/Y
+Bxz: collapse H / physical Y
 score kernel = (1,3,1), padding=(0,1,0)
 output = [B,C,D,W]
 
-Byz: collapse W/X
+Byz: collapse W / physical X
 score kernel = (1,1,3), padding=(0,0,1)
 output = [B,C,D,H]
 ```
 
-The conceptual 1×1×3 / 1×3×1 / 3×1×1 naming refers to XYZ orientation; implementation must document the DHW mapping explicitly.
+The conceptual `1×1×3 / 1×3×1 / 3×1×1` notation is XYZ-oriented; implementation must document the mapping to PyTorch DHW explicitly.
 
-### Uniform initialization
+### Zero initialization
 
-Zero initialize scorer weights and bias. Then:
+Zero-initialize scorer weights and bias:
 
 ```text
 logits = 0
-softmax(logits, collapse_axis) = uniform
+softmax(logits, collapsed_axis) = uniform
 ```
 
-so the learned weighted projection equals mean projection at initialization without adding a redundant residual mean branch.
+Therefore the MAIN learned projection begins exactly as a mean projection, without a redundant residual mean branch.
 
-Do not replace this with full 3D attention, channel-wise 5D attention, transformers, 3×3×3 encoder stacks, or hard argmax selection.
-
----
-
-# 4. Required projection ablations
-
-Support:
+Required projection modes:
 
 ```text
-projection_mode:
-  mean
-  max
-  pointwise_weighted
-  axis_local_weighted   MAIN
+mean
+max
+pointwise_weighted
+axis_local_weighted   MAIN
 ```
 
-`pointwise_weighted` = `Conv3d(C,1,kernel=1)` + axis softmax + weighted sum.
+`pointwise_weighted` uses `Conv3d(C,1,kernel=1)` followed by axis softmax and weighted collapse.
 
-`axis_local_weighted` = axis-local size-3 scorer + axis softmax + weighted sum.
-
-Do not add unrelated ablations.
+Do not replace the MAIN projector with full 3D attention, channel-wise 5D attention, transformer blocks, 3×3×3 encoder stacks, or hard argmax selection.
 
 ---
 
-# 5. Wavelet spectral anchor
+# 4. Research Gate A — CLOSED: fixed SWT-Haar spectral anchor A
 
-## LOCKED concept
+**Status: LOCKED / IMPLEMENTABLE**
+
+## 4.1 Anchor concept
 
 ```text
 B = {Bxy,Bxz,Byz}
-→ 2D wavelet per plane
+→ 2D SWT-Haar independently per plane
+→ shared per-band channel projection
+→ concatenate bands
 → A = {Axy,Axz,Ayz}
 ```
 
-`A` is generated once per subject and held fixed through trajectory steps:
+`A` is generated once per subject/forward and reused unchanged throughout future trajectory steps:
 
 ```text
 A0 = A1 = ... = AK = A
 ```
 
-Fixed means the anchor tensor is not iteratively mutated by trajectory. It does not automatically mean all anchor-producing parameters must be frozen in every future ablation.
+This means the tensor is immutable across trajectory iterations. It does **not** mean the anchor-building modules are detached from the training objective.
 
-## OPEN / BLOCKED
+## 4.2 Wavelet family
 
-Not yet locked:
-
-- wavelet family;
-- decomposition level;
-- padding/boundary mode;
-- subband packing;
-- normalization;
-- post-DWT projection.
-
-Wavelet is chosen over FFT/DCT, but Codex must not choose Haar/db2/etc. automatically.
-
----
-
-# 6. Cross-plane spectral consistency
-
-## LOCKED concept
-
-A refined point `p_i=(x,y,z)` queries:
+MAIN:
 
 ```text
-Axy(x,y)
-Axz(x,z)
-Ayz(y,z)
+2D Stationary / Undecimated Haar Wavelet Transform (SWT-Haar)
 ```
 
-Final main fusion must account for cross-plane consistency/reliability rather than blindly concatenate the three views.
+Do not use decimated DWT as MAIN.
 
-## OPEN / BLOCKED
+Reason encoded by the research decision:
 
-Still unresolved:
+- point shifts are small and continuous;
+- decimated Haar is phase/shift sensitive;
+- MedicalNet Conv1 already reduces sampling density;
+- SWT preserves the plane spatial grid;
+- no extra point-coordinate rescaling is introduced by the wavelet transform;
+- Haar remains simple, fixed, real-valued, and differentiable.
 
-- consensus formulation;
-- reliability score;
-- shared projector;
-- normalization;
-- optional consistency loss.
+Standard decimated Haar may later be an ablation/baseline. DT-CWT is not MAIN and must not be introduced without a new decision.
 
-Do not invent transformer/cross-attention.
+## 4.3 Decomposition level and bands
+
+Exactly two SWT levels.
+
+Store exactly seven bands per plane in this fixed order:
+
+```text
+0 LL2
+1 LH1
+2 HL1
+3 HH1
+4 LH2
+5 HL2
+6 HH2
+```
+
+Equivalent notation:
+
+```text
+{LL2, LH1, HL1, HH1, LH2, HL2, HH2}
+```
+
+Do not store `LL1` as an eighth output band; it is the intermediate approximation used to produce level 2.
+
+For an input plane `[B,C,H,W]`, every stored SWT band remains `[B,C,H,W]`.
+
+## 4.4 Haar filters
+
+Use fixed normalized Haar filters:
+
+```text
+L = [1, 1] / sqrt(2)
+H = [1,-1] / sqrt(2)
+```
+
+Construct the four separable 2D filters `LL`, `LH`, `HL`, `HH`.
+
+Implementation should be differentiable with fixed grouped `Conv2d`/equivalent tensor ops, stride 1, and no trainable wavelet parameters.
+
+Level 2 uses the stationary/à-trous dilation appropriate to SWT rather than downsampling.
+
+## 4.5 Boundary mode
+
+MAIN:
+
+```text
+reflect padding
+```
+
+Do not use zero padding as MAIN because it can introduce artificial edge discontinuities/high-frequency coefficients. Do not use circular wrapping for MRI anatomy.
+
+Output shape must equal input plane shape at both levels.
+
+## 4.6 Shared per-band projection
+
+MedicalNet `F_shallow` has 64 channels in the current ResNet10 design. Each SWT band therefore initially has 64 channels.
+
+Use one **shared** `1×1 Conv2d`:
+
+```text
+φ: 64 → 8
+```
+
+Apply the exact same `φ` parameters independently to all seven bands and all three plane orientations.
+
+Do not create seven separate band projectors.
+
+The shared projection only compresses channels; it must not mix bands together before concatenation.
+
+For each plane `p`:
+
+```text
+A_p = concat([
+  φ(LL2),
+  φ(LH1),
+  φ(HL1),
+  φ(HH1),
+  φ(LH2),
+  φ(HL2),
+  φ(HH2),
+], channel_dim)
+```
+
+Therefore:
+
+```text
+Axy = [B,56,H,W]
+Axz = [B,56,D,W]
+Ayz = [B,56,D,H]
+```
+
+and the channel layout must remain documented and stable:
+
+```text
+[ LL2 | LH1 | HL1 | HH1 | LH2 | HL2 | HH2 ]
+    8      8     8     8     8     8     8
+```
+
+## 4.7 Normalization
+
+MAIN:
+
+```text
+anchor_norm = none
+```
+
+Do not independently normalize raw SWT bands before the shared projection in MAIN because relative spectral energy is useful evidence.
+
+Optional retained stability ablation only:
+
+```text
+anchor_norm = band_gn
+GroupNorm(num_groups=7, num_channels=56)
+```
+
+Do not silently enable it.
+
+## 4.8 Gradient / immutability contract
+
+MAIN gradient path:
+
+```text
+future reconstruction loss
+        ↓
+future trajectory / consumer
+        ↓
+A
+        ↓
+shared 1×1 band projector
+        ↓
+fixed SWT-Haar ops
+        ↓
+axis-conditioned base projector
+        ↓
+F_shallow.detach()
+        X
+MedicalNet backbone
+```
+
+Therefore:
+
+- `A` is **not detached** after construction;
+- the shared `1×1` projection remains trainable;
+- the axis-conditioned scorer remains trainable;
+- Haar filters remain fixed;
+- gradients stop at `F_shallow.detach()` in MAIN;
+- `A` is computed once and not mutated/recomputed per trajectory step.
+
+Do not confuse `fixed across trajectory` with `frozen from learning`.
 
 ---
 
-# 7. Dynamic trajectory remains blocked
+# 5. Research Gate B — CLOSED: point spectral query + cross-plane reliability
 
-Future:
+**Status: LOCKED / IMPLEMENTABLE**
+
+Goal: convert the fixed tri-plane anchor and a refined 3D point into one point-level spectral evidence vector:
 
 ```text
-A   = fixed spectral reference
-P*  = refined sparse spatial/semantic carrier
-Z_t = dynamic reconstruction tri-plane
+(Axy, Axz, Ayz, p_i*) → f_i^spec
+```
+
+No transformer, no cross-attention, no learned confidence MLP, and no second spectral encoder.
+
+## 5.1 B1 — point query
+
+For refined physical point:
+
+```text
+p_i* = (x,y,z)
+```
+
+map from physical/RAS-mm coordinates into the shallow-feature/anchor coordinate system using existing geometry contracts.
+
+Do **not** hardcode `coordinate / 2`, even though Conv1 stride is currently 2. The mapping must remain geometry-aware and testable.
+
+Query the same 3D location from the three planes:
+
+```text
+Axy at (x,y)
+Axz at (x,z)
+Ayz at (y,z)
+```
+
+Use single-point **bilinear interpolation** on each 2D plane.
+
+Do not use:
+
+- nearest-neighbor query;
+- 3×3 patch pooling;
+- sphere pooling;
+- dense point-to-plane tensors.
+
+Because SWT is undecimated, `A_p` has the same spatial grid as its base plane `B_p`; there is no DWT-induced extra `/2` rescaling.
+
+Each query returns:
+
+```text
+f_xy ∈ R^56
+f_xz ∈ R^56
+f_yz ∈ R^56
+```
+
+Bilinear sampling must preserve differentiability with respect to the queried point coordinate when the geometry path permits it.
+
+## 5.2 B2 — deterministic consistency descriptor
+
+Keep each raw 56-d plane feature unchanged for final evidence.
+
+Do **not** insert an additional learned `56→d` projector before consistency.
+
+Use the known 7-band layout to derive a smaller deterministic descriptor only for reliability estimation.
+
+Split each `f_p` into seven 8-d blocks:
+
+```text
+LL2, LH1, HL1, HH1, LH2, HL2, HH2
+```
+
+Define orientation-insensitive energy per SWT scale, elementwise across the 8 projected channels:
+
+```text
+E1 = sqrt(LH1^2 + HL1^2 + HH1^2 + eps)
+E2 = sqrt(LH2^2 + HL2^2 + HH2^2 + eps)
+```
+
+Then:
+
+```text
+q_p = concat([LL2, E1, E2])
+q_p ∈ R^24
+```
+
+Use one small fixed numerical epsilon only for finite numerical stability. It is not a learned weight and not a research-tuned fusion coefficient.
+
+Important separation:
+
+```text
+q_p   = only for cross-plane reliability
+f_p   = raw 56-d spectral evidence retained for final output
+```
+
+The energy descriptor intentionally removes 2D LH/HL/HH orientation disagreement when asking whether planes agree on local spectral activity. It does **not** erase orientation information from the raw 56-d feature.
+
+## 5.3 B3 — pairwise cross-plane agreement
+
+Given:
+
+```text
+q_xy, q_xz, q_yz ∈ R^24
+```
+
+compute pairwise cosine similarities:
+
+```text
+s_xy_xz = cosine(q_xy, q_xz)
+s_xy_yz = cosine(q_xy, q_yz)
+s_xz_yz = cosine(q_xz, q_yz)
+```
+
+Reliability score for each plane is the mean agreement with the other two:
+
+```text
+r_xy = (s_xy_xz + s_xy_yz) / 2
+r_xz = (s_xy_xz + s_xz_yz) / 2
+r_yz = (s_xy_yz + s_xz_yz) / 2
+```
+
+Convert to normalized reliability weights:
+
+```text
+[α_xy, α_xz, α_yz] = softmax([r_xy, r_xz, r_yz])
+```
+
+Required invariant:
+
+```text
+α_xy + α_xz + α_yz = 1
+α_p >= 0
+```
+
+No learned MLP/confidence head in MAIN.
+
+Do not hard-drop an inconsistent plane. Soft reliability only reduces its contribution.
+
+Known limitation, to document rather than silently “fix”: agreement is not ground truth. If two incorrect planes agree and one correct plane is an outlier, majority-style consistency can assign higher reliability to the incorrect pair. Do not inject semantic priors or a learned judge into Gate B without a new research decision.
+
+## 5.4 B4 — final spectral evidence packing
+
+B4 is a **summary/packing step**, not a new orientation-processing module.
+
+Do not channel-wise sum the three raw 56-d plane features because LH/HL/HH meanings depend on plane orientation.
+
+Do not create a new 3D-canonical 104-d representation here; axis/plane provenance is already encoded and should remain explicit.
+
+Apply reliability to each raw plane feature:
+
+```text
+f~_xy = α_xy * f_xy
+f~_xz = α_xz * f_xz
+f~_yz = α_yz * f_yz
+```
+
+Then concatenate while preserving plane identity:
+
+```text
+f_i^spec = concat([f~_xy, f~_xz, f~_yz])
+```
+
+Final shape:
+
+```text
+f_i^spec ∈ R^168
+```
+
+Stable block provenance:
+
+```text
+channels   0:56   = reliability-weighted XY evidence
+channels  56:112  = reliability-weighted XZ evidence
+channels 112:168  = reliability-weighted YZ evidence
+```
+
+Within every 56-d block, preserve the 7-band/8-channel ordering from Gate A.
+
+MAIN does **not** compress `168→64` or pass the packed feature through an MLP. A later trajectory/updater may consume this evidence only after Gate C is resolved.
+
+Optional baseline for future ablation registry only:
+
+```text
+naive_concat = concat([f_xy,f_xz,f_yz])
+```
+
+MAIN:
+
+```text
+consistency_aware = weighted concat using α
+```
+
+---
+
+# 6. Dynamic trajectory remains blocked
+
+Future high-level contract:
+
+```text
+A        = fixed spectral reference
+P*       = refined sparse spatial/semantic carrier
+f_i^spec = point-level reliability-aware spectral evidence
+Z_t      = dynamic reconstruction tri-plane
 
 Z0 → Z1 → ... → ZK
 ```
 
-Still open: Z0, selector, updater, history, stopping, decoder, reconstruction losses.
+Still OPEN:
 
-No implementation beyond interfaces.
+- how `Z0` is initialized;
+- selector score and top-k policy;
+- whether points may be revisited;
+- local updater inputs and architecture;
+- scatter/update overlap behavior;
+- history/state representation;
+- fixed K vs stopping/convergence;
+- decoder from `Z_K` to T1ce;
+- reconstruction/spectral/pathology losses;
+- training schedule and differentiable selection strategy.
+
+No implementation beyond placeholder interfaces that already exist.
 
 ---
 
-# 8. Implementation phases
+# 7. Implementation phases
 
-## Phase 0 — Rebase plan on actual HEAD
+## Phase 0 — Resolve actual HEAD
 
-**Status: COMPLETE — policy/architecture reconciliation only; no model implementation.**
+**Status: UNBLOCKED**
 
 ### /phase-goal
 
-Work from actual latest code and never reimplement already merged frontend work.
+Work from the actual latest code and do not reimplement already merged work.
 
 Tasks:
 
-- [x] `git status --short`
-- [x] `git rev-parse HEAD`
-- [x] compare HEAD with `4ccffcef...`
-- [x] inspect `CODEBASE.md`
-- [x] inspect `CODEGRAPH.json`
-- [x] run `python scripts/codegraph.py --task frontend`
-- [x] inspect current point-guided public interfaces
-- [x] update this plan source commit
+- [ ] `git status --short`
+- [ ] `git rev-parse HEAD`
+- [ ] inspect commits newer than plan refresh base `d623d179...`
+- [ ] inspect `CODEBASE.md`
+- [ ] inspect `CODEGRAPH.json`
+- [ ] run the smallest relevant codegraph task, starting with `python scripts/codegraph.py --task frontend` if still valid
+- [ ] inspect current point-guided public interfaces
+- [ ] mark any already-completed phases truthfully instead of redoing them
 
 Verify:
 
@@ -414,29 +776,30 @@ Verify:
 git diff --check
 ```
 
-Stop after M0. Phase 1 requires an explicit active task.
+Proceed automatically to the first incomplete unblocked phase.
 
 ---
 
 ## Phase 1 — Shared MedicalNet intermediate-feature API
 
-**Status: COMPLETE**
+**Status: UNBLOCKED**
 
 ### /phase-goal
 
-Expose the pre-MaxPool spectral tap and Layer1 ablation tap without duplicating the backbone or breaking the semantic prior.
+Expose the pre-MaxPool MAIN spectral tap and Layer1 ablation tap without duplicating the backbone or breaking semantic-prior compatibility.
 
 Tasks:
 
-- [x] expose `Conv1→BN→ReLU` pre-MaxPool feature
-- [x] expose Layer1 feature for ablation
-- [x] preserve `forward_features()` final-feature compatibility
-- [x] do not run the stem twice
-- [x] keep checkpoint state-dict keys unchanged
-- [x] keep 3-channel stem adaptation unchanged
-- [x] document tensor shapes
-- [x] test that the prepool tap is truly before pooling
-- [x] test that the existing final feature output is unchanged in eval mode
+- [ ] expose `Conv1→BN→ReLU` pre-MaxPool feature;
+- [ ] expose Layer1 feature for ablation;
+- [ ] expose deep/final feature needed by semantic head;
+- [ ] preserve `forward_features()` compatibility;
+- [ ] do not run the stem twice;
+- [ ] keep checkpoint state-dict keys unchanged;
+- [ ] keep 3-channel stem adaptation unchanged;
+- [ ] document tensor shapes;
+- [ ] test prepool tap is truly before pooling;
+- [ ] test existing final feature output remains unchanged in eval mode.
 
 Verify:
 
@@ -446,38 +809,38 @@ PYTHONPATH=src .venv/bin/python -m pytest -q tests/features/point_guided
 git diff --check
 ```
 
-Stop after Phase 1. Phase 2 requires an explicit active task.
+Proceed automatically to Phase 2.
 
 ---
 
 ## Phase 2 — Frozen feature detach + ablation controls
 
-**Status: COMPLETE**
+**Status: UNBLOCKED**
 
 ### /phase-goal
 
-Make the frozen observation-encoder contract explicit and reusable by semantic and spectral branches.
+Make the observation-encoder freeze/detach contract explicit and reusable by semantic and spectral branches.
 
 Tasks:
 
-- [x] add config for `detach_backbone_features`
-- [x] add config for spectral tap
-- [x] MAIN tap = pre-MaxPool
-- [x] Layer1 tap = ablation
-- [x] preserve frozen BN eval behavior
-- [x] detach branch features when configured
-- [x] ensure semantic head still receives gradients
-- [x] ensure future projection receives gradients
-- [x] add frozen-vs-finetuned and detach-vs-nondetach support
-- [x] add gradient-path tests
+- [ ] config for `detach_backbone_features`;
+- [ ] config for spectral tap;
+- [ ] MAIN tap = pre-MaxPool;
+- [ ] Layer1 tap = ablation;
+- [ ] preserve frozen BN eval behavior;
+- [ ] detach exported branch features when configured;
+- [ ] semantic head still receives gradients;
+- [ ] future spectral projector still receives gradients;
+- [ ] preserve frozen/fine-tuned and detached/non-detached ablations;
+- [ ] add gradient-path tests.
 
 Required tests:
 
 1. frozen backbone has no trainable parameters;
 2. BN running stats do not change;
 3. detached shallow feature cannot backprop into MedicalNet;
-4. downstream trainable module can still receive gradients;
-5. `detach=False` remains valid for later fine-tuning ablation.
+4. a downstream trainable module still receives gradients;
+5. `detach=False` remains valid for fine-tuning ablation.
 
 Verify:
 
@@ -486,28 +849,28 @@ PYTHONPATH=src .venv/bin/python -m pytest -q tests/features/point_guided
 git diff --check
 ```
 
-Stop after Phase 2. Phase 3 requires an explicit active task.
+Proceed automatically to Phase 3.
 
 ---
 
 ## Phase 3 — Lock 3-class coarse semantics in code
 
-**Status: COMPLETE**
+**Status: UNBLOCKED**
 
 ### /phase-goal
 
-Align the implementation with the final coarse semantic meaning consumed by refinement and PoU.
+Align implementation with the final coarse semantic meaning consumed by point refinement and PoU.
 
 Tasks:
 
-- [x] production/main semantic count = exactly 3
-- [x] define names/order in one explicit contract
-- [x] reject accidental 4/6-class main configuration
-- [x] update semantic-prior tests
-- [x] update point-descriptor shape tests
-- [x] preserve softmax probabilities
-- [x] do not add uncertainty channel
-- [x] do not invent semantic supervision/loss here
+- [ ] production/main semantic count = exactly 3;
+- [ ] define names/order in one explicit contract;
+- [ ] reject accidental 4/6-class MAIN configuration;
+- [ ] update semantic-prior tests;
+- [ ] update point-descriptor shape tests;
+- [ ] preserve softmax probabilities;
+- [ ] do not add uncertainty channel;
+- [ ] do not invent semantic supervision/loss here.
 
 Verify:
 
@@ -516,17 +879,17 @@ PYTHONPATH=src .venv/bin/python -m pytest -q tests/features/point_guided
 git diff --check
 ```
 
-Stop after Phase 3. Phase 4 requires an explicit active task.
+Proceed automatically to Phase 4.
 
 ---
 
-## Phase 4 — Axis-conditioned base tri-plane projector
+## Phase 4 — Axis-conditioned base tri-plane projector B
 
-**Status: COMPLETE**
+**Status: UNBLOCKED**
 
 ### /phase-goal
 
-Implement `F_shallow.detach() → Bxy/Bxz/Byz` exactly as locked, without a second encoder or redundant residual projection.
+Implement `F_shallow.detach() → Bxy/Bxz/Byz` exactly as locked.
 
 Suggested module:
 
@@ -542,25 +905,25 @@ XZ: Conv3d(C,1,(1,3,1)) → softmax H → weighted sum H → [B,C,D,W]
 YZ: Conv3d(C,1,(1,1,3)) → softmax W → weighted sum W → [B,C,D,H]
 ```
 
-Zero-init scorer kernels/biases.
+Zero-init scorer kernels and biases.
 
-Required ablation modes:
+Required modes:
 
-- [x] mean
-- [x] max
-- [x] pointwise_weighted
-- [x] axis_local_weighted MAIN
+- [ ] mean;
+- [ ] max;
+- [ ] pointwise_weighted;
+- [ ] axis_local_weighted MAIN.
 
 Required tests:
 
-- [x] exact plane shapes
-- [x] softmax weights sum to 1 along collapsed axis
-- [x] zero-init main projector equals mean projection within tolerance
-- [x] orientation mapping correct using synthetic coordinate ramps
-- [x] scorer logits are `[B,1,D,H,W]`, not channel-wise attention
-- [x] gradients reach scorer parameters
-- [x] detached MedicalNet feature blocks backbone gradients
-- [x] no second encoder introduced
+- [ ] exact plane shapes;
+- [ ] softmax weights sum to one along collapsed axis;
+- [ ] zero-init MAIN equals mean projection within tolerance;
+- [ ] DHW/physical XYZ mapping correct using synthetic coordinate ramps;
+- [ ] scorer logits are `[B,1,D,H,W]`;
+- [ ] gradients reach scorer parameters;
+- [ ] detached MedicalNet feature blocks backbone gradients;
+- [ ] no second encoder introduced.
 
 Verify:
 
@@ -570,37 +933,36 @@ PYTHONPATH=src .venv/bin/python -m compileall -q src/smagm/features/point_guided
 git diff --check
 ```
 
-Stop after Phase 4. Phase 5 requires an explicit active task.
+Proceed automatically to Phase 5.
 
 ---
 
-## Phase 5 — Compose spectral branch through B only
+## Phase 5 — Compose shared encoder through base planes B
 
-**Status: COMPLETE — STOPPED AT RESEARCH GATE A**
+**Status: UNBLOCKED**
 
 ### /phase-goal
 
-Wire the shared MedicalNet tap and the base tri-plane projector into the frontend, stopping before wavelet.
+Wire one shared MedicalNet execution into semantic and spectral branches through `B`, without yet changing point semantics.
 
 Tasks:
 
-- [x] compute shared MedicalNet stem once
-- [x] route the configured selected shared feature to the static B branch
-- [x] continue the same feature bundle through the semantic branch
-- [x] respect detach config
-- [x] produce Bxy/Bxz/Byz
-- [x] expose base planes through typed `FrontendOutput.base_planes`
-- [x] preserve existing point/refinement/PoU public outputs
-- [x] do not call B a spectral anchor yet
-- [x] do not add fake FFT/DWT
-- [x] do not change point behavior
+- [ ] compute the shared MedicalNet stem once;
+- [ ] route the configured shallow tap to spectral branch;
+- [ ] continue the same encoder through semantic branch;
+- [ ] respect detach config;
+- [ ] produce `Bxy/Bxz/Byz`;
+- [ ] expose base planes through typed internal/diagnostic outputs;
+- [ ] preserve existing point/refinement/PoU outputs where practical;
+- [ ] do not duplicate MedicalNet forward;
+- [ ] do not change point behavior.
 
 Tests:
 
-- [x] shared backbone path does not perform two complete MedicalNet forwards
-- [x] existing frontend invariants remain green
-- [x] B planes deterministic in eval mode
-- [x] frozen MedicalNet remains unchanged after projector-only optimizer step
+- [ ] no duplicate complete MedicalNet forward;
+- [ ] existing frontend invariants remain green;
+- [ ] B planes deterministic in eval mode;
+- [ ] frozen MedicalNet unchanged after projector-only optimizer step.
 
 Verify:
 
@@ -610,157 +972,395 @@ PYTHONPATH=src .venv/bin/python -m compileall -q src/smagm/features/point_guided
 git diff --check
 ```
 
-After Phase 5, STOP at Research Gate A.
+Proceed automatically to Phase 6. Gate A is CLOSED.
 
 ---
 
-# 9. Research Gate A — Wavelet details
+## Phase 6 — 2-level SWT-Haar spectral anchor A
 
-**Status: BLOCKED**
+**Status: UNBLOCKED — GATE A CLOSED**
 
-Need human/research decision for:
+### /phase-goal
 
-- wavelet family;
-- level;
-- boundary mode;
-- band packing;
-- normalization;
-- post-DWT projection.
+Implement the fixed-grid differentiable 2-level SWT-Haar anchor exactly as locked and attach it to the base tri-plane branch.
 
-Already decided: 2D wavelet is applied on the three base planes and forms a fixed spectral tri-plane anchor.
-
-## Phase 6 — Wavelet anchor A
-
-**Status: BLOCKED BY GATE A**
-
-Target only after unlock:
+Suggested modules:
 
 ```text
-Bxy → DWT → Axy
-Bxz → DWT → Axz
-Byz → DWT → Ayz
+src/smagm/features/point_guided/swt_haar.py
+src/smagm/features/point_guided/spectral_anchor.py
 ```
 
+Names may be adapted to existing conventions, but responsibilities must stay separated and lightweight.
+
+Tasks:
+
+- [ ] implement fixed normalized Haar low/high filters;
+- [ ] implement differentiable 2D stationary/undecimated transform with stride 1;
+- [ ] use level-appropriate dilation, no downsampling;
+- [ ] use reflect boundary handling;
+- [ ] produce exact seven-band order `LL2,LH1,HL1,HH1,LH2,HL2,HH2`;
+- [ ] keep every band on the same spatial grid as the input base plane;
+- [ ] implement one shared `1×1 Conv2d(64,8)`;
+- [ ] reuse the exact same projection parameters for every band and every plane;
+- [ ] concatenate seven projected 8-d bands → 56 channels;
+- [ ] MAIN normalization = none;
+- [ ] optional `band_gn` ablation may exist but must default off;
+- [ ] compute `Axy/Axz/Ayz` once per forward;
+- [ ] do not detach A;
+- [ ] ensure gradients reach shared band projection and base tri-plane scorer;
+- [ ] ensure gradients do not cross detached MedicalNet boundary in MAIN;
+- [ ] expose band layout as an explicit stable contract/constant rather than relying on magic slicing.
+
+Required tests:
+
+1. Haar filters are fixed/non-trainable and normalized as specified;
+2. SWT output has no spatial downsampling;
+3. all seven bands have exact input-plane spatial shape;
+4. band order is stable and documented;
+5. reflect boundary path preserves output shape for representative odd/even sizes;
+6. level 2 genuinely uses stationary dilation rather than a second decimation;
+7. `LL1` is not emitted in the final seven-band anchor;
+8. shared `1×1` parameters are actually shared across all seven bands and three planes;
+9. anchor shapes are exactly `[B,56,H,W]`, `[B,56,D,W]`, `[B,56,D,H]`;
+10. MAIN path has no normalization;
+11. optional band GroupNorm, if implemented, uses 7 groups / 56 channels and defaults off;
+12. gradient reaches band projector;
+13. gradient reaches axis-conditioned base projector;
+14. gradient does not reach detached MedicalNet in MAIN;
+15. anchor tensor is reused as a single result, not iteratively mutated.
+
+Synthetic spectral tests:
+
+- [ ] constant plane produces negligible high-pass response away from unavoidable numerical tolerance/boundary behavior;
+- [ ] simple horizontal/vertical ramps verify LH/HL implementation convention;
+- [ ] test documents the actual `LH/HL` orientation convention rather than assuming a library convention;
+- [ ] small translations do not alter output grid/alignment.
+
+Verify:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m pytest -q tests/features/point_guided/test_swt_haar.py
+PYTHONPATH=src .venv/bin/python -m pytest -q tests/features/point_guided/test_spectral_anchor.py
+PYTHONPATH=src .venv/bin/python -m pytest -q tests/features/point_guided
+PYTHONPATH=src .venv/bin/python -m compileall -q src/smagm/features/point_guided
+git diff --check
+```
+
+Proceed automatically to Phase 7. Gate B is CLOSED.
+
 ---
 
-# 10. Research Gate B — Cross-plane consistency
+## Phase 7 — Point spectral query + cross-plane reliability fusion
+
+**Status: UNBLOCKED — GATE B CLOSED**
+
+### /phase-goal
+
+Query the fixed anchor at every refined point, derive deterministic cross-plane reliability, and return a 168-d reliability-weighted spectral evidence vector without adding a learned fusion encoder.
+
+Suggested module boundaries:
+
+```text
+src/smagm/features/point_guided/spectral_query.py
+src/smagm/features/point_guided/cross_plane_consistency.py
+```
+
+Names may follow existing package conventions.
+
+### Phase 7A — geometry-aware bilinear query
+
+Tasks:
+
+- [ ] map each refined RAS-mm point to the shallow-anchor coordinate system using existing geometry contracts;
+- [ ] do not hardcode Conv1 `/2` coordinate conversion;
+- [ ] query Axy using `(x,y)`;
+- [ ] query Axz using `(x,z)`;
+- [ ] query Ayz using `(y,z)`;
+- [ ] use bilinear interpolation;
+- [ ] return `f_xy/f_xz/f_yz`, each 56-d;
+- [ ] no patch pooling, sphere pooling, or nearest-neighbor mode in MAIN;
+- [ ] keep sampling differentiable with respect to point coordinates where supported by the existing geometry representation.
+
+Tests:
+
+- [ ] exact-center query equals exact anchor pixel value;
+- [ ] fractional coordinate equals manual bilinear interpolation on a synthetic plane;
+- [ ] plane-axis coordinate mapping is correct using synthetic coordinate ramps;
+- [ ] SWT does not introduce extra coordinate scaling;
+- [ ] point perturbation changes sampled feature smoothly;
+- [ ] gradients with respect to continuous query coordinates are finite where expected;
+- [ ] no dense `[B,N,H,W]` or `[B,N,D,H,W]` helper tensor is created.
+
+### Phase 7B — deterministic 24-d consistency descriptor
+
+Tasks:
+
+- [ ] split each 56-d feature using the explicit seven-band layout;
+- [ ] compute `E1=sqrt(LH1²+HL1²+HH1²+eps)` elementwise;
+- [ ] compute `E2=sqrt(LH2²+HL2²+HH2²+eps)` elementwise;
+- [ ] build `q=[LL2,E1,E2]` → 24-d;
+- [ ] use fixed numerical epsilon only for stability;
+- [ ] retain original 56-d raw feature unchanged;
+- [ ] no learned `56→d` projector.
+
+Tests:
+
+- [ ] q shape exactly 24;
+- [ ] E1/E2 equal manual calculation;
+- [ ] permuting LH/HL/HH inside the same scale leaves energy descriptor unchanged within tolerance;
+- [ ] raw 56-d feature remains unchanged and orientation-specific bands remain available.
+
+### Phase 7C — pairwise reliability
+
+Tasks:
+
+- [ ] compute the three pairwise cosine similarities;
+- [ ] compute each `r_p` as mean agreement with the other two planes;
+- [ ] softmax the three reliability scores;
+- [ ] expose `α_xy/α_xz/α_yz` for diagnostics/tests;
+- [ ] no confidence MLP;
+- [ ] no hard plane drop;
+- [ ] document the known majority-consistency limitation.
+
+Tests:
+
+- [ ] identical q vectors produce equal reliability weights;
+- [ ] one synthetic outlier receives lower reliability than two mutually similar views;
+- [ ] α values are finite, nonnegative, and sum to one;
+- [ ] zero/near-zero descriptors remain numerically finite under the cosine implementation;
+- [ ] reliability has no trainable parameters.
+
+### Phase 7D — weighted concat packing
+
+Tasks:
+
+- [ ] `f~_xy = α_xy * f_xy`;
+- [ ] `f~_xz = α_xz * f_xz`;
+- [ ] `f~_yz = α_yz * f_yz`;
+- [ ] `f_i^spec = concat([f~_xy,f~_xz,f~_yz])`;
+- [ ] final point spectral feature = exactly 168-d;
+- [ ] preserve plane block provenance XY→XZ→YZ;
+- [ ] preserve seven-band ordering inside each plane block;
+- [ ] do not channel-wise sum planes;
+- [ ] do not introduce the previously considered 104-d canonical-orientation module;
+- [ ] do not add `168→64` MLP/compression in MAIN;
+- [ ] optional naive concat may exist only as an explicit baseline mode, never as MAIN.
+
+Required integration tests:
+
+- [ ] refined points from existing frontend can query the produced anchor;
+- [ ] point count 2048 works without dense global point-volume allocation;
+- [ ] 3072 ablation remains shape-valid;
+- [ ] output spectral evidence shape is `[B,N,168]` or the repository's equivalent sparse/typed point-batch representation;
+- [ ] changing one plane reliability only scales that plane's 56-d block;
+- [ ] spectral query/fusion does not modify `S_coarse`, point coordinates, or PoU semantics;
+- [ ] gradient from a dummy downstream loss reaches shared band projector and axis scorer through `f_i^spec`;
+- [ ] gradient stops at MedicalNet shallow detach in MAIN.
+
+Verify:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m pytest -q tests/features/point_guided/test_spectral_query.py
+PYTHONPATH=src .venv/bin/python -m pytest -q tests/features/point_guided/test_cross_plane_consistency.py
+PYTHONPATH=src .venv/bin/python -m pytest -q tests/features/point_guided
+PYTHONPATH=src .venv/bin/python -m compileall -q src/smagm/features/point_guided
+git diff --check
+```
+
+After Phase 7 passes, STOP at Research Gate C.
+
+Do **not** invent `Z0`, selector, updater, decoder, or reconstruction loss.
+
+---
+
+# 8. Research Gate C — Dynamic trajectory
 
 **Status: BLOCKED**
 
-Already decided: all three planes are queried at each refined 3D point and main fusion is consistency/reliability-aware.
+Next research decisions, not implementation decisions:
 
-Exact mechanism remains open.
+1. `Z0` representation and initialization;
+2. selector inputs and scoring;
+3. top-1 vs top-k / soft selection;
+4. history and point revisit policy;
+5. local updater representation and correction rule;
+6. how updates scatter to XY/XZ/YZ dynamic planes;
+7. overlap handling;
+8. fixed K vs learned/convergence stopping;
+9. decoder from `Z_K` to T1ce;
+10. reconstruction/pathology/spectral losses;
+11. end-to-end vs stagewise training.
 
-## Phase 7 — Point spectral query + consistency fusion
-
-**Status: BLOCKED BY GATE B**
-
-No implementation until gate is resolved.
-
----
-
-# 11. Research Gate C — Dynamic trajectory
-
-**Status: BLOCKED**
-
-Need decisions for Z0, selector, updater, history, stopping, decoder, losses.
-
-Do not pull in legacy anchor/field/routing implementations automatically.
+No Codex implementation past Gate C without an explicit research unlock.
 
 ---
 
-# 12. Codegraph / ownership update
+# 9. Codegraph / ownership update
 
-M0 pre-authorizes the exact Phase 1–5 paths in the `frontend` and `tests`
-tasks while preserving default deny. Do not broaden those paths or add a
-separate spectral task merely to bypass their boundary. In particular, do not
-unblock legacy `anchors/**`, `fields/**`, `routing/**`, reconstruction,
-training, or data packages.
+The existing codegraph predates the newly unlocked spectral anchor and cross-plane modules.
 
-The reserved Phase 4 paths are:
+When implementing Phases 4–7:
+
+- extend the point-guided/frontend task only with the smallest new read/write paths;
+- optionally create narrowly scoped spectral tasks if the repository codegraph convention supports them;
+- preserve default-deny behavior;
+- do not unblock legacy `anchors/**`, `fields/**`, `routing/**`, reconstruction, training, or unrelated data packages.
+
+Expected new files, subject to existing naming conventions:
 
 ```text
 src/smagm/features/point_guided/triplane_projection.py
+src/smagm/features/point_guided/swt_haar.py
+src/smagm/features/point_guided/spectral_anchor.py
+src/smagm/features/point_guided/spectral_query.py
+src/smagm/features/point_guided/cross_plane_consistency.py
+
 tests/features/point_guided/test_triplane_projection.py
+tests/features/point_guided/test_swt_haar.py
+tests/features/point_guided/test_spectral_anchor.py
+tests/features/point_guided/test_spectral_query.py
+tests/features/point_guided/test_cross_plane_consistency.py
 ```
 
-Do not create wavelet, cross-plane fusion, dynamic trajectory, decoder, or
-reconstruction files until the corresponding research gate is resolved.
+Do not create dynamic-triplane/trajectory implementation files yet.
 
 ---
 
-# 13. Ablation registry
+# 10. Configuration contract
+
+MAIN values should be explicit and centralized rather than spread as magic constants.
+
+Target configuration semantics:
+
+```text
+num_semantic_classes = 3
+num_points = 2048
+support_radius_mm = 4.0
+max_displacement_mm = 2.0
+
+freeze_backbone = true
+detach_backbone_features = true
+spectral_tap = conv1_pre_maxpool
+
+projection_mode = axis_local_weighted
+
+wavelet_family = swt_haar
+wavelet_levels = 2
+wavelet_boundary = reflect
+wavelet_band_order = [LL2,LH1,HL1,HH1,LH2,HL2,HH2]
+wavelet_band_channels = 8
+anchor_channels = 56
+anchor_norm = none
+
+spectral_query = bilinear
+consistency_descriptor = ll2_energy12
+consistency_similarity = pairwise_cosine
+consistency_weighting = softmax_mean_agreement
+spectral_fusion = reliability_weighted_concat
+point_spectral_channels = 168
+```
+
+Do not expose arbitrary research knobs simply because the implementation could support them.
+
+---
+
+# 11. Ablation registry
+
+Support only intentional ablations.
 
 ```text
 MedicalNet tap:
   conv1_pre_maxpool   MAIN
-  layer1
+  layer1              ABLATION
 
 Backbone:
   frozen              MAIN
-  fine_tuned
+  fine_tuned          ABLATION
 
 Feature detach:
   true                MAIN
-  false
+  false               ABLATION
 
 Point count:
   2048                MAIN
-  3072
+  3072                ABLATION
 
 Directional context:
-  center_only
-  ±1mm
+  center_only         ABLATION
+  ±1mm                ABLATION
   ±1/2/3mm            MAIN
 
 PoU affinity:
-  spatial_only
+  spatial_only        ABLATION
   spatial_x_semantic  MAIN
 
 Base projection:
-  mean
-  max
-  pointwise_weighted
+  mean                ABLATION
+  max                 ABLATION
+  pointwise_weighted  ABLATION
   axis_local_weighted MAIN
 
-Spectral later:
-  anchor_off
-  anchor_on           MAIN after implementation
+Wavelet:
+  standard decimated Haar   FUTURE BASELINE if explicitly added
+  2-level SWT-Haar          MAIN
 
-Cross-plane later:
-  naive_concat        baseline only
-  consistency_aware   MAIN after research lock
+Anchor channel projection:
+  shared 64→8 per band      MAIN
+
+Anchor normalization:
+  none                      MAIN
+  band_gn                   STABILITY ABLATION
+
+Cross-plane:
+  naive_concat              BASELINE
+  consistency_aware         MAIN
 ```
 
-Support ablations; do not automatically run every Cartesian combination.
+Do not automatically run every Cartesian product.
 
 ---
 
-# 14. Scientific invariants
+# 12. Scientific invariants
 
 Every unblocked phase must preserve:
 
 1. T1ce never enters observation input.
-2. channel order stays T1/T2/FLAIR.
-3. MedicalNet checkpoint behavior stays fail-closed/provenance-aware.
-4. frozen BN statistics do not mutate.
-5. main spectral tap is before MaxPool.
-6. main shallow branch feature is detached.
-7. coarse semantic meaning is exactly normal/edema/tumor-core candidate.
-8. displacement <= 2 mm from original point center.
-9. support radius = 4 mm.
-10. PoU stays sparse and normalized.
-11. no `[B,N,D,H,W]` dense point tensor.
-12. no second heavy spectral encoder.
-13. no fake spectral anchor before wavelet is locked.
-14. full `PointGuidedMRIModel.forward()` still refuses unresolved T1ce synthesis.
-15. no silent reuse of legacy 3DGS reconstruction modules.
+2. Observation channel order stays T1/T2/FLAIR.
+3. MedicalNet checkpoint behavior stays fail-closed and provenance-aware.
+4. Frozen BatchNorm statistics do not mutate.
+5. MAIN spectral tap is after Conv1+BN+ReLU and before MaxPool.
+6. MAIN shallow branch feature is detached.
+7. Coarse semantic meaning is exactly normal brain / edema / tumor-core candidate.
+8. Point displacement remains <= 2 mm from original center.
+9. Point support radius remains exactly 4 mm.
+10. PoU remains sparse and normalized.
+11. No dense `[B,N,D,H,W]` point tensor.
+12. No second heavy spectral encoder.
+13. Base tri-plane projection remains axis-local scalar-weighted collapse.
+14. SWT-Haar is 2-level, undecimated, reflect-padded, with exactly seven stored bands.
+15. Wavelet band projection is one shared trainable `1×1`, 64→8.
+16. Anchor plane size remains aligned with the corresponding base plane.
+17. Anchor has 56 channels per plane in fixed band order.
+18. MAIN anchor normalization is none.
+19. `A` is fixed across future trajectory iterations but not detached from learning.
+20. Gate B query is bilinear and geometry-aware.
+21. Consistency descriptor is deterministic 24-d `[LL2,E1,E2]`.
+22. Reliability is pairwise cosine → mean agreement → softmax.
+23. No learned confidence MLP in MAIN.
+24. Final point spectral evidence is reliability-weighted concat, 168-d.
+25. Plane identity and band identity remain recoverable from `f_i^spec`.
+26. No 104-d canonical-orientation fusion module is added at Gate B.
+27. No `168→d` learned compression at Gate B MAIN.
+28. Full `PointGuidedMRIModel.forward()` still refuses unresolved T1ce synthesis.
+29. No silent reuse of legacy 3DGS reconstruction modules.
+30. No trajectory implementation before Gate C is unlocked.
 
 ---
 
-# 15. Final verification for all currently unblocked phases
+# 13. Final verification for all currently unblocked phases
 
-After Phase 5:
+After Phase 7:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m pytest -q tests/features/point_guided
@@ -768,65 +1368,56 @@ PYTHONPATH=src .venv/bin/python -m compileall -q src/smagm/features/point_guided
 git diff --check
 ```
 
-Report:
+Also report:
 
 ```text
 current HEAD
 files changed
 tests changed/added
-shapes: x, F_shallow, F_layer1, F_deep, S_coarse, Bxy/Bxz/Byz
+x shape
+F_shallow shape
+F_layer1 shape
+F_deep shape
+S_coarse shape
+Bxy/Bxz/Byz shapes
+7 raw SWT band shapes per plane
+Axy/Axz/Ayz shapes
+queried f_xy/f_xz/f_yz shape
+q_xy/q_xz/q_yz shape
+α shape and normalization
+f_i^spec shape
 whether a MedicalNet checkpoint was actually loaded during tests
 frozen/detach behavior
 parameter count of three axis-local scorers
-next blocked research gate
+parameter count of shared 1×1 band projector
+confirmation Haar filters have zero trainable parameters
+peak/approximate tensor sizes for N=2048 and N=3072 if easily measurable
+next blocked research gate = Gate C
 ```
 
-Do not claim reconstruction or clinical performance from software tests.
+Do not claim reconstruction quality, clinical validity, lesion fidelity, or publication performance from software tests.
 
 ---
 
-# 16. Phase completion log
+# 14. Phase completion log
+
+Initialize from actual repository state rather than blindly trusting this template:
 
 ```text
-Phase 0: COMPLETE — M0 policy/architecture reconciliation at d623d179e6626a54deefcf3f4c5a8d9e9f0a33c1; policy/docs/permissions only
-Phase 1: COMPLETE — shared typed MedicalNet shallow/Layer1/deep feature API; no later phase started
-  status: COMPLETE
-  HEAD: d623d179e6626a54deefcf3f4c5a8d9e9f0a33c1
-  files changed: medicalnet_resnet10.py, semantic_prior.py, test_semantic_prior.py, PLAN.md
-  verification: 13 focused tests passed; 45 point-guided tests passed; compileall and git diff --check passed
-  remaining assumptions: Phase 2 detach/tap controls and all later phases remain unimplemented
-Phase 2: COMPLETE — explicit shared-feature detach/tap and frozen/fine-tuned ablation controls; no later phase started
-  status: COMPLETE
-  HEAD: d623d179e6626a54deefcf3f4c5a8d9e9f0a33c1
-  files changed: config.py, semantic_prior.py, test_semantic_prior.py, PLAN.md
-  verification: 27 focused tests passed; 59 point-guided tests passed; compileall and git diff --check passed
-  remaining assumptions: Phase 3 exact semantic-class contract and all later phases remain unimplemented
-Phase 3: COMPLETE — exact ordered three-class coarse semantics; no later phase started
-  status: COMPLETE
-  HEAD: d623d179e6626a54deefcf3f4c5a8d9e9f0a33c1
-  files changed: config.py, contracts.py, test_semantic_prior.py, test_points_refinement.py, test_frontend_forward.py, POINT_GUIDED_FRONTEND.md, PLAN.md
-  verification: 32 semantic-prior focused tests passed; 9 refinement tests passed; 4 frontend smoke tests passed; 65 point-guided tests passed; compileall and git diff --check passed
-  remaining assumptions: Phase 4 base-plane projection and all later phases remain unimplemented
-Phase 4: COMPLETE — PLAN-locked static base tri-plane projector; no later phase started
-  status: COMPLETE
-  HEAD: d623d179e6626a54deefcf3f4c5a8d9e9f0a33c1
-  files changed: config.py, triplane_projection.py, test_triplane_projection.py, PLAN.md
-  verification: 15 focused tri-plane tests passed; 4 frontend smoke tests passed; 80 point-guided tests passed; compileall, codegraph, and git diff --check passed
-  remaining assumptions: Phase 5 diagnostic frontend B composition and all later phases remain unimplemented
-Phase 5: COMPLETE — shared one-pass MedicalNet composition with static typed diagnostic B planes; stopped at Research Gate A
-  status: COMPLETE
-  HEAD: d623d179e6626a54deefcf3f4c5a8d9e9f0a33c1 (working tree implementation)
-  files changed: semantic_prior.py, model.py, contracts.py, test_frontend_forward.py, test_frontend_boundaries.py, POINT_GUIDED_FRONTEND.md, README.md, CODEBASE.md, PLAN.md
-  verification: 18 frontend tests passed; 42 frontend/boundary/projector tests passed; 94 point-guided tests passed; compileall and git diff --check passed
-  remaining assumptions: Research Gate A wavelet details and all Phase 6+ work remain blocked
+Phase 0: PENDING / RESOLVE ACTUAL HEAD
+Phase 1: PENDING
+Phase 2: PENDING
+Phase 3: PENDING
+Phase 4: PENDING
+Phase 5: PENDING
 
-Research Gate A — wavelet: BLOCKED
-Phase 6: BLOCKED
+Research Gate A — SWT-Haar anchor: CLOSED
+Phase 6: UNBLOCKED
 
-Research Gate B — cross-plane consistency: BLOCKED
-Phase 7: BLOCKED
+Research Gate B — point query + cross-plane reliability: CLOSED
+Phase 7: UNBLOCKED
 
-Research Gate C — trajectory: BLOCKED
+Research Gate C — dynamic trajectory: BLOCKED
 ```
 
 For every completed phase record:
@@ -839,9 +1430,11 @@ verification:
 remaining assumptions:
 ```
 
+Codex should update this log as it works.
+
 ---
 
-# 17. Scope guard
+# 15. Scope guard
 
 Do not drift into:
 
@@ -849,13 +1442,19 @@ Do not drift into:
 - Gaussian opacity/covariance;
 - sparse-slice reconstruction;
 - a second heavy encoder;
-- full BraTS-specialist segmentation;
+- a BraTS-specialist model that pre-solves the missing-modality problem;
 - T1ce conditioning;
 - local per-point FFT;
-- replacing the fixed spectral tri-plane with a full 3D wavelet evidence field;
+- full 3D DWT/3D wavelet evidence volume as replacement for the tri-plane anchor;
+- decimated Haar as MAIN;
+- DT-CWT as MAIN;
 - dynamic mutation of spectral anchor A;
-- transformer selector/updater;
-- trajectory before its research gate;
-- legacy anchor/field/routing packages.
+- transformer/cross-attention spectral fusion;
+- learned reliability MLP at Gate B;
+- hard plane selection;
+- canonical 104-d orientation fusion at Gate B;
+- learned 168-d compression at Gate B;
+- trajectory, selector, updater, decoder, or reconstruction loss before Gate C;
+- legacy anchor/field/routing packages unless a later research decision explicitly reuses them.
 
-Resolve one locked research decision at a time.
+Execute all locked phases continuously, then stop cleanly at Gate C.
