@@ -6,6 +6,11 @@ coarse semantics, deterministic initial points, bounded refinement,
 point-centre semantics, and a sparse semantic-aware PoU. It does not authorize
 or produce a T1ce volume.
 
+This gate records evidence for the current executable boundary only. It neither
+authorizes nor blocks the separately authorized, not-yet-implemented `PLAN.md`
+Phases 1–5; policy authority for those phases is defined by `AGENTS.md` and
+`CODEGRAPH.json`. It does not authorize any Phase 6+ research-gated behavior.
+
 Run it with the project environment:
 
 ```bash

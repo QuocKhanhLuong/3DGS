@@ -14,6 +14,7 @@ from .points import DeterministicPointInitializer
 from .pou import SparseSemanticPoU
 from .refinement import PointRefiner
 from .semantic_prior import SemanticPrior
+from .triplane_projection import BaseTriPlaneProjector
 
 
 class PointGuidedMRIModel(nn.Module):
@@ -33,6 +34,13 @@ class PointGuidedMRIModel(nn.Module):
         self.point_initializer = DeterministicPointInitializer(config)
         self.point_refiner = PointRefiner(config)
         self.sparse_pou = SparseSemanticPoU(config)
+        # This persistent module consumes the Phase-2-selected shared map;
+        # channel count is read from the instantiated backbone rather than
+        # hard-coded from today's two 64-channel taps.
+        self.base_plane_projector = BaseTriPlaneProjector(
+            config,
+            input_channels=self.semantic_prior.selected_spectral_feature_channels,
+        )
 
     @staticmethod
     def _validate_input(x: torch.Tensor) -> None:
@@ -77,7 +85,13 @@ class PointGuidedMRIModel(nn.Module):
 
         self._validate_input(x)
         geometry = self._geometry(x.shape[-3:], spacing_mm, voxel_to_ras_mm)
-        s_coarse = self.semantic_prior(x)
+        features = self.semantic_prior.extract_intermediate_features(x)
+        s_coarse = self.semantic_prior.forward_from_intermediate_features(
+            features,
+            output_spatial_shape=x.shape[-3:],
+        )
+        selected_feature = self.semantic_prior.select_spectral_feature(features)
+        base_planes = self.base_plane_projector(selected_feature)
         semantic_sum = s_coarse.sum(dim=1)
         if not bool(torch.allclose(semantic_sum, torch.ones_like(semantic_sum), atol=1e-5, rtol=1e-5)):
             raise RuntimeError("coarse semantic prior must sum to one per voxel")
@@ -103,6 +117,7 @@ class PointGuidedMRIModel(nn.Module):
             point_semantic=point_field.semantic_vectors,
             sparse_pou=sparse_pou,
             geometry=geometry,
+            base_planes=base_planes,
         )
 
     def forward(self, *args: object, **kwargs: object) -> torch.Tensor:

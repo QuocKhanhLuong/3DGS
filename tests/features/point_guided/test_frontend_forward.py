@@ -2,21 +2,55 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 import torch
 
 from smagm.features.point_guided import PointGuidedConfig, PointGuidedMRIModel
+from smagm.features.point_guided.medicalnet_resnet10 import MedicalNetResNet10
 from smagm.features.point_guided.sampling import ras_mm_in_bounds
+from smagm.features.point_guided.triplane_projection import BaseTriPlanes
 
 
-def _model() -> PointGuidedMRIModel:
-    return PointGuidedMRIModel(
-        PointGuidedConfig(
-            num_semantic_classes=3,
-            num_points=4,
-            point_candidate_multiplier=3,
-        )
-    )
+def _model(**overrides: object) -> PointGuidedMRIModel:
+    values: dict[str, object] = {
+        "num_semantic_classes": 3,
+        "num_points": 4,
+        "point_candidate_multiplier": 3,
+    }
+    values.update(overrides)
+    return PointGuidedMRIModel(PointGuidedConfig(**values))  # type: ignore[arg-type]
+
+
+def _assert_planes_close(actual: BaseTriPlanes, expected: BaseTriPlanes) -> None:
+    for name in ("xy", "xz", "yz"):
+        torch.testing.assert_close(getattr(actual, name), getattr(expected, name), rtol=0.0, atol=0.0)
+
+
+def _assert_core_outputs_equal(actual: object, expected: object) -> None:
+    for name in (
+        "s_coarse",
+        "initial_points_ras_mm",
+        "refined_points_ras_mm",
+        "displacement_ras_mm",
+        "point_semantic",
+    ):
+        torch.testing.assert_close(getattr(actual, name), getattr(expected, name), rtol=0.0, atol=0.0)
+    assert actual.geometry == expected.geometry  # type: ignore[attr-defined]
+    actual_pou = actual.sparse_pou  # type: ignore[attr-defined]
+    expected_pou = expected.sparse_pou  # type: ignore[attr-defined]
+    assert actual_pou.volume_shape_dhw == expected_pou.volume_shape_dhw
+    for name in (
+        "batch_indices",
+        "voxel_indices_dhw",
+        "point_indices",
+        "raw_affinity",
+        "normalized_weight",
+        "unsupported_batch_indices",
+        "unsupported_voxel_indices_dhw",
+    ):
+        torch.testing.assert_close(getattr(actual_pou, name), getattr(expected_pou, name), rtol=0.0, atol=0.0)
 
 
 def test_frontend_returns_only_the_locked_point_field_and_sparse_pou() -> None:
@@ -36,6 +70,19 @@ def test_frontend_returns_only_the_locked_point_field_and_sparse_pou() -> None:
     assert bool(ras_mm_in_bounds(output.refined_points, output.geometry).all())
     assert output.sparse_pou.normalized_weight.ndim == 1
     assert output.sparse_pou.normalized_weight.numel() > 0
+    assert isinstance(output.base_planes, BaseTriPlanes)
+    assert output.base_planes.xy.shape == output.base_planes.xz.shape == output.base_planes.yz.shape == (1, 64, 5, 5)
+
+
+def test_frontend_output_fails_closed_for_a_nonproduction_semantic_width() -> None:
+    model = _model().eval()
+    with torch.no_grad():
+        output = model.forward_frontend(torch.randn(1, 3, 9, 9, 9))
+
+    with pytest.raises(ValueError, match="exactly 3"):
+        replace(output, s_coarse=output.s_coarse[:, :2])
+    with pytest.raises(TypeError, match="BaseTriPlanes"):
+        replace(output, base_planes=None)  # type: ignore[arg-type]
 
 
 def test_downstream_loss_reaches_the_offset_predictor_through_refined_points() -> None:
@@ -60,3 +107,230 @@ def test_downstream_loss_reaches_the_offset_predictor_through_refined_points() -
 def test_full_forward_refuses_to_synthesize_an_unresolved_t1ce_volume() -> None:
     with pytest.raises(NotImplementedError, match="Full T1ce synthesis is unresolved"):
         _model()(torch.randn(1, 3, 9, 9, 9))
+
+
+@pytest.mark.parametrize("spectral_tap", ("conv1_pre_maxpool", "layer1"))
+def test_integrated_frontend_uses_one_shared_backbone_pass_and_routes_the_selected_tap(
+    spectral_tap: str,
+) -> None:
+    model = _model(spectral_tap=spectral_tap, projection_mode="mean").eval()
+    x = torch.randn(1, 3, 9, 11, 13)
+    backbone = model.semantic_prior.backbone
+    module_names = ("conv1", "bn1", "relu", "maxpool", "layer1", "layer2", "layer3", "layer4")
+    calls = {name: 0 for name in module_names}
+    captured: dict[str, torch.Tensor] = {}
+
+    def counter(name: str):
+        def count_call(*_args: object) -> None:
+            calls[name] += 1
+
+        return count_call
+
+    def capture_output(name: str):
+        def record_output(
+            _module: torch.nn.Module,
+            _inputs: tuple[torch.Tensor, ...],
+            output: torch.Tensor,
+        ) -> None:
+            captured[name] = output.detach().clone()
+
+        return record_output
+
+    def capture_projector_input(
+        _module: torch.nn.Module,
+        inputs: tuple[torch.Tensor, ...],
+    ) -> None:
+        captured["projector"] = inputs[0].detach().clone()
+
+    hooks = [getattr(backbone, name).register_forward_hook(counter(name)) for name in module_names]
+    hooks.extend(
+        (
+            backbone.relu.register_forward_hook(capture_output("shallow")),
+            backbone.layer1.register_forward_hook(capture_output("layer1")),
+            model.base_plane_projector.register_forward_pre_hook(capture_projector_input),
+        )
+    )
+    semantic_head_calls = [0]
+
+    def count_semantic_head(*_args: object) -> None:
+        semantic_head_calls[0] += 1
+
+    hooks.append(model.semantic_prior.semantic_head.register_forward_hook(count_semantic_head))
+    try:
+        with torch.no_grad():
+            output = model.forward_frontend(x)
+    finally:
+        for hook in hooks:
+            hook.remove()
+
+    assert calls == {name: 1 for name in module_names}
+    assert semantic_head_calls == [1]
+    selected = captured["shallow" if spectral_tap == "conv1_pre_maxpool" else "layer1"]
+    torch.testing.assert_close(captured["projector"], selected, rtol=0.0, atol=0.0)
+    batch, channels, depth, height, width = selected.shape
+    assert output.base_planes.xy.shape == (batch, channels, height, width)
+    assert output.base_planes.xz.shape == (batch, channels, depth, width)
+    assert output.base_planes.yz.shape == (batch, channels, depth, height)
+
+
+def test_integrated_semantics_and_existing_point_pou_outputs_are_isolated_from_base_planes() -> None:
+    torch.manual_seed(41)
+    model = _model().eval()
+    x = torch.randn(1, 3, 9, 9, 9)
+
+    with torch.no_grad():
+        features = model.semantic_prior.extract_intermediate_features(x)
+        expected_semantics = model.semantic_prior.forward_from_intermediate_features(
+            features,
+            output_spatial_shape=x.shape[-3:],
+        )
+        before = model.forward_frontend(x)
+        assert model.base_plane_projector.xy_scorer is not None
+        model.base_plane_projector.xy_scorer.weight.fill_(0.25)
+        after = model.forward_frontend(x)
+
+    torch.testing.assert_close(before.s_coarse, expected_semantics, rtol=0.0, atol=0.0)
+    _assert_core_outputs_equal(after, before)
+    assert not torch.allclose(after.base_planes.xy, before.base_planes.xy)
+
+
+@pytest.mark.parametrize(
+    "projection_mode",
+    ("mean", "max", "pointwise_weighted", "axis_local_weighted"),
+)
+def test_all_projection_modes_are_wired_to_the_diagnostic_frontend_output(
+    projection_mode: str,
+) -> None:
+    model = _model(projection_mode=projection_mode).eval()
+    x = torch.randn(1, 3, 7, 7, 7)
+
+    with torch.no_grad():
+        first = model.forward_frontend(x)
+        second = model.forward_frontend(x)
+
+    assert isinstance(first.base_planes, BaseTriPlanes)
+    assert first.base_planes.xy.shape == first.base_planes.xz.shape == first.base_planes.yz.shape == (1, 64, 4, 4)
+    for plane in (first.base_planes.xy, first.base_planes.xz, first.base_planes.yz):
+        assert bool(torch.isfinite(plane).all())
+    _assert_planes_close(second.base_planes, first.base_planes)
+
+
+def test_projection_mode_changes_only_the_static_diagnostic_base_planes() -> None:
+    baseline = _model(projection_mode="axis_local_weighted").eval()
+    variant = _model(projection_mode="max").eval()
+    core_state = {
+        name: value
+        for name, value in baseline.state_dict().items()
+        if not name.startswith("base_plane_projector.")
+    }
+    variant.load_state_dict(core_state)
+    x = torch.randn(1, 3, 7, 7, 7)
+
+    with torch.no_grad():
+        baseline_output = baseline.forward_frontend(x)
+        variant_output = variant.forward_frontend(x)
+
+    _assert_core_outputs_equal(variant_output, baseline_output)
+    assert not torch.allclose(variant_output.base_planes.xy, baseline_output.base_planes.xy)
+
+
+@pytest.mark.parametrize(
+    ("freeze_backbone", "detach_feature", "expects_backbone_grad", "expects_input_grad"),
+    (
+        (True, True, False, False),
+        (True, False, False, True),
+        (False, True, False, False),
+        (False, False, True, True),
+    ),
+)
+def test_base_plane_loss_honors_the_integrated_detach_and_freeze_boundaries(
+    freeze_backbone: bool,
+    detach_feature: bool,
+    expects_backbone_grad: bool,
+    expects_input_grad: bool,
+) -> None:
+    model = _model(
+        freeze_coarse_backbone=freeze_backbone,
+        detach_backbone_features=detach_feature,
+    ).eval()
+    x = torch.randn(1, 3, 7, 7, 7, requires_grad=True)
+
+    output = model.forward_frontend(x)
+    loss = sum(plane.square().mean() for plane in (output.base_planes.xy, output.base_planes.xz, output.base_planes.yz))
+    loss.backward()
+
+    for name, parameter in model.base_plane_projector.named_parameters():
+        assert parameter.grad is not None and bool(torch.isfinite(parameter.grad).all())
+        # Softmax is invariant to a scorer's spatially constant bias, so its
+        # bias gradient may be exactly zero.  Each learned scorer kernel must
+        # still receive the B-only training signal.
+        if name.endswith("weight"):
+            assert bool(parameter.grad.abs().sum() > 0.0)
+    assert all(parameter.grad is None for parameter in model.semantic_prior.semantic_head.parameters())
+    assert (model.semantic_prior.backbone.conv1.weight.grad is not None) is expects_backbone_grad
+    assert (x.grad is not None) is expects_input_grad
+    if expects_backbone_grad:
+        assert bool(model.semantic_prior.backbone.conv1.weight.grad.abs().sum() > 0.0)
+    if expects_input_grad:
+        assert bool(x.grad.abs().sum() > 0.0)
+
+
+def test_model_owns_a_persistent_projector_with_round_trippable_default_state() -> None:
+    torch.manual_seed(43)
+    model = _model().eval()
+    projector = model.base_plane_projector
+    assert projector is model.base_plane_projector
+    assert sum(isinstance(module, MedicalNetResNet10) for module in model.modules()) == 1
+    assert tuple(name for name in model.state_dict() if name.startswith("base_plane_projector.")) == (
+        "base_plane_projector.xy_scorer.weight",
+        "base_plane_projector.xy_scorer.bias",
+        "base_plane_projector.xz_scorer.weight",
+        "base_plane_projector.xz_scorer.bias",
+        "base_plane_projector.yz_scorer.weight",
+        "base_plane_projector.yz_scorer.bias",
+    )
+    assert sum(parameter.numel() for parameter in projector.parameters()) == 579
+    x = torch.randn(1, 3, 7, 7, 7)
+
+    with torch.no_grad():
+        before = model.forward_frontend(x)
+        assert projector.xy_scorer is not None
+        projector.xy_scorer.weight.fill_(0.2)
+        changed = model.forward_frontend(x)
+
+    assert model.base_plane_projector is projector
+    assert not torch.allclose(before.base_planes.xy, changed.base_planes.xy)
+    restored = _model().eval()
+    restored.load_state_dict(model.state_dict())
+    with torch.no_grad():
+        replayed = restored.forward_frontend(x)
+    _assert_core_outputs_equal(replayed, changed)
+    _assert_planes_close(replayed.base_planes, changed.base_planes)
+
+
+def test_projector_only_optimization_leaves_the_default_frozen_medicalnet_unchanged() -> None:
+    torch.manual_seed(47)
+    model = _model().train()
+    assert not model.semantic_prior.backbone.training
+    assert model.semantic_prior.semantic_head.training
+    assert model.base_plane_projector.training
+    assert all(not parameter.requires_grad for parameter in model.semantic_prior.backbone.parameters())
+    assert all(parameter.requires_grad for parameter in model.base_plane_projector.parameters())
+    backbone_before = {
+        name: value.detach().clone() for name, value in model.semantic_prior.backbone.state_dict().items()
+    }
+    projector_before = {
+        name: value.detach().clone() for name, value in model.base_plane_projector.state_dict().items()
+    }
+    optimizer = torch.optim.SGD(model.base_plane_projector.parameters(), lr=0.1)
+    output = model.forward_frontend(torch.randn(1, 3, 7, 7, 7))
+    loss = sum(plane.square().mean() for plane in (output.base_planes.xy, output.base_planes.xz, output.base_planes.yz))
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    assert any(
+        not torch.equal(value, model.base_plane_projector.state_dict()[name])
+        for name, value in projector_before.items()
+    )
+    assert all(torch.equal(value, model.semantic_prior.backbone.state_dict()[name]) for name, value in backbone_before.items())

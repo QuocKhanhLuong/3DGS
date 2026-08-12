@@ -219,6 +219,14 @@ def test_refiner_keeps_gradient_to_the_offset_mlp() -> None:
     loss = field.refined_centers_ras_mm.square().sum() + field.semantic_vectors.square().sum()
     loss.backward()
 
+    assert field.semantic_vectors.shape == (1, 2, 3)
+    assert bool((field.semantic_vectors >= 0.0).all())
+    assert torch.allclose(
+        field.semantic_vectors.sum(dim=-1),
+        torch.ones_like(field.semantic_vectors[..., 0]),
+        atol=1e-6,
+        rtol=1e-6,
+    )
     assert bool((torch.linalg.vector_norm(field.displacement_ras_mm, dim=-1) <= config.max_displacement_mm + 1e-6).all())
     assert bool(ras_mm_in_bounds(field.refined_centers_ras_mm, geometry).all())
     assert any(

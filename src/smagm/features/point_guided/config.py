@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 from pathlib import Path
-from typing import Sequence
+from typing import Literal, Sequence
+
+from .contracts import NUM_COARSE_SEMANTIC_CLASSES
 
 
 def _positive_floats(values: Sequence[float], name: str) -> tuple[float, ...]:
@@ -32,6 +34,14 @@ class PointGuidedConfig:
     directional_offsets_mm: tuple[float, ...] = (1.0, 2.0, 3.0)
     coarse_backbone: str = "MedicalNet_ResNet10"
     freeze_coarse_backbone: bool = True
+    detach_backbone_features: bool = True
+    spectral_tap: Literal["conv1_pre_maxpool", "layer1"] = "conv1_pre_maxpool"
+    projection_mode: Literal[
+        "mean",
+        "max",
+        "pointwise_weighted",
+        "axis_local_weighted",
+    ] = "axis_local_weighted"
     medicalnet_checkpoint_path: str | Path | None = None
     medicalnet_checkpoint_sha256: str | None = None
     require_pretrained_backbone: bool = False
@@ -44,10 +54,30 @@ class PointGuidedConfig:
     pou_normalization: bool = True
 
     def __post_init__(self) -> None:
-        if not isinstance(self.num_semantic_classes, int) or isinstance(self.num_semantic_classes, bool) or self.num_semantic_classes <= 1:
-            raise ValueError("num_semantic_classes must be greater than one")
+        if (
+            not isinstance(self.num_semantic_classes, int)
+            or isinstance(self.num_semantic_classes, bool)
+            or self.num_semantic_classes != NUM_COARSE_SEMANTIC_CLASSES
+        ):
+            raise ValueError("num_semantic_classes is locked to exactly 3 production coarse semantic classes")
         if tuple(self.input_modalities) != ("T1", "T2", "FLAIR"):
             raise ValueError("input_modalities is locked to ('T1', 'T2', 'FLAIR')")
+        if not isinstance(self.freeze_coarse_backbone, bool):
+            raise ValueError("freeze_coarse_backbone must be a bool")
+        if not isinstance(self.detach_backbone_features, bool):
+            raise ValueError("detach_backbone_features must be a bool")
+        if self.spectral_tap not in ("conv1_pre_maxpool", "layer1"):
+            raise ValueError("spectral_tap must be 'conv1_pre_maxpool' or 'layer1'")
+        if self.projection_mode not in (
+            "mean",
+            "max",
+            "pointwise_weighted",
+            "axis_local_weighted",
+        ):
+            raise ValueError(
+                "projection_mode must be 'mean', 'max', 'pointwise_weighted', or "
+                "'axis_local_weighted'"
+            )
         for name in (
             "num_points",
             "alternative_num_points",
