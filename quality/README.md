@@ -4,15 +4,17 @@
 `POINT_GUIDED_FRONTEND`. It covers only the locked `T1/T2/FLAIR` frontend:
 coarse semantics, deterministic initial points, bounded refinement,
 point-centre semantics, a sparse semantic-aware PoU, and static diagnostic B
-planes. It does not authorize or produce a T1ce volume.
+planes plus the static spectral anchor `A`. It does not authorize or produce a
+T1ce volume.
 
 This gate records evidence for the current executable boundary only: the
-implemented Phase 1-5 frontend through static B planes. It neither implements
-nor certifies the separately authorized, not-yet-implemented Phase 6 SWT-Haar
-anchor `A` or Phase 7 geometry-aware point evidence `f_spec`; their policy
-authority is defined by `AGENTS.md` and `CODEGRAPH.json`. Gate C remains
-blocked and default-deny, including dynamic trajectory, decoding, losses, and
-T1ce synthesis.
+implemented Phase 1-7 frontend through static B planes, the static SWT-Haar
+anchor `A`, geometry-aware point evidence `f_spec`, the completed bounded
+Gate-C C1-C7 trajectory, the completed Gate-D D1 decoder, and Gate-E's
+target-after-inference supervision objective. It does not certify optimizer
+training, generic final inference policy, or reconstruction quality; Gate F
+is next/inactive and Gate G remains default-deny under `AGENTS.md` and
+`CODEGRAPH.json`.
 
 Run it with the project environment:
 

@@ -4,18 +4,20 @@
 
 The repository has three explicit states, which must not be conflated:
 
-- **Implemented:** PLAN Phases 1-5, ending in typed static base planes
-  `Bxy/Bxz/Byz`.
-- **Authorized / locked next, not implemented:** Gate A / Phase 6 (fixed
-  SWT-Haar anchor `A`) and Gate B / Phase 7 (geometry-aware point spectral
-  evidence `f_spec`).
-- **Blocked / default-deny:** Gate C, including dynamic tri-planes,
-  trajectory, decoder, losses, and T1ce synthesis.
+- **Implemented:** PLAN Phases 1-7, ending in typed static base planes
+  `Bxy/Bxz/Byz`, the typed static SWT-Haar anchor `Axy/Axz/Ayz`, typed
+  geometry-aware point spectral evidence `f_spec`, Gate-C C1-C7 bounded
+  dynamic tri-plane trajectory diagnostics, and Gate-D D1 final-Z-only
+  chunked implicit decoding.
+- **Implemented supervision boundary:** Gate E E1-E9, with target permitted
+  only after a target-free context. **Next / inactive:** Gate F. **Blocked /
+  default-deny:** Gate G and the final inference policy.
 
-Authorization does not create executable behavior. An active task must name
-the authorized phase, and Phase 7 may begin only after Phase 6 is implemented
-and verified. This governance reconciliation changes no runtime behavior. No
-existing frontend output contains `A` or `f_spec`.
+The frontend exposes `f_spec` as typed diagnostic evidence at the
+already-refined points. An explicitly configured Gate-C call uses it only for
+bounded dynamic-state trajectory diagnostics; the explicit Gate-D endpoint
+then decodes final Z only. Gate E subsequently applies only a separate
+target-after-inference objective; it does not alter those inference paths.
 
 ## Current boundary
 
@@ -27,6 +29,11 @@ T1 / T2 / FLAIR volume
            -> deep feature -> coarse semantic prior -> bounded refined points
                             -> semantic-aware compact-support PoU
            -> configured selected feature -> static diagnostic Bxy/Bxz/Byz
+                                            -> fixed SWT-Haar -> static Axy/Axz/Ayz
+           -> refined points + derived feature-grid geometry
+                                            -> bilinear XY/XZ/YZ query
+                                            -> reliability-weighted `f_spec` [B,N,168]
+                                            -> optional bounded Gate-C `Z` trajectory diagnostics
 ```
 
 The input tensor order is `[B, 3, D, H, W]` with channels `(T1, T2, FLAIR)`.
@@ -39,12 +46,15 @@ adaption belongs to a future data-adapter decision.
 `PointGuidedMRIModel.forward_frontend` returns soft semantic probabilities,
 initial and refined physical point centres, bounded displacements, point-centre
 semantics, a sparse PoU edge list, and typed static `BaseTriPlanes`. The
-projector consumes the Phase-2 selected shared map once; it never feeds the
-point/refinement/PoU path. It does not synthesize T1ce.
+projector consumes the Phase-2 selected shared map once, then the fixed SWT
+branch returns a typed static `SpectralAnchor`. The Phase-7 branch queries
+that anchor only at the already-refined points and returns typed reliability
+and `f_spec`; it does not feed back into point/refinement/PoU. It does not
+synthesize T1ce.
 
 ## Implemented locked frontend scope
 
-`PLAN.md` Phases 1–5 are implemented engineering work. They do not authorize
+`PLAN.md` Phases 1–7 are implemented engineering work. They do not authorize
 full reconstruction:
 
 1. expose one shared MedicalNet pre-MaxPool shallow feature and an optional
@@ -54,7 +64,13 @@ full reconstruction:
    `tumor-core candidate`;
 4. project the configured selected shared feature into static base planes
    `Bxy`, `Bxz`, and `Byz`; and
-5. expose those base planes only as typed diagnostic frontend data.
+5. expose those base planes as typed diagnostic frontend data; and
+6. derive the fixed two-level SWT-Haar static anchor `Axy`, `Axz`, and `Ayz`
+   with one shared 64-to-8 per-band projector; and
+7. derive selected feature-grid geometry, bilinearly query `A` at refined
+   RAS-mm points, and emit deterministic 168-d `f_spec`; and
+8. when explicitly configured, run Gate C C1-C7 bounded dynamic-state
+   reward-cost trajectory diagnostics without decoder or target data.
 
 `B` is a feature-only base projection, not wavelet spectral anchor `A`,
 cross-plane fusion, a dynamic tri-plane, or a decoder input. The shared
@@ -108,10 +124,9 @@ This implementation is a sparse software-contract reference. It has no
 default-scale (`N=2048` or `N=3072`) runtime or memory-performance evidence,
 and makes no throughput, reconstruction-quality, or clinical claim.
 
-## Authorized and locked next: Gate A / Phase 6
+## Implemented: Gate A / Phase 6 static anchor A
 
-Phase 6 is authorized but not implemented. It may add only the static
-spectral-anchor branch:
+Phase 6 implements only the static spectral-anchor branch:
 
 ```text
 Bxy/Bxz/Byz
@@ -131,7 +146,7 @@ LL2, LH1, HL1, HH1, LH2, HL2, HH2
 ```
 
 `LL1` is an intermediate approximation, not an eighth output. For an input
-plane `[B,C,H,W]`, every stored band remains `[B,C,H,W]`; the future anchors
+plane `[B,C,H,W]`, every stored band remains `[B,C,H,W]`; the static anchors
 are `Axy [B,56,H,W]`, `Axz [B,56,D,W]`, and `Ayz [B,56,D,H]`. MAIN
 normalization is none. The only retained optional ablation is
 `band_gn = GroupNorm(7,56)`, which must default off. The `Conv2d` bias is an
@@ -160,16 +175,16 @@ networks, and `torch.fft`. The shared band projector remains trainable; fixed
 filters do not. The existing B scorers remain the only other authorized
 upstream trainable state.
 
-Reflect padding is locked rather than best-effort. A future implementation
-must validate required plane dimensions and raise a clear `ValueError` or typed
-failure when a required dimension is one. It must not silently use zero,
-replicate, or circular padding.
+Reflect padding is locked rather than best-effort. The implementation validates
+required plane dimensions and raises a clear `ValueError` or typed failure when
+a required dimension is one. It does not silently use zero, replicate, or
+circular padding.
 
-## Authorized and locked next: Gate B / Phase 7
+## Implemented: Gate B / Phase 7 point spectral evidence
 
-Phase 7 is authorized but not implemented. Starting from refined physical
-`p_i*` in canonical RAS-mm, it may add deterministic feature-grid geometry
-bookkeeping and query the future static anchors:
+Phase 7 deterministically derives the selected feature-grid geometry from the
+live convolution/pooling chain and the full source affine, then queries the
+implemented static anchors at refined physical `p_i*` in canonical RAS-mm:
 
 ```text
 p_i* + input VolumeGeometry + actual convolution/pooling spatial transform
@@ -178,7 +193,11 @@ p_i* + input VolumeGeometry + actual convolution/pooling spatial transform
   -> f_xy, f_xz, f_yz in R^56
   -> deterministic reliability
   -> f_spec in R^168
-  -> STOP
+  -> typed `f_spec` [B,N,168]
+  -> optional bounded Gate-C trajectory diagnostics
+  -> final Z only -> chunked 96-d implicit decoder -> absolute prediction
+  -> optional Gate-E target-after-inference objective
+  -> STOP before Gate F
 ```
 
 The minimal helper may derive feature-grid shape, affine/centre mapping,
@@ -221,14 +240,23 @@ learned `168 -> 64` compression is authorized. A majority-consistency failure
 mode is known: two incorrect agreeing planes can outvote one correct outlier;
 do not silently add a learned judge or semantic prior to change this rule.
 
-## Gate C remains blocked
+## Implemented: Gate C C1-C7 bounded dynamic trajectory
 
-After `f_spec`, the frontend must stop. Initial or dynamic `Z0`/`Z_t`, selector
-scores, top-k routing, point revisit, updater, scatter/update overlap handling,
-history, stopping, decoder, reconstruction/spectral/pathology losses, training
-schedule, and T1ce synthesis remain type-only, research-gated interfaces.
-They must not read targets, open a dataset path, mutate patient state, or
-return a fake T1ce volume. This does not authorize legacy `smagm.anchors`,
+With an explicit `TrajectoryConfig`, `forward_trajectory` first runs the
+shared Phase-1-7 frontend once, then initializes three 32-channel `Z` planes
+from static B, bilinearly queries only Z at refined points, scores the locked
+126-d reward descriptor, applies explicit travel/overlap/step utility, makes a
+hard or straight-through adaptive selection, writes a bounded 4-mm local
+correction, and returns only final Z plus compact route diagnostics. B, A,
+refined points, point semantics, `q`, reliability, `f_spec`, and feature-grid
+geometry remain fixed for the route. The explicit Gate-D endpoint then reads
+only final Z with the same geometry; it is not a target lookup.
+
+Gate D D1 is complete only as the explicit final-Z decoder. Gate E adds a
+separate target-after-inference supervision objective; Gate F training is
+next/inactive and Gate G/final-inference policy remain default-deny. No
+Gate-C/D path may read targets, open a dataset
+path, or persist patient state. This does not authorize legacy `smagm.anchors`,
 `smagm.fields`, `smagm.memory`, `smagm.routing`, reconstruction, training,
 evaluation, CLI, or data packages.
 

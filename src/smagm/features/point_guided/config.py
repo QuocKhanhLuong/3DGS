@@ -42,6 +42,7 @@ class PointGuidedConfig:
         "pointwise_weighted",
         "axis_local_weighted",
     ] = "axis_local_weighted"
+    anchor_norm: Literal["none", "band_gn"] = "none"
     medicalnet_checkpoint_path: str | Path | None = None
     medicalnet_checkpoint_sha256: str | None = None
     require_pretrained_backbone: bool = False
@@ -78,6 +79,8 @@ class PointGuidedConfig:
                 "projection_mode must be 'mean', 'max', 'pointwise_weighted', or "
                 "'axis_local_weighted'"
             )
+        if not isinstance(self.anchor_norm, str) or self.anchor_norm not in ("none", "band_gn"):
+            raise ValueError("anchor_norm must be 'none' or 'band_gn'")
         for name in (
             "num_points",
             "alternative_num_points",
