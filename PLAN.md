@@ -2,7 +2,7 @@
 
 ## /goal
 
-Build the research-locked point-guided MRI frontend continuously from the current repository state, through the fixed spectral anchor and point-level cross-plane spectral evidence, then stop before the unresolved dynamic trajectory.
+Build the research-locked point-guided MRI frontend continuously from the current repository state, through the fixed spectral anchor, point-level cross-plane spectral evidence, completed bounded Gate-C trajectory, explicit lightweight Gate-D decoder, and completed Gate-E supervision, then stop before Gate-F execution.
 
 Codex execution contract:
 
@@ -13,7 +13,7 @@ Codex execution contract:
 5. Never invent a decision marked **OPEN / BLOCKED**.
 6. Stop only when all currently unblocked phases pass, the next phase is a research gate, or verification cannot be fixed without changing a locked scientific contract.
 7. Preserve fail-closed behavior: no fake T1ce, no silent random/pretrained fallback, no hidden reuse of legacy 3DGS modules.
-8. Do not implement trajectory/selector/updater/decoder/reconstruction losses until explicitly unlocked.
+8. Do not implement Gate-F-and-later behavior until explicitly unlocked.
 9. Do not replace a locked component with a simpler equivalent merely for implementation convenience.
 10. Preserve MAIN defaults and explicitly retained ablations.
 
@@ -337,7 +337,7 @@ Do not replace the MAIN projector with full 3D attention, channel-wise 5D attent
 
 # 4. Research Gate A — CLOSED: fixed SWT-Haar spectral anchor A
 
-**Status: LOCKED / IMPLEMENTABLE**
+**Status: CLOSED / LOCKED — Phase 6 is complete.**
 
 ## 4.1 Anchor concept
 
@@ -532,7 +532,7 @@ Do not confuse `fixed across trajectory` with `frozen from learning`.
 
 # 5. Research Gate B — CLOSED: point spectral query + cross-plane reliability
 
-**Status: LOCKED / IMPLEMENTABLE**
+**Status: CLOSED / LOCKED — Phase 7 is complete.**
 
 Goal: convert the fixed tri-plane anchor and a refined 3D point into one point-level spectral evidence vector:
 
@@ -719,7 +719,7 @@ consistency_aware = weighted concat using α
 
 ---
 
-# 6. Dynamic trajectory remains blocked
+# 6. Historical dynamic-trajectory boundary (superseded by completed Gate C)
 
 Future high-level contract:
 
@@ -753,7 +753,7 @@ No implementation beyond placeholder interfaces that already exist.
 
 ## Phase 0 — Resolve actual HEAD
 
-**Status: UNBLOCKED**
+**Status: COMPLETE — HEAD RESOLVED**
 
 ### /phase-goal
 
@@ -782,7 +782,7 @@ Proceed automatically to the first incomplete unblocked phase.
 
 ## Phase 1 — Shared MedicalNet intermediate-feature API
 
-**Status: UNBLOCKED**
+**Status: COMPLETE**
 
 ### /phase-goal
 
@@ -815,7 +815,7 @@ Proceed automatically to Phase 2.
 
 ## Phase 2 — Frozen feature detach + ablation controls
 
-**Status: UNBLOCKED**
+**Status: COMPLETE**
 
 ### /phase-goal
 
@@ -855,7 +855,7 @@ Proceed automatically to Phase 3.
 
 ## Phase 3 — Lock 3-class coarse semantics in code
 
-**Status: UNBLOCKED**
+**Status: COMPLETE**
 
 ### /phase-goal
 
@@ -885,7 +885,7 @@ Proceed automatically to Phase 4.
 
 ## Phase 4 — Axis-conditioned base tri-plane projector B
 
-**Status: UNBLOCKED**
+**Status: COMPLETE**
 
 ### /phase-goal
 
@@ -939,7 +939,7 @@ Proceed automatically to Phase 5.
 
 ## Phase 5 — Compose shared encoder through base planes B
 
-**Status: UNBLOCKED**
+**Status: COMPLETE**
 
 ### /phase-goal
 
@@ -978,7 +978,7 @@ Proceed automatically to Phase 6. Gate A is CLOSED.
 
 ## Phase 6 — 2-level SWT-Haar spectral anchor A
 
-**Status: UNBLOCKED — GATE A CLOSED**
+**Status: COMPLETE — GATE A CLOSED / LOCKED**
 
 ### /phase-goal
 
@@ -995,22 +995,22 @@ Names may be adapted to existing conventions, but responsibilities must stay sep
 
 Tasks:
 
-- [ ] implement fixed normalized Haar low/high filters;
-- [ ] implement differentiable 2D stationary/undecimated transform with stride 1;
-- [ ] use level-appropriate dilation, no downsampling;
-- [ ] use reflect boundary handling;
-- [ ] produce exact seven-band order `LL2,LH1,HL1,HH1,LH2,HL2,HH2`;
-- [ ] keep every band on the same spatial grid as the input base plane;
-- [ ] implement one shared `1×1 Conv2d(64,8)`;
-- [ ] reuse the exact same projection parameters for every band and every plane;
-- [ ] concatenate seven projected 8-d bands → 56 channels;
-- [ ] MAIN normalization = none;
-- [ ] optional `band_gn` ablation may exist but must default off;
-- [ ] compute `Axy/Axz/Ayz` once per forward;
-- [ ] do not detach A;
-- [ ] ensure gradients reach shared band projection and base tri-plane scorer;
-- [ ] ensure gradients do not cross detached MedicalNet boundary in MAIN;
-- [ ] expose band layout as an explicit stable contract/constant rather than relying on magic slicing.
+- [x] implement fixed normalized Haar low/high filters;
+- [x] implement differentiable 2D stationary/undecimated transform with stride 1;
+- [x] use level-appropriate dilation, no downsampling;
+- [x] use reflect boundary handling;
+- [x] produce exact seven-band order `LL2,LH1,HL1,HH1,LH2,HL2,HH2`;
+- [x] keep every band on the same spatial grid as the input base plane;
+- [x] implement one shared `1×1 Conv2d(64,8)`;
+- [x] reuse the exact same projection parameters for every band and every plane;
+- [x] concatenate seven projected 8-d bands → 56 channels;
+- [x] MAIN normalization = none;
+- [x] optional `band_gn` ablation is implemented and defaults off;
+- [x] compute `Axy/Axz/Ayz` once per forward;
+- [x] do not detach A;
+- [x] ensure gradients reach shared band projection and base tri-plane scorer;
+- [x] ensure gradients do not cross detached MedicalNet boundary in MAIN;
+- [x] expose band layout as an explicit stable contract/constant rather than relying on magic slicing.
 
 Required tests:
 
@@ -1032,10 +1032,10 @@ Required tests:
 
 Synthetic spectral tests:
 
-- [ ] constant plane produces negligible high-pass response away from unavoidable numerical tolerance/boundary behavior;
-- [ ] simple horizontal/vertical ramps verify LH/HL implementation convention;
-- [ ] test documents the actual `LH/HL` orientation convention rather than assuming a library convention;
-- [ ] small translations do not alter output grid/alignment.
+- [x] constant plane produces negligible high-pass response away from unavoidable numerical tolerance/boundary behavior;
+- [x] simple horizontal/vertical ramps verify LH/HL implementation convention;
+- [x] test documents the actual `LH/HL` orientation convention rather than assuming a library convention;
+- [x] small translations do not alter output grid/alignment.
 
 Verify:
 
@@ -1053,7 +1053,7 @@ Proceed automatically to Phase 7. Gate B is CLOSED.
 
 ## Phase 7 — Point spectral query + cross-plane reliability fusion
 
-**Status: UNBLOCKED — GATE B CLOSED**
+**Status: COMPLETE — GATE B CLOSED / LOCKED**
 
 ### /phase-goal
 
@@ -1072,91 +1072,91 @@ Names may follow existing package conventions.
 
 Tasks:
 
-- [ ] map each refined RAS-mm point to the shallow-anchor coordinate system using existing geometry contracts;
-- [ ] do not hardcode Conv1 `/2` coordinate conversion;
-- [ ] query Axy using `(x,y)`;
-- [ ] query Axz using `(x,z)`;
-- [ ] query Ayz using `(y,z)`;
-- [ ] use bilinear interpolation;
-- [ ] return `f_xy/f_xz/f_yz`, each 56-d;
-- [ ] no patch pooling, sphere pooling, or nearest-neighbor mode in MAIN;
-- [ ] keep sampling differentiable with respect to point coordinates where supported by the existing geometry representation.
+- [x] map each refined RAS-mm point to the shallow-anchor coordinate system using existing geometry contracts;
+- [x] do not hardcode Conv1 `/2` coordinate conversion;
+- [x] query Axy using `(x,y)`;
+- [x] query Axz using `(x,z)`;
+- [x] query Ayz using `(y,z)`;
+- [x] use bilinear interpolation;
+- [x] return `f_xy/f_xz/f_yz`, each 56-d;
+- [x] no patch pooling, sphere pooling, or nearest-neighbor mode in MAIN;
+- [x] keep sampling differentiable with respect to point coordinates where supported by the existing geometry representation.
 
 Tests:
 
-- [ ] exact-center query equals exact anchor pixel value;
-- [ ] fractional coordinate equals manual bilinear interpolation on a synthetic plane;
-- [ ] plane-axis coordinate mapping is correct using synthetic coordinate ramps;
-- [ ] SWT does not introduce extra coordinate scaling;
-- [ ] point perturbation changes sampled feature smoothly;
-- [ ] gradients with respect to continuous query coordinates are finite where expected;
-- [ ] no dense `[B,N,H,W]` or `[B,N,D,H,W]` helper tensor is created.
+- [x] exact-center query equals exact anchor pixel value;
+- [x] fractional coordinate equals manual bilinear interpolation on a synthetic plane;
+- [x] plane-axis coordinate mapping is correct using synthetic coordinate ramps;
+- [x] SWT does not introduce extra coordinate scaling;
+- [x] point perturbation changes sampled feature smoothly;
+- [x] gradients with respect to continuous query coordinates are finite where expected;
+- [x] no dense `[B,N,H,W]` or `[B,N,D,H,W]` helper tensor is created.
 
 ### Phase 7B — deterministic 24-d consistency descriptor
 
 Tasks:
 
-- [ ] split each 56-d feature using the explicit seven-band layout;
-- [ ] compute `E1=sqrt(LH1²+HL1²+HH1²+eps)` elementwise;
-- [ ] compute `E2=sqrt(LH2²+HL2²+HH2²+eps)` elementwise;
-- [ ] build `q=[LL2,E1,E2]` → 24-d;
-- [ ] use fixed numerical epsilon only for stability;
-- [ ] retain original 56-d raw feature unchanged;
-- [ ] no learned `56→d` projector.
+- [x] split each 56-d feature using the explicit seven-band layout;
+- [x] compute `E1=sqrt(LH1²+HL1²+HH1²+eps)` elementwise;
+- [x] compute `E2=sqrt(LH2²+HL2²+HH2²+eps)` elementwise;
+- [x] build `q=[LL2,E1,E2]` → 24-d;
+- [x] use fixed numerical epsilon only for stability;
+- [x] retain original 56-d raw feature unchanged;
+- [x] no learned `56→d` projector.
 
 Tests:
 
-- [ ] q shape exactly 24;
-- [ ] E1/E2 equal manual calculation;
-- [ ] permuting LH/HL/HH inside the same scale leaves energy descriptor unchanged within tolerance;
-- [ ] raw 56-d feature remains unchanged and orientation-specific bands remain available.
+- [x] q shape exactly 24;
+- [x] E1/E2 equal manual calculation;
+- [x] permuting LH/HL/HH inside the same scale leaves energy descriptor unchanged within tolerance;
+- [x] raw 56-d feature remains unchanged and orientation-specific bands remain available.
 
 ### Phase 7C — pairwise reliability
 
 Tasks:
 
-- [ ] compute the three pairwise cosine similarities;
-- [ ] compute each `r_p` as mean agreement with the other two planes;
-- [ ] softmax the three reliability scores;
-- [ ] expose `α_xy/α_xz/α_yz` for diagnostics/tests;
-- [ ] no confidence MLP;
-- [ ] no hard plane drop;
-- [ ] document the known majority-consistency limitation.
+- [x] compute the three pairwise cosine similarities;
+- [x] compute each `r_p` as mean agreement with the other two planes;
+- [x] softmax the three reliability scores;
+- [x] expose `α_xy/α_xz/α_yz` for diagnostics/tests;
+- [x] no confidence MLP;
+- [x] no hard plane drop;
+- [x] document the known majority-consistency limitation.
 
 Tests:
 
-- [ ] identical q vectors produce equal reliability weights;
-- [ ] one synthetic outlier receives lower reliability than two mutually similar views;
-- [ ] α values are finite, nonnegative, and sum to one;
-- [ ] zero/near-zero descriptors remain numerically finite under the cosine implementation;
-- [ ] reliability has no trainable parameters.
+- [x] identical q vectors produce equal reliability weights;
+- [x] one synthetic outlier receives lower reliability than two mutually similar views;
+- [x] α values are finite, nonnegative, and sum to one;
+- [x] zero/near-zero descriptors remain numerically finite under the cosine implementation;
+- [x] reliability has no trainable parameters.
 
 ### Phase 7D — weighted concat packing
 
 Tasks:
 
-- [ ] `f~_xy = α_xy * f_xy`;
-- [ ] `f~_xz = α_xz * f_xz`;
-- [ ] `f~_yz = α_yz * f_yz`;
-- [ ] `f_i^spec = concat([f~_xy,f~_xz,f~_yz])`;
-- [ ] final point spectral feature = exactly 168-d;
-- [ ] preserve plane block provenance XY→XZ→YZ;
-- [ ] preserve seven-band ordering inside each plane block;
-- [ ] do not channel-wise sum planes;
-- [ ] do not introduce the previously considered 104-d canonical-orientation module;
-- [ ] do not add `168→64` MLP/compression in MAIN;
-- [ ] optional naive concat may exist only as an explicit baseline mode, never as MAIN.
+- [x] `f~_xy = α_xy * f_xy`;
+- [x] `f~_xz = α_xz * f_xz`;
+- [x] `f~_yz = α_yz * f_yz`;
+- [x] `f_i^spec = concat([f~_xy,f~_xz,f~_yz])`;
+- [x] final point spectral feature = exactly 168-d;
+- [x] preserve plane block provenance XY→XZ→YZ;
+- [x] preserve seven-band ordering inside each plane block;
+- [x] do not channel-wise sum planes;
+- [x] do not introduce the previously considered 104-d canonical-orientation module;
+- [x] do not add `168→64` MLP/compression in MAIN;
+- [x] optional naive concat may exist only as an explicit baseline mode, never as MAIN.
 
 Required integration tests:
 
-- [ ] refined points from existing frontend can query the produced anchor;
-- [ ] point count 2048 works without dense global point-volume allocation;
-- [ ] 3072 ablation remains shape-valid;
-- [ ] output spectral evidence shape is `[B,N,168]` or the repository's equivalent sparse/typed point-batch representation;
-- [ ] changing one plane reliability only scales that plane's 56-d block;
-- [ ] spectral query/fusion does not modify `S_coarse`, point coordinates, or PoU semantics;
-- [ ] gradient from a dummy downstream loss reaches shared band projector and axis scorer through `f_i^spec`;
-- [ ] gradient stops at MedicalNet shallow detach in MAIN.
+- [x] refined points from existing frontend can query the produced anchor;
+- [x] point count 2048 works without dense global point-volume allocation;
+- [x] 3072 ablation remains shape-valid;
+- [x] output spectral evidence shape is `[B,N,168]` or the repository's equivalent sparse/typed point-batch representation;
+- [x] changing one plane reliability only scales that plane's 56-d block;
+- [x] spectral query/fusion does not modify `S_coarse`, point coordinates, or PoU semantics;
+- [x] gradient from a dummy downstream loss reaches shared band projector and axis scorer through `f_i^spec`;
+- [x] gradient stops at MedicalNet shallow detach in MAIN.
 
 Verify:
 
@@ -1168,31 +1168,34 @@ PYTHONPATH=src .venv/bin/python -m compileall -q src/smagm/features/point_guided
 git diff --check
 ```
 
-After Phase 7 passes, STOP at Research Gate C.
-
-Do **not** invent `Z0`, selector, updater, decoder, or reconstruction loss.
+After Phase 7 passes, consult the dedicated post-Phase-7 plans before any
+later-gate work. `PLAN_GATE_C_D_E.md` is the locked authority for C/D/E and
+`PLAN_GATE_F_G.md` is the locked baseline authority for F/G.
 
 ---
 
 # 8. Research Gate C — Dynamic trajectory
 
-**Status: BLOCKED**
+**Status: COMPLETE — C1–C7, Gate D D1, and Gate E E1–E9; Gate F F1–F4 is active**
 
-Next research decisions, not implementation decisions:
+The historical Gate-C research questions are resolved by the immutable,
+dedicated `PLAN_GATE_C_D_E.md` plan materialized from
+`origin/main:PLAN_GATE_C_D_E.md` (blob
+`3ce39700402468894cf462c3edb9cc9f69d91316`). Gate C is complete with only
+its C1–C7 sequence: shared `B -> Z0`, dynamic state/reward query, explicit
+reward-cost utility, adaptive selection, shared local updater, compact 4-mm
+write-back, and trajectory composition. It does not decode or synthesize T1ce.
 
-1. `Z0` representation and initialization;
-2. selector inputs and scoring;
-3. top-1 vs top-k / soft selection;
-4. history and point revisit policy;
-5. local updater representation and correction rule;
-6. how updates scatter to XY/XZ/YZ dynamic planes;
-7. overlap handling;
-8. fixed K vs learned/convergence stopping;
-9. decoder from `Z_K` to T1ce;
-10. reconstruction/pathology/spectral losses;
-11. end-to-end vs stagewise training.
-
-No Codex implementation past Gate C without an explicit research unlock.
+Gate D D1 is complete: final `DynamicTriPlanes` are queried in chunks through
+the shared feature-grid geometry and decoded by the locked `96 -> 64 -> 32 ->
+1` SiLU MLP through an explicit API, while generic `forward()` remains
+fail-closed. Gate E E1–E9 is complete only as a typed target-after-inference
+supervision objective; it adds no optimizer or training loop. Gate F/G have
+the immutable dedicated `PLAN_GATE_F_G.md` baseline plan (blob
+`1c9b01569126309eada53ce0a90309353875a9c6`); Gate F is **LOCKED / UNBLOCKED /
+PARTIAL** (F1/F2 complete; F3/F4 data-blocked). Gate G is **ACTIVE FOR G1-G4
+SOFTWARE IMPLEMENTATION ONLY**; experimental execution and held-out testing are
+blocked. Gate H has no locked local plan and remains default deny.
 
 ---
 
@@ -1223,7 +1226,8 @@ tests/features/point_guided/test_spectral_query.py
 tests/features/point_guided/test_cross_plane_consistency.py
 ```
 
-Do not create dynamic-triplane/trajectory implementation files yet.
+Gate-C runtime files are owned only by the narrow `trajectory` codegraph task;
+do not create Gate-D/E/F/G runtime files in that task.
 
 ---
 
@@ -1401,23 +1405,92 @@ Do not claim reconstruction quality, clinical validity, lesion fidelity, or publ
 
 # 14. Phase completion log
 
-Initialize from actual repository state rather than blindly trusting this template:
+Reconciled from the actual merged repository state during M6 governance review:
 
 ```text
-Phase 0: PENDING / RESOLVE ACTUAL HEAD
-Phase 1: PENDING
-Phase 2: PENDING
-Phase 3: PENDING
-Phase 4: PENDING
-Phase 5: PENDING
+Phase 0: COMPLETE — actual HEAD resolved at 6f754eda48de49fac33cdf87c135f9dbdadc76f6
+Phase 1: COMPLETE — shared MedicalNet intermediate features
+Phase 2: COMPLETE — freeze, detach, and tap controls
+Phase 3: COMPLETE — exact three-class coarse semantic contract
+Phase 4: COMPLETE — static axis-conditioned base tri-plane projector B
+Phase 5: COMPLETE — one-pass semantic and B diagnostic composition
+  implementation commit: bc6d2e60ae5d02aae11faaadd115be9b73a0687f
+  merged repository state: 6f754eda48de49fac33cdf87c135f9dbdadc76f6
+  historical software evidence: 94 point-guided tests, compileall, git diff --check
 
-Research Gate A — SWT-Haar anchor: CLOSED
-Phase 6: UNBLOCKED
+Research Gate A — SWT-Haar anchor: CLOSED / LOCKED
+Phase 6: COMPLETE — fixed two-level SWT-Haar static spectral anchor A
+  implementation worktree: feature/point-guided-spectral-anchor-phase6
+  files: swt_haar.py, spectral_anchor.py, config.py, contracts.py, model.py,
+         Phase-6 focused/integration tests, and current-boundary documentation
+  software evidence: SWT tests 15 passed; spectral-anchor tests 6 passed;
+                     frontend/boundary/triplane integration tests 48 passed;
+                     full point-guided suite 121 passed; compileall, codegraph,
+                     tests/test_codegraph.py, and git diff --check passed
 
-Research Gate B — point query + cross-plane reliability: CLOSED
-Phase 7: UNBLOCKED
+Research Gate B — point query + cross-plane reliability: CLOSED / LOCKED
+Phase 7: COMPLETE — geometry-aware bilinear query, deterministic 24-d
+  descriptor, cosine/softmax reliability, and XY/XZ/YZ-preserving 168-d
+  point spectral evidence
+  implementation worktree: feature/point-guided-spectral-anchor-phase6
+  files: spectral_query.py, cross_plane_consistency.py, contracts.py,
+         model.py, Phase-7 focused/integration tests, and status documentation
+  software evidence: query tests 20 passed; consistency tests 7 passed;
+                     frontend/boundary/anchor integration tests 42 passed;
+                     full point-guided suite 151 passed
 
-Research Gate C — dynamic trajectory: BLOCKED
+Research Gate C — adaptive reward-cost trajectory: COMPLETE — C1-C7 only
+Research Gate D — implicit decoder: COMPLETE — D1 only; explicit final-Z
+chunked decoding, no generic-forward policy or supervision
+Research Gate E — supervision: COMPLETE — E1–E9 only; target-after-inference
+typed objective, no optimizer/training loop
+Research Gate F – baseline training: PARTIAL – F1/F2 complete; F3/F4 data-blocked;
+Gate G G1-G4 software policy is ACTIVE; held-out testing remains BLOCKED
+Research Gate G – ACTIVE FOR G1-G4 SOFTWARE IMPLEMENTATION ONLY;
+experimental execution and held-out testing are blocked
+Gate H — default deny; no locked local plan
+Human Gate: PENDING
+
+Current Gate-C completion record (supersedes the pre-completion Gate-C entry
+immediately above): COMPLETE — C1-C7 only; bounded dynamic-state diagnostics,
+no decoder, target data, losses, or T1ce output; software evidence: full
+point-guided suite 181 passed.
+
+Gate-D completion record: COMPLETE — D1 only; source `decoder.py`, explicit
+`forward_reconstruction`, and focused decoder tests; working tree based on
+`965f29dc095253736a963e382d9a96ded39a0d86`; software evidence: 15 decoder
+tests and full point-guided suite 198 passed. This historical D1 record
+preceded Gate-E activation; no Gate-F/G behavior was added.
+
+Gate-E completion record: COMPLETE — E1–E9 only; sources `losses.py`,
+`reward_supervision.py`, `training_objective.py`, and the target-free context
+seam in `model.py`. T1ce enters only after inference context construction;
+there is no optimizer, scheduler, training loop, checkpoint, Gate-F, or Gate-G
+behavior. Software evidence: focused E/C/D/boundary regression 72 passed;
+full point-guided suite 223 passed; `compileall`, frontend/trajectory/decoder/
+supervision codegraph scopes, and `tests/test_codegraph.py` (5 passed) all
+passed; working and cached diff checks passed. Protected Phase-6 staged index
+tree remained `28d32fe8906a44365f31cd5bd7a98b9621b05f71`.
+
+Gate-F F1/F2 record: COMPLETE. The human decision classifies the existing
+`point_refiner.offset_predictor` as a MAIN Gate-F trainable with 1,419
+parameters and a baseline-optimizer membership. This resolves only optimizer
+ownership: its architecture, observation-only inputs, deterministic point
+initialization, and the hard displacement bound of at most 2 mm are unchanged.
+The synthetic target-after-inference smoke completed forward, objective,
+backward, and one Adam step with finite nonzero gradients and updates for every
+authorized trainable, including the offset predictor. The `baseline_training`
+task remains default-deny. Gate G G1-G4 target-free software policy is ACTIVE
+under the separate `baseline_inference` task; experimental execution and
+held-out evaluation remain BLOCKED until an F4 trained checkpoint and an
+untouched real test split exist.
+Gate-G `candidate_evaluations` reports actual dense RewardNet scores; the
+separate `eligible_candidate_evaluations` reports candidates still eligible
+before exact no-revisit utility masking. Neither metric implies skipped dense
+query/reward computation.
+F3 is BLOCKED — REAL TRAINING DATA NOT AVAILABLE; F4 is NOT RUN / BLOCKED —
+REAL TRAIN/VALIDATION DATA NOT AVAILABLE. The configured dataset root is
+absent locally and the legacy sparse-plane adapter remains incompatible.
 ```
 
 For every completed phase record:
@@ -1454,7 +1527,9 @@ Do not drift into:
 - hard plane selection;
 - canonical 104-d orientation fusion at Gate B;
 - learned 168-d compression at Gate B;
-- trajectory, selector, updater, decoder, or reconstruction loss before Gate C;
+- decoder, reconstruction loss, or any Gate-D-and-later runtime before its explicit gate;
 - legacy anchor/field/routing packages unless a later research decision explicitly reuses them.
 
-Execute all locked phases continuously, then stop cleanly at Gate C.
+Gate D D1 and Gate E E1-E9 are complete through their dedicated tasks. Gate F
+is PARTIAL (F1/F2 complete; F3/F4 data-blocked). Gate G G1-G4 software policy
+is active; experimental execution and held-out testing remain blocked.

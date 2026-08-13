@@ -1564,7 +1564,8 @@ C5 UpdateNet: PENDING
 C6 local write: PENDING
 C7 trajectory composition: PENDING
 
-D1 implicit decoder: PENDING
+D1 implicit decoder: COMPLETE — chunked final-Z-only geometry-aware query and
+shared 96->64->32->1 SiLU MLP; 15 focused tests, 198 full point-guided tests
 
 E1 reconstruction losses: PENDING
 E2 counterfactual reward supervision: PENDING

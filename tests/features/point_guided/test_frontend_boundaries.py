@@ -4,17 +4,24 @@ from __future__ import annotations
 
 import ast
 import builtins
+from dataclasses import fields, replace
 from pathlib import Path
 
 import pytest
 import torch
 
-from smagm.features.point_guided import PointGuidedConfig, PointGuidedMRIModel
+from smagm.features.point_guided import (
+    FrontendOutput,
+    PointGuidedConfig,
+    PointGuidedMRIModel,
+)
+from smagm.features.point_guided.contracts import PointSpectralEvidence
 from smagm.features.point_guided.interfaces import (
     ReconstructionLossConfig,
     StoppingPolicyBase,
     TrajectoryHistory,
 )
+from smagm.features.point_guided.spectral_anchor import SpectralAnchor
 from smagm.features.point_guided.triplane_projection import BaseTriPlanes
 
 
@@ -31,7 +38,87 @@ FORBIDDEN_IMPORT_PREFIXES = (
     "smagm.cli",
     "smagm.data",
 )
-FORBIDDEN_FUTURE_IMPORT_TOKENS = ("wavelet", "dwt", "pywt")
+AUTHORIZED_FRONTEND_INTERNAL_MODULES = frozenset(
+    {
+        "smagm.features.point_guided.swt_haar",
+        "smagm.features.point_guided.spectral_anchor",
+        "smagm.features.point_guided.spectral_query",
+        "smagm.features.point_guided.cross_plane_consistency",
+        "smagm.features.point_guided.state_init",
+        "smagm.features.point_guided.reward",
+        "smagm.features.point_guided.trajectory_cost",
+        "smagm.features.point_guided.trajectory_solver",
+        "smagm.features.point_guided.updater",
+        "smagm.features.point_guided.writeback",
+        "smagm.features.point_guided.trajectory",
+        "smagm.features.point_guided.decoder",
+        "smagm.features.point_guided.losses",
+        "smagm.features.point_guided.reward_supervision",
+        "smagm.features.point_guided.training_objective",
+        "smagm.features.point_guided.availability",
+        "smagm.features.point_guided.baseline_inference",
+        "smagm.features.point_guided.baseline_training",
+    }
+)
+FORBIDDEN_EXTERNAL_WAVELET_IMPORT_PREFIXES = (
+    "pywt",
+    "pywavelets",
+    "pytorch_wavelets",
+    "kymatio",
+)
+FORBIDDEN_INACTIVE_GATE_IMPORT_PREFIXES = (
+    "smagm.features.point_guided.dynamic_triplane",
+    "smagm.features.point_guided.selector",
+    "smagm.features.point_guided.top_k",
+    "smagm.features.point_guided.point_revisit",
+    "smagm.features.point_guided.scatter",
+    "smagm.features.point_guided.overlap",
+    "smagm.features.point_guided.history",
+    "smagm.features.point_guided.stopping",
+    "smagm.features.point_guided.training",
+    "smagm.features.point_guided.reconstruction",
+    "smagm.features.point_guided.synthesis",
+)
+POINT_GUIDED_PACKAGE = "smagm.features.point_guided"
+
+
+def _starts_with_module(name: str, prefixes: tuple[str, ...] | frozenset[str]) -> bool:
+    return any(name == prefix or name.startswith(f"{prefix}.") for prefix in prefixes)
+
+
+def _is_authorized_frontend_module(name: str) -> bool:
+    return _starts_with_module(name, AUTHORIZED_FRONTEND_INTERNAL_MODULES)
+
+
+def _is_forbidden_import_module(name: str) -> bool:
+    """Keep the import boundary narrow without banning the word ``wavelet``."""
+
+    normalized = name.lower()
+    return (
+        not _is_authorized_frontend_module(name)
+        and (
+            normalized == "importlib"
+            or _starts_with_module(name, FORBIDDEN_IMPORT_PREFIXES)
+            or _starts_with_module(normalized, FORBIDDEN_EXTERNAL_WAVELET_IMPORT_PREFIXES)
+            or _starts_with_module(name, FORBIDDEN_INACTIVE_GATE_IMPORT_PREFIXES)
+            or _starts_with_module(name, ("torch.fft",))
+        )
+    )
+
+
+def _import_from_candidates(node: ast.ImportFrom) -> tuple[str, ...]:
+    """Expand only local imports needed to recognize authorized/blocked modules."""
+
+    candidates: list[str] = []
+    if node.module is not None:
+        candidates.append(node.module)
+        if node.level == 1:
+            candidates.append(f"{POINT_GUIDED_PACKAGE}.{node.module}")
+        elif node.module == POINT_GUIDED_PACKAGE:
+            candidates.extend(f"{node.module}.{alias.name}" for alias in node.names)
+    elif node.level == 1:
+        candidates.extend(f"{POINT_GUIDED_PACKAGE}.{alias.name}" for alias in node.names)
+    return tuple(candidates)
 
 
 def _small_model() -> PointGuidedMRIModel:
@@ -83,6 +170,7 @@ def test_frontend_forward_performs_no_checkpoint_or_filesystem_io(
         output = model.forward_frontend(torch.randn(1, 3, 7, 7, 7))
     assert output.s_coarse.shape == (1, 3, 7, 7, 7)
     assert isinstance(output.base_planes, BaseTriPlanes)
+    assert output.f_spec.shape == (1, 3, 168)
 
 
 def test_frontend_does_not_persist_patient_state_or_mutate_inputs() -> None:
@@ -108,6 +196,11 @@ def test_frontend_does_not_persist_patient_state_or_mutate_inputs() -> None:
     torch.testing.assert_close(first_output.base_planes.xy, first_replayed.base_planes.xy)
     torch.testing.assert_close(first_output.base_planes.xz, first_replayed.base_planes.xz)
     torch.testing.assert_close(first_output.base_planes.yz, first_replayed.base_planes.yz)
+    torch.testing.assert_close(first_output.spectral_anchor.xy, first_replayed.spectral_anchor.xy)
+    torch.testing.assert_close(first_output.spectral_anchor.xz, first_replayed.spectral_anchor.xz)
+    torch.testing.assert_close(first_output.spectral_anchor.yz, first_replayed.spectral_anchor.yz)
+    torch.testing.assert_close(first_output.f_spec, first_replayed.f_spec)
+    torch.testing.assert_close(first_output.reliability, first_replayed.reliability)
 
 
 def test_frontend_preserves_a_float64_contract() -> None:
@@ -120,39 +213,106 @@ def test_frontend_preserves_a_float64_contract() -> None:
     assert output.base_planes.xy.dtype == torch.float64
     assert output.base_planes.xz.dtype == torch.float64
     assert output.base_planes.yz.dtype == torch.float64
+    assert output.spectral_anchor.xy.dtype == torch.float64
+    assert output.spectral_anchor.xz.dtype == torch.float64
+    assert output.spectral_anchor.yz.dtype == torch.float64
+    assert output.f_spec.dtype == torch.float64
+    assert output.reliability.dtype == torch.float64
 
 
-def test_future_only_types_cannot_construct_empty_runtime_state() -> None:
+def test_frontend_output_rejects_an_anchor_with_a_grid_mismatched_to_base_planes() -> None:
+    model = _small_model().eval()
+    with torch.no_grad():
+        output = model.forward_frontend(torch.randn(1, 3, 7, 7, 7))
+    mismatched = SpectralAnchor(
+        xy=output.spectral_anchor.xy[..., :-1, :-1],
+        xz=output.spectral_anchor.xz[..., :-1],
+        yz=output.spectral_anchor.yz[..., :-1],
+    )
+    with pytest.raises(ValueError, match="retain its base-plane grid"):
+        replace(output, spectral_anchor=mismatched)
+
+
+def test_frontend_output_fails_closed_for_invalid_point_spectral_evidence() -> None:
+    model = _small_model().eval()
+    with torch.no_grad():
+        output = model.forward_frontend(torch.randn(1, 3, 7, 7, 7))
+
+    with pytest.raises(TypeError, match="PointSpectralEvidence"):
+        replace(output, spectral_evidence=None)  # type: ignore[arg-type]
+
+    truncated = PointSpectralEvidence(
+        f_spec=output.f_spec[:, :1],
+        reliability=output.reliability[:, :1],
+    )
+    with pytest.raises(ValueError, match="align with the refined point"):
+        replace(output, spectral_evidence=truncated)
+
+    wrong_dtype = PointSpectralEvidence(
+        f_spec=output.f_spec.double(),
+        reliability=output.reliability.double(),
+    )
+    with pytest.raises(ValueError, match="dtype must match s_coarse"):
+        replace(output, spectral_evidence=wrong_dtype)
+
+
+def test_gate_d_and_later_type_only_interfaces_cannot_construct_runtime_state() -> None:
     for interface in (TrajectoryHistory, StoppingPolicyBase, ReconstructionLossConfig):
         with pytest.raises(TypeError):
             interface()
 
 
-def test_frontend_static_import_boundary_rejects_future_and_data_packages() -> None:
+def test_phase7_public_output_remains_typed_point_evidence_without_gate_c_state() -> None:
+    names = tuple(field.name for field in fields(FrontendOutput))
+    assert names == (
+        "s_coarse",
+        "initial_points_ras_mm",
+        "refined_points_ras_mm",
+        "displacement_ras_mm",
+        "point_semantic",
+        "sparse_pou",
+        "geometry",
+        "base_planes",
+        "spectral_anchor",
+        "spectral_evidence",
+    )
+    assert not {
+        "query_coordinates",
+        "feature_grid_geometry",
+        "trajectory",
+        "dynamic_triplane",
+        "selector",
+        "reconstruction",
+    }.intersection(names)
+    assert isinstance(getattr(FrontendOutput, "f_spec"), property)
+    assert isinstance(getattr(FrontendOutput, "reliability"), property)
+
+
+def test_gate_g_software_policy_is_active_but_heldout_modules_remain_absent() -> None:
+    assert (PACKAGE / "baseline_inference.py").exists()
+    for filename in (
+        "gate_g.py",
+        "heldout_evaluation.py",
+    ):
+        assert not (PACKAGE / filename).exists()
+
+
+def test_frontend_static_import_boundary_allows_only_completed_gates_and_active_gate_g_modules() -> None:
     violations: list[str] = []
     for path in PACKAGE.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            module: str | None = None
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    if (
-                        alias.name == "importlib"
-                        or alias.name.startswith(FORBIDDEN_IMPORT_PREFIXES)
-                        or any(token in alias.name.lower() for token in FORBIDDEN_FUTURE_IMPORT_TOKENS)
-                    ):
+                    if _is_forbidden_import_module(alias.name):
                         violations.append(f"{path.name}: import {alias.name}")
             elif isinstance(node, ast.ImportFrom):
-                module = node.module
-                if module == "importlib" or (
-                    module is not None and module.startswith(FORBIDDEN_IMPORT_PREFIXES)
-                ) or (
-                    module is not None
-                    and any(token in module.lower() for token in FORBIDDEN_FUTURE_IMPORT_TOKENS)
-                ) or (
-                    module == "torch" and any(alias.name == "fft" for alias in node.names)
+                candidates = _import_from_candidates(node)
+                if any(_is_forbidden_import_module(candidate) for candidate in candidates) or (
+                    node.module == "torch" and any(alias.name == "fft" for alias in node.names)
                 ):
-                    violations.append(f"{path.name}: from {module}")
+                    rendered = node.module if node.module is not None else "."
+                    violations.append(f"{path.name}: from {rendered}")
             elif isinstance(node, ast.Call):
                 if isinstance(node.func, ast.Name) and node.func.id in {"__import__", "eval", "exec"}:
                     violations.append(f"{path.name}: dynamic {node.func.id}")

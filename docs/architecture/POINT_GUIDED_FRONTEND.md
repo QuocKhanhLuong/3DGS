@@ -1,5 +1,24 @@
 # Point-guided multimodal MRI frontend
 
+## Repository authority
+
+The repository has three explicit states, which must not be conflated:
+
+- **Implemented:** PLAN Phases 1-7, ending in typed static base planes
+  `Bxy/Bxz/Byz`, the typed static SWT-Haar anchor `Axy/Axz/Ayz`, typed
+  geometry-aware point spectral evidence `f_spec`, Gate-C C1-C7 bounded
+  dynamic tri-plane trajectory diagnostics, and Gate-D D1 final-Z-only
+  chunked implicit decoding.
+- **Implemented supervision boundary:** Gate E E1-E9, with target permitted
+  only after a target-free context. **Next / inactive:** Gate F. **Blocked /
+  default-deny:** Gate G and the final inference policy.
+
+The frontend exposes `f_spec` as typed diagnostic evidence at the
+already-refined points. An explicitly configured Gate-C call uses it only for
+bounded dynamic-state trajectory diagnostics; the explicit Gate-D endpoint
+then decodes final Z only. Gate E subsequently applies only a separate
+target-after-inference objective; it does not alter those inference paths.
+
 ## Current boundary
 
 The implemented boundary is:
@@ -10,6 +29,11 @@ T1 / T2 / FLAIR volume
            -> deep feature -> coarse semantic prior -> bounded refined points
                             -> semantic-aware compact-support PoU
            -> configured selected feature -> static diagnostic Bxy/Bxz/Byz
+                                            -> fixed SWT-Haar -> static Axy/Axz/Ayz
+           -> refined points + derived feature-grid geometry
+                                            -> bilinear XY/XZ/YZ query
+                                            -> reliability-weighted `f_spec` [B,N,168]
+                                            -> optional bounded Gate-C `Z` trajectory diagnostics
 ```
 
 The input tensor order is `[B, 3, D, H, W]` with channels `(T1, T2, FLAIR)`.
@@ -22,12 +46,15 @@ adaption belongs to a future data-adapter decision.
 `PointGuidedMRIModel.forward_frontend` returns soft semantic probabilities,
 initial and refined physical point centres, bounded displacements, point-centre
 semantics, a sparse PoU edge list, and typed static `BaseTriPlanes`. The
-projector consumes the Phase-2 selected shared map once; it never feeds the
-point/refinement/PoU path. It does not synthesize T1ce.
+projector consumes the Phase-2 selected shared map once, then the fixed SWT
+branch returns a typed static `SpectralAnchor`. The Phase-7 branch queries
+that anchor only at the already-refined points and returns typed reliability
+and `f_spec`; it does not feed back into point/refinement/PoU. It does not
+synthesize T1ce.
 
 ## Implemented locked frontend scope
 
-`PLAN.md` Phases 1–5 are implemented engineering work. They do not authorize
+`PLAN.md` Phases 1–7 are implemented engineering work. They do not authorize
 full reconstruction:
 
 1. expose one shared MedicalNet pre-MaxPool shallow feature and an optional
@@ -37,7 +64,13 @@ full reconstruction:
    `tumor-core candidate`;
 4. project the configured selected shared feature into static base planes
    `Bxy`, `Bxz`, and `Byz`; and
-5. expose those base planes only as typed diagnostic frontend data.
+5. expose those base planes as typed diagnostic frontend data; and
+6. derive the fixed two-level SWT-Haar static anchor `Axy`, `Axz`, and `Ayz`
+   with one shared 64-to-8 per-band projector; and
+7. derive selected feature-grid geometry, bilinearly query `A` at refined
+   RAS-mm points, and emit deterministic 168-d `f_spec`; and
+8. when explicitly configured, run Gate C C1-C7 bounded dynamic-state
+   reward-cost trajectory diagnostics without decoder or target data.
 
 `B` is a feature-only base projection, not wavelet spectral anchor `A`,
 cross-plane fusion, a dynamic tri-plane, or a decoder input. The shared
@@ -91,14 +124,141 @@ This implementation is a sparse software-contract reference. It has no
 default-scale (`N=2048` or `N=3072`) runtime or memory-performance evidence,
 and makes no throughput, reconstruction-quality, or clinical claim.
 
-## Research-gated non-implementations
+## Implemented: Gate A / Phase 6 static anchor A
 
-Wavelet spectral anchor `A`, cross-plane query/consistency fusion,
-reliability-aware fusion, initial dynamic tri-plane `Z0`, trajectory selection
-and updates, history, stopping, final decoding, reconstruction losses, and full
-T1ce synthesis are interfaces only. They must not read a target, open a dataset
-path, mutate patient state, or return a fake T1ce volume. No Phase 6+ code is
-authorized until its corresponding research gate is resolved.
+Phase 6 implements only the static spectral-anchor branch:
+
+```text
+Bxy/Bxz/Byz
+  -> fixed two-level 2-D stationary/undecimated Haar
+  -> seven same-grid bands per plane
+  -> one shared 1x1 Conv2d(64 -> 8), applied per band and plane
+  -> Axy/Axz/Ayz (56 channels each)
+```
+
+The MAIN transform uses fixed normalized filters
+`L = [1, 1] / sqrt(2)` and `H = [1, -1] / sqrt(2)`, stride one, appropriate
+stationary level-2 dilation, no downsampling, and reflect padding. It stores
+exactly this order:
+
+```text
+LL2, LH1, HL1, HH1, LH2, HL2, HH2
+```
+
+`LL1` is an intermediate approximation, not an eighth output. For an input
+plane `[B,C,H,W]`, every stored band remains `[B,C,H,W]`; the static anchors
+are `Axy [B,56,H,W]`, `Axz [B,56,D,W]`, and `Ayz [B,56,D,H]`. MAIN
+normalization is none. The only retained optional ablation is
+`band_gn = GroupNorm(7,56)`, which must default off. The `Conv2d` bias is an
+implementation-detail choice until PLAN explicitly locks parameter count or
+bias behavior.
+
+Band names have a locked axis convention. In `[B,C,H,W]`, the first filter
+symbol is H/the row axis and the second is W/the column axis:
+
+```text
+LL = low H,  low W
+LH = low H,  high W
+HL = high H, low W
+HH = high H, high W
+```
+
+Physically, XY has H/row = Y and W/column = X; XZ has H/row = Z and W/column
+= X; YZ has H/row = Z and W/column = Y. This convention governs synthetic
+orientation tests unless PLAN later explicitly changes it.
+
+Phase 6 is PyTorch-only: fixed Haar tensors must be buffers/constants and use
+grouped `Conv2d` or equivalent PyTorch tensor operations. `pywt`, PyWavelets,
+`pytorch_wavelets`, and `kymatio` are prohibited, as are learned Haar filters,
+seven independent band projectors, three per-plane projectors, hidden spectral
+networks, and `torch.fft`. The shared band projector remains trainable; fixed
+filters do not. The existing B scorers remain the only other authorized
+upstream trainable state.
+
+Reflect padding is locked rather than best-effort. The implementation validates
+required plane dimensions and raises a clear `ValueError` or typed failure when
+a required dimension is one. It does not silently use zero, replicate, or
+circular padding.
+
+## Implemented: Gate B / Phase 7 point spectral evidence
+
+Phase 7 deterministically derives the selected feature-grid geometry from the
+live convolution/pooling chain and the full source affine, then queries the
+implemented static anchors at refined physical `p_i*` in canonical RAS-mm:
+
+```text
+p_i* + input VolumeGeometry + actual convolution/pooling spatial transform
+  -> shallow/B/A feature-grid geometry
+  -> bilinear Axy(x,y), Axz(x,z), Ayz(y,z)
+  -> f_xy, f_xz, f_yz in R^56
+  -> deterministic reliability
+  -> f_spec in R^168
+  -> typed `f_spec` [B,N,168]
+  -> optional bounded Gate-C trajectory diagnostics
+  -> final Z only -> chunked 96-d implicit decoder -> absolute prediction
+  -> optional Gate-E target-after-inference objective
+  -> STOP before Gate F
+```
+
+The minimal helper may derive feature-grid shape, affine/centre mapping,
+RAS-mm-to-feature-grid voxel coordinates, grid-sample coordinates, and plane
+coordinates. It must support rotated, sheared, anisotropically spaced, and
+translated input affines. Hard-coded feature coordinates such as
+`original_coordinate / 2` are forbidden. This is deterministic geometry
+bookkeeping, not learned registration: learned coordinate transforms,
+deformation fields, target-derived coordinate correction, and semantic-derived
+warps are prohibited.
+
+Each query is single-point bilinear interpolation, not nearest-neighbour,
+patch pooling, sphere pooling, or dense point-to-plane tensors. SWT preserves
+the B-plane grids, so it introduces no extra coordinate rescaling. The raw
+56-d plane features remain intact. Only for reliability, their seven 8-d band
+blocks may form the deterministic 24-d descriptor:
+
+```text
+E1 = sqrt(LH1^2 + HL1^2 + HH1^2 + eps)
+E2 = sqrt(LH2^2 + HL2^2 + HH2^2 + eps)
+q  = concat([LL2, E1, E2]) in R^24
+```
+
+The only MAIN reliability rule is three pairwise cosine similarities, mean
+agreement per plane, then softmax, with nonnegative weights summing to one.
+The only MAIN packing is:
+
+```text
+concat([
+  alpha_xy * f_xy,
+  alpha_xz * f_xz,
+  alpha_yz * f_yz,
+]) in R^168
+```
+
+The 168-d layout permanently preserves XY, then XZ, then YZ 56-d blocks and
+the Gate-A band order within each block. No second encoder, transformer,
+cross-attention, confidence MLP, hard plane drop, 104-d canonical fusion, or
+learned `168 -> 64` compression is authorized. A majority-consistency failure
+mode is known: two incorrect agreeing planes can outvote one correct outlier;
+do not silently add a learned judge or semantic prior to change this rule.
+
+## Implemented: Gate C C1-C7 bounded dynamic trajectory
+
+With an explicit `TrajectoryConfig`, `forward_trajectory` first runs the
+shared Phase-1-7 frontend once, then initializes three 32-channel `Z` planes
+from static B, bilinearly queries only Z at refined points, scores the locked
+126-d reward descriptor, applies explicit travel/overlap/step utility, makes a
+hard or straight-through adaptive selection, writes a bounded 4-mm local
+correction, and returns only final Z plus compact route diagnostics. B, A,
+refined points, point semantics, `q`, reliability, `f_spec`, and feature-grid
+geometry remain fixed for the route. The explicit Gate-D endpoint then reads
+only final Z with the same geometry; it is not a target lookup.
+
+Gate D D1 is complete only as the explicit final-Z decoder. Gate E adds a
+separate target-after-inference supervision objective; Gate F training is
+next/inactive and Gate G/final-inference policy remain default-deny. No
+Gate-C/D path may read targets, open a dataset
+path, or persist patient state. This does not authorize legacy `smagm.anchors`,
+`smagm.fields`, `smagm.memory`, `smagm.routing`, reconstruction, training,
+evaluation, CLI, or data packages.
 
 ## BraTS21 boundary
 

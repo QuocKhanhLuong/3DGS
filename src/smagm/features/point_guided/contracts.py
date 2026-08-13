@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Final, Sequence
 import torch
 
 if TYPE_CHECKING:
+    from .spectral_anchor import SpectralAnchor
     from .triplane_projection import BaseTriPlanes
 
 
@@ -20,6 +21,14 @@ COARSE_SEMANTIC_CLASS_NAMES: Final[tuple[str, str, str]] = (
 """The ordered production coarse-semantic contract."""
 
 NUM_COARSE_SEMANTIC_CLASSES: Final[int] = len(COARSE_SEMANTIC_CLASS_NAMES)
+
+# Gate B exposes only the final plane-provenance-preserving evidence.  These
+# dimensions are fixed production contracts, not configurable model widths.
+NUM_SPECTRAL_PLANES: Final[int] = 3
+SPECTRAL_ANCHOR_FEATURE_CHANNELS: Final[int] = 56
+POINT_SPECTRAL_EVIDENCE_CHANNELS: Final[int] = (
+    NUM_SPECTRAL_PLANES * SPECTRAL_ANCHOR_FEATURE_CHANNELS
+)
 
 
 class PointGuidedGeometryError(ValueError):
@@ -281,6 +290,46 @@ class SparsePoU:
 
 
 @dataclass(frozen=True)
+class PointSpectralEvidence:
+    """Typed Gate-B evidence at the already-refined physical point centres.
+
+    ``f_spec`` is permanently packed as reliability-weighted raw XY, XZ, then
+    YZ anchor features.  This record intentionally excludes query coordinates,
+    derived feature-grid geometry, trajectories, and any reconstruction state.
+    """
+
+    f_spec: torch.Tensor  # [B, N, 168]
+    reliability: torch.Tensor  # [B, N, 3], XY/XZ/YZ
+
+    def __post_init__(self) -> None:
+        _float_tensor("f_spec", self.f_spec, 3)
+        _float_tensor("reliability", self.reliability, 3)
+        batch, points, channels = self.f_spec.shape
+        if batch <= 0 or points <= 0 or channels != POINT_SPECTRAL_EVIDENCE_CHANNELS:
+            raise ValueError(
+                "f_spec must have shape [B, N, 168] with positive B and N"
+            )
+        if self.reliability.shape != (batch, points, NUM_SPECTRAL_PLANES):
+            raise ValueError("reliability must have shape [B, N, 3] in XY/XZ/YZ order")
+        if self.reliability.device != self.f_spec.device:
+            raise ValueError("f_spec and reliability must share one device")
+        if self.reliability.dtype != self.f_spec.dtype:
+            raise ValueError("f_spec and reliability must share one dtype")
+        tolerance = max(1e-5, 8.0 * torch.finfo(self.reliability.dtype).eps)
+        if bool((self.reliability < -tolerance).any()):
+            raise ValueError("reliability must be nonnegative")
+        if not bool(
+            torch.allclose(
+                self.reliability.sum(dim=-1),
+                torch.ones_like(self.reliability[..., 0]),
+                atol=tolerance,
+                rtol=tolerance,
+            )
+        ):
+            raise ValueError("reliability must sum to one across XY, XZ, and YZ")
+
+
+@dataclass(frozen=True)
 class FrontendOutput:
     """Typed output of the fully implemented frontend-only forward path."""
 
@@ -292,6 +341,8 @@ class FrontendOutput:
     sparse_pou: SparsePoU
     geometry: VolumeGeometry
     base_planes: BaseTriPlanes
+    spectral_anchor: SpectralAnchor
+    spectral_evidence: PointSpectralEvidence
 
     def __post_init__(self) -> None:
         _float_tensor("s_coarse", self.s_coarse, 5)
@@ -336,6 +387,34 @@ class FrontendOutput:
             if plane.dtype != self.s_coarse.dtype:
                 raise ValueError(f"{name} dtype must match s_coarse")
 
+        # This import remains local to avoid the config -> contracts ->
+        # spectral_anchor -> config import cycle.
+        from .spectral_anchor import SpectralAnchor
+
+        if not isinstance(self.spectral_anchor, SpectralAnchor):
+            raise TypeError("spectral_anchor must be a SpectralAnchor instance")
+        expected_planes = (
+            ("spectral_anchor.xy", self.spectral_anchor.xy, self.base_planes.xy),
+            ("spectral_anchor.xz", self.spectral_anchor.xz, self.base_planes.xz),
+            ("spectral_anchor.yz", self.spectral_anchor.yz, self.base_planes.yz),
+        )
+        for name, anchor_plane, base_plane in expected_planes:
+            if anchor_plane.shape != (batch, 56, *base_plane.shape[-2:]):
+                raise ValueError(f"{name} must retain its base-plane grid with exactly 56 channels")
+            if anchor_plane.device != self.s_coarse.device:
+                raise ValueError(f"{name} device must match s_coarse")
+            if anchor_plane.dtype != self.s_coarse.dtype:
+                raise ValueError(f"{name} dtype must match s_coarse")
+
+        if not isinstance(self.spectral_evidence, PointSpectralEvidence):
+            raise TypeError("spectral_evidence must be a PointSpectralEvidence instance")
+        if self.spectral_evidence.f_spec.shape[:2] != (batch, points.shape[1]):
+            raise ValueError("spectral_evidence must align with the refined point batch and count")
+        if self.spectral_evidence.f_spec.device != self.s_coarse.device:
+            raise ValueError("spectral_evidence device must match s_coarse")
+        if self.spectral_evidence.f_spec.dtype != self.s_coarse.dtype:
+            raise ValueError("spectral_evidence dtype must match s_coarse")
+
     @property
     def S_coarse(self) -> torch.Tensor:
         """Specification spelling retained for callers that name the prior ``S_coarse``."""
@@ -353,3 +432,15 @@ class FrontendOutput:
     @property
     def displacement(self) -> torch.Tensor:
         return self.displacement_ras_mm
+
+    @property
+    def f_spec(self) -> torch.Tensor:
+        """The locked 168-d Gate-B point spectral evidence."""
+
+        return self.spectral_evidence.f_spec
+
+    @property
+    def reliability(self) -> torch.Tensor:
+        """The corresponding XY/XZ/YZ soft reliability weights."""
+
+        return self.spectral_evidence.reliability
