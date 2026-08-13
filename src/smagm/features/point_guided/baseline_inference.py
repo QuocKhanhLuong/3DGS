@@ -92,6 +92,7 @@ class BaselineInferenceResult:
     update_magnitude_max: Tensor  # [B], selected-step aggregate
     candidate_evaluations: Tensor  # [B] long, actual dense RewardNet score count
     eligible_candidate_evaluations: Tensor  # [B] long, pre-mask eligible count
+    semantic_probabilities: Tensor | None = None  # [B,3,D,H,W], target-free diagnostic output
 
     def __post_init__(self) -> None:
         if not isinstance(self.prediction, Tensor) or self.prediction.ndim != 5 or self.prediction.shape[1] != 1:
@@ -121,6 +122,14 @@ class BaselineInferenceResult:
                 raise ValueError(f"{name} must be a nonnegative device-matched [B] long tensor")
         if bool((self.eligible_candidate_evaluations > self.candidate_evaluations).any()):
             raise ValueError("eligible candidate evaluations cannot exceed actual dense RewardNet scores")
+        if self.semantic_probabilities is not None:
+            if (
+                not isinstance(self.semantic_probabilities, Tensor)
+                or self.semantic_probabilities.shape != (batch, 3, *self.prediction.shape[-3:])
+                or self.semantic_probabilities.device != self.prediction.device
+                or self.semantic_probabilities.dtype != self.prediction.dtype
+            ):
+                raise ValueError("semantic_probabilities must be a device-matched [B,3,D,H,W] tensor")
         if not torch.equal(self.k_used, (self.selected_indices >= 0).sum(dim=1, dtype=torch.long)):
             raise ValueError("k_used must equal the count of nonnegative selected indices")
         for name in (
@@ -188,6 +197,7 @@ def run_baseline_inference(
     geometry: VolumeGeometry,
     *,
     config: GateGInferenceConfig,
+    semantic_probabilities: Tensor | None = None,
 ) -> BaselineInferenceResult:
     """Execute G1--G4 once from fixed target-free frontend evidence.
 
@@ -244,6 +254,7 @@ def run_baseline_inference(
         update_magnitude_max=update_max,
         candidate_evaluations=route.candidate_evaluations,
         eligible_candidate_evaluations=route.eligible_candidate_evaluations,
+        semantic_probabilities=semantic_probabilities,
     )
 
 

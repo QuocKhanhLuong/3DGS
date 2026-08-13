@@ -1176,7 +1176,7 @@ later-gate work. `PLAN_GATE_C_D_E.md` is the locked authority for C/D/E and
 
 # 8. Research Gate C — Dynamic trajectory
 
-**Status: COMPLETE — C1–C7, Gate D D1, and Gate E E1–E9; Gate F F1–F4 is active**
+**Status: COMPLETE — C1–C7, Gate D D1, and Gate E E1–E9; Gate F server software is ready**
 
 The historical Gate-C research questions are resolved by the immutable,
 dedicated `PLAN_GATE_C_D_E.md` plan materialized from
@@ -1192,10 +1192,11 @@ the shared feature-grid geometry and decoded by the locked `96 -> 64 -> 32 ->
 fail-closed. Gate E E1–E9 is complete only as a typed target-after-inference
 supervision objective; it adds no optimizer or training loop. Gate F/G have
 the immutable dedicated `PLAN_GATE_F_G.md` baseline plan (blob
-`1c9b01569126309eada53ce0a90309353875a9c6`); Gate F is **LOCKED / UNBLOCKED /
-PARTIAL** (F1/F2 complete; F3/F4 data-blocked). Gate G is **ACTIVE FOR G1-G4
-SOFTWARE IMPLEMENTATION ONLY**; experimental execution and held-out testing are
-blocked. Gate H has no locked local plan and remains default deny.
+`1c9b01569126309eada53ce0a90309353875a9c6`); Gate F F1/F2 are complete and
+the additive F3/F4 server software is ready, but neither experiment has been
+executed here. Gate G G1-G4 software is complete; trained-checkpoint and
+held-out results remain pending server execution. Gate H has no locked local
+plan and remains default deny.
 
 ---
 
@@ -1444,10 +1445,10 @@ Research Gate D — implicit decoder: COMPLETE — D1 only; explicit final-Z
 chunked decoding, no generic-forward policy or supervision
 Research Gate E — supervision: COMPLETE — E1–E9 only; target-after-inference
 typed objective, no optimizer/training loop
-Research Gate F – baseline training: PARTIAL – F1/F2 complete; F3/F4 data-blocked;
-Gate G G1-G4 software policy is ACTIVE; held-out testing remains BLOCKED
-Research Gate G – ACTIVE FOR G1-G4 SOFTWARE IMPLEMENTATION ONLY;
-experimental execution and held-out testing are blocked
+Research Gate F – baseline training: F1/F2 COMPLETE; F3 tiny overfit and F4
+full train/validation SOFTWARE READY – NOT YET EXECUTED ON SERVER
+Research Gate G – G1-G4 SOFTWARE COMPLETE; trained-checkpoint and held-out
+results PENDING SERVER EXPERIMENT
 Gate H — default deny; no locked local plan
 Human Gate: PENDING
 
@@ -1479,18 +1480,19 @@ ownership: its architecture, observation-only inputs, deterministic point
 initialization, and the hard displacement bound of at most 2 mm are unchanged.
 The synthetic target-after-inference smoke completed forward, objective,
 backward, and one Adam step with finite nonzero gradients and updates for every
-authorized trainable, including the offset predictor. The `baseline_training`
-task remains default-deny. Gate G G1-G4 target-free software policy is ACTIVE
-under the separate `baseline_inference` task; experimental execution and
-held-out evaluation remain BLOCKED until an F4 trained checkpoint and an
-untouched real test split exist.
+authorized trainable, including the offset predictor. The additive
+`server_pipeline` task now owns the full-volume data adapter, semantic
+grounding, trainer, checkpoints, and evaluation CLI. Gate G G1-G4 software is
+complete; experimental execution and held-out evaluation remain pending until
+an F4 trained checkpoint and an untouched real test split exist.
 Gate-G `candidate_evaluations` reports actual dense RewardNet scores; the
 separate `eligible_candidate_evaluations` reports candidates still eligible
 before exact no-revisit utility masking. Neither metric implies skipped dense
 query/reward computation.
-F3 is BLOCKED — REAL TRAINING DATA NOT AVAILABLE; F4 is NOT RUN / BLOCKED —
-REAL TRAIN/VALIDATION DATA NOT AVAILABLE. The configured dataset root is
-absent locally and the legacy sparse-plane adapter remains incompatible.
+F3 tiny overfit: SOFTWARE READY — NOT YET EXECUTED ON SERVER. F4 full
+train/validation: SOFTWARE READY — NOT YET EXECUTED ON SERVER. The additive
+full-volume adapter is separate from the legacy sparse-plane adapter; no
+training or validation result is claimed until the server commands run.
 ```
 
 For every completed phase record:
@@ -1531,5 +1533,6 @@ Do not drift into:
 - legacy anchor/field/routing packages unless a later research decision explicitly reuses them.
 
 Gate D D1 and Gate E E1-E9 are complete through their dedicated tasks. Gate F
-is PARTIAL (F1/F2 complete; F3/F4 data-blocked). Gate G G1-G4 software policy
-is active; experimental execution and held-out testing remain blocked.
+F1/F2 are complete and F3/F4 software is ready for server execution. Gate G
+G1-G4 software is complete; experimental execution and held-out testing remain
+pending server evidence.

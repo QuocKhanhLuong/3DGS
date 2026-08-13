@@ -1552,36 +1552,33 @@ Do not claim clinical or reconstruction-quality improvement from software tests 
 
 # 27. Phase completion log
 
-Initialize as:
+The historical initialization block is superseded by the current repository
+state below. Software readiness is not experimental evidence.
 
 ```text
-C0 repository audit: PENDING
-C1 Z0 initializer: PENDING
-C2 RewardNet: PENDING
-C3 costs/utility: PENDING
-C4 adaptive solver: PENDING
-C5 UpdateNet: PENDING
-C6 local write: PENDING
-C7 trajectory composition: PENDING
+Gate A / Phase 6: COMPLETE — fixed two-level SWT-Haar spectral anchor A
+Gate B / Phase 7: COMPLETE — geometry-aware point spectral evidence f_spec
+Gate C C1-C7: COMPLETE — bounded adaptive reward-cost trajectory
+Gate D D1: COMPLETE — final-Z-only chunked 96->64->32->1 decoder
+Gate E E1-E9: COMPLETE — target-after-inference typed supervision objective
 
-D1 implicit decoder: COMPLETE — chunked final-Z-only geometry-aware query and
-shared 96->64->32->1 SiLU MLP; 15 focused tests, 198 full point-guided tests
+Gate F F1/F2: COMPLETE — baseline optimizer ownership and synthetic smoke
+Gate F F3 tiny overfit: SOFTWARE READY — NOT YET EXECUTED ON SERVER
+Gate F F4 full train/validation: SOFTWARE READY — NOT YET EXECUTED ON SERVER
+Gate G G1-G4 software: COMPLETE — target-free baseline inference/evaluation CLI
+Gate G trained-checkpoint and held-out results: PENDING SERVER EXPERIMENT
+Gate H: DEFAULT DENY — no locked local plan
 
-E1 reconstruction losses: PENDING
-E2 counterfactual reward supervision: PENDING
-E3 trajectory regularization: PENDING
-E4 integration verification: PENDING
+Real-data status: server execution is now operationally scoped by the additive
+full-volume BraTS21 adapter, trainer, checkpoint policy, configs, and scripts.
+No local or server training result is claimed by this software record.
 ```
 
-For every completed phase append:
-
-```text
-status:
-HEAD:
-files changed:
-verification:
-remaining assumptions:
-```
+The server-ready implementation adds training-only coarse semantic grounding,
+full-volume BraTS21 input handling, deterministic subject splits, AMP/DDP
+orchestration, atomic resume/clean checkpoints, and target-after-inference
+evaluation. It preserves the locked Phase 1-7/C/D/E architecture and does not
+advance Gate F/G experimental status before server evidence is returned.
 
 ---
 

@@ -16,12 +16,16 @@
 | bounded Gate-C trajectory | `state_init.py`, `reward.py`, `trajectory_cost.py`, `trajectory_solver.py`, `updater.py`, `writeback.py`, `trajectory.py` | static B/A and fixed Phase-7 evidence; no target data |
 | Gate-D implicit decoder | `decoder.py`, `model.py` | final `Z_K` plus typed geometry only; chunked `96 -> 64 -> 32 -> 1` absolute prediction, no observation bypass |
 | Gate-E supervision | `losses.py`, `reward_supervision.py`, `training_objective.py`, `model.py` | target-after-inference Charbonnier/3-D SSIM/DHW-gradient objective, bounded measured reward targets, and trace-local E5–E8 terms; no optimizer or train loop |
+| training-only semantic grounding | `semantic_supervision.py` | BraTS `{0,1,2,4}` to normal/edema/core targets, ignore-index masking, CE, and validation-only Dice; never an inference input |
+| full-volume point-guided data | `src/smagm/data/brats21_point_guided.py` | additive NIfTI `[X,Y,Z] -> [D,H,W]` adapter, input-derived mask/normalization, geometry validation, and deterministic subject splits; legacy sparse-plane adapter unchanged |
+| server training/evaluation | `src/smagm/training/point_guided.py`, `src/smagm/cli/point_guided_train.py`, `src/smagm/cli/point_guided_eval.py` | target-free context then Gate-E objective plus configurable semantic auxiliary loss; AMP/DDP, logs, strict checkpoints, and post-inference metrics |
 | public frontend composition and diagnostic output | `model.py`, `contracts.py` | all locked components, `BaseTriPlanes`, `SpectralAnchor`, `PointSpectralEvidence`, optional typed trajectory result |
 | Gate-D-and-later type-only contracts | `interfaces.py` | typed frontend records only |
 
 Dependency direction is inward: `model -> locked components -> contracts ->
-canonical geometry`. The frontend may not import anchors, fields, memory,
-routing, training, reconstruction, evaluation, or CLI packages.
+canonical geometry`. The locked frontend remains isolated from legacy anchors,
+fields, memory, routing, reconstruction, and evaluation packages. The additive
+server owner imports only the explicit point-guided model/data/checkpoint APIs.
 
 ## Implemented PLAN scope through Phase 7, Gate C, Gate D, and Gate E
 
@@ -73,9 +77,11 @@ canonical 104-d fusion, or learned compression.
 Gate C C1–C7 is implemented only as bounded dynamic `Z0`/`Z_t`, adaptive
 selection, explicit reward costs, local updates, and compact diagnostics.
 Gate D D1 is complete only through its explicit reconstruction endpoint.
-Gate E is complete only as target-after-inference supervision. Gate F is next
-but inactive; Gate G remains blocked/default-deny. No optimizer, training
-loop, or generic final inference policy is owned by this frontend.
+Gate E is complete only as target-after-inference supervision. The additive
+server owner now provides the real full-volume adapter, training loop,
+semantic auxiliary, checkpoints, and held-out evaluation boundary without
+changing the frontend. Software readiness does not claim F3/F4 execution or
+a trained checkpoint.
 Authorization never permits reuse
 of legacy `anchors`, `fields`, `memory`, `routing`, reconstruction, training,
 or data systems.

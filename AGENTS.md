@@ -23,15 +23,17 @@ Repository authority is deliberately staged:
 - Gate D D1 is **COMPLETE**: a chunked geometry-aware implicit decoder reads
   only final dynamic `Z` through the explicit reconstruction API.
 - Gate E E1–E9 is **COMPLETE**: target T1ce enters only after the target-free
-  inference context inside a bounded typed objective. Gate F is **PARTIAL**:
-  F1/F2 are complete, while F3/F4 are blocked because no usable real 3-D
-  training/validation dataset is locally available. Gate G G1-G4 software
-  policy is active; experimental execution and held-out evaluation are blocked.
+  inference context inside a bounded typed objective. Gate F F1/F2 are
+  complete and F3/F4 software is ready for server execution; no tiny-overfit
+  or full-train result is claimed yet. Gate G G1-G4 software is complete;
+  trained-checkpoint and held-out evaluation evidence remains pending server
+  execution.
   Gate H is default deny and has no locked local plan.
 
 Completion of a phase does not authorize later work. A task must explicitly
-name its active gate. Gate F remains partial until real data is available;
-Gate G is active only for G1-G4 target-free software implementation.
+name its active gate. Server-ready software does not count as a Gate F
+experiment; Gate G trained-checkpoint/held-out evidence still requires server
+execution.
 `B` is a feature-only base projection. It is not the
 spectral anchor `A`, point spectral evidence `f_spec`, a dynamic tri-plane,
 or a reconstruction path.
@@ -181,10 +183,11 @@ reuse the one decoder, UpdateNet, and 4-mm writeback; it must not alter
 target-free inference, RewardNet inputs, route utility, or Gate-C stopping.
 
 Gate F F1/F2 baseline readiness is complete under its dedicated
-`baseline_training` ownership; F3/F4 remain blocked on locally available real
-3-D train/validation data. Gate G G1-G4 is active only under its dedicated
-target-free `baseline_inference` ownership. Experimental execution, a trained
-checkpoint claim, held-out evaluation, and Gate H remain blocked.
+`baseline_training` ownership. The additive server pipeline makes F3/F4
+software ready without claiming that either experiment has run. Gate G G1-G4
+software is complete under the server pipeline and target-free inference
+ownership; experimental execution, a trained checkpoint claim, held-out
+evaluation, and Gate H remain pending/default-deny.
 Gate-G diagnostics distinguish actual dense RewardNet score count
 (`candidate_evaluations`) from pre-mask exact-no-revisit eligibility
 (`eligible_candidate_evaluations`); unavailable candidates are still densely

@@ -412,17 +412,17 @@ The exact CLI names may follow existing repository conventions, but the capabili
 # 7. Completion log
 
 ```text
-F1 full model forward: PENDING
-F2 smoke/unit test: PENDING
-F3 tiny overfit: PENDING
-F4 full train/val baseline: PENDING
+F1 full model forward: COMPLETE — current target-free context and explicit APIs
+F2 smoke/unit test: COMPLETE — synthetic forward/objective/backward/update
+F3 tiny overfit: SOFTWARE READY — NOT YET EXECUTED ON SERVER
+F4 full train/val baseline: SOFTWARE READY — NOT YET EXECUTED ON SERVER
 
-G1 deterministic route: PENDING
-G2 update loop: PENDING
-G3 stopping: PENDING
-G4 final decode: PENDING
+G1 deterministic route: COMPLETE — target-free hard baseline inference
+G2 update loop: COMPLETE — shared Gate-C UpdateNet/write-back path
+G3 stopping: COMPLETE — exact no-revisit and bounded stopping diagnostics
+G4 final decode: COMPLETE — strict final-Z-only decoder path
 
-Full held-out test: PENDING
+Full held-out test: PENDING SERVER EXPERIMENT
 ```
 
 For each completed item record:

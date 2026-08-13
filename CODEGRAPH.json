@@ -2,7 +2,7 @@
   "schema_version": 1,
   "workspace_root": ".",
   "default_access": "deny",
-  "description": "Default-deny task-scoped navigation and edit policy for the point-guided MRI frontend. Phases 1-7 and Gates C/D/E are complete; Gate F is partial (F1/F2 complete, F3/F4 data-blocked), and Gate G G1-G4 software policy is active while held-out evaluation remains blocked.",
+  "description": "Default-deny task-scoped navigation and edit policy for the locked point-guided MRI frontend and its server-ready training/evaluation owner. Phases 1-7 and Gates C/D/E are complete; Gate F software is ready through F3/F4 but server execution is pending, and Gate G software is complete while trained-checkpoint results remain pending.",
   "tasks": {
     "frontend": {
       "purpose": "Maintain the implemented Phase 1-7 frontend through geometry-aware point spectral evidence. Gate-C runtime, completed Gate-D D1 decoder, completed Gate-E supervision, Gate-F baseline readiness, and active Gate-G software policy are separately owned; held-out evaluation remains blocked.",
@@ -338,8 +338,91 @@
         "src/smagm/features/point_guided/training.py"
       ]
     },
+    "server_pipeline": {
+      "purpose": "Implement the server-ready Gate-F training/data/checkpoint infrastructure and Gate-G held-out evaluation CLI without changing the locked point-guided architecture. Real-data execution and trained-checkpoint evidence remain server-gated.",
+      "entrypoints": [
+        "src/smagm/data/brats21_point_guided.py",
+        "src/smagm/features/point_guided/semantic_supervision.py",
+        "src/smagm/features/point_guided/baseline_training.py",
+        "src/smagm/features/point_guided/baseline_metrics.py",
+        "src/smagm/features/point_guided/baseline_checkpoint.py",
+        "src/smagm/features/point_guided/baseline_inference.py",
+        "src/smagm/features/point_guided/model.py",
+        "src/smagm/training/point_guided.py",
+        "src/smagm/cli/point_guided_train.py",
+        "src/smagm/cli/point_guided_eval.py"
+      ],
+      "read_paths": [
+        "AGENTS.md",
+        "PLAN.md",
+        "PLAN_GATE_C_D_E.md",
+        "PLAN_GATE_F_G.md",
+        "CODEBASE.md",
+        "CODEGRAPH.json",
+        "pyproject.toml",
+        "src/smagm/data/__init__.py",
+        "src/smagm/data/brats21_point_guided.py",
+        "src/smagm/features/point_guided/config.py",
+        "src/smagm/features/point_guided/contracts.py",
+        "src/smagm/features/point_guided/model.py",
+        "src/smagm/features/point_guided/semantic_prior.py",
+        "src/smagm/features/point_guided/semantic_supervision.py",
+        "src/smagm/features/point_guided/medicalnet_resnet10.py",
+        "src/smagm/features/point_guided/baseline_training.py",
+        "src/smagm/features/point_guided/baseline_inference.py",
+        "src/smagm/features/point_guided/baseline_metrics.py",
+        "src/smagm/features/point_guided/baseline_checkpoint.py",
+        "src/smagm/features/point_guided/training_objective.py",
+        "src/smagm/features/point_guided/trajectory_cost.py",
+        "src/smagm/training/point_guided.py",
+        "src/smagm/cli/point_guided_train.py",
+        "src/smagm/cli/point_guided_eval.py",
+        "tests/features/point_guided/**",
+        "tests/data/test_brats21_point_guided.py",
+        "configs/training/**",
+        "configs/evaluation/**",
+        "scripts/point_guided_*.sh",
+        "docs/POINT_GUIDED_SERVER_RUN.md"
+      ],
+      "write_paths": [
+        "AGENTS.md",
+        "PLAN.md",
+        "PLAN_GATE_C_D_E.md",
+        "CODEBASE.md",
+        "CODEGRAPH.json",
+        "src/smagm/data/__init__.py",
+        "src/smagm/data/brats21_point_guided.py",
+        "src/smagm/features/point_guided/semantic_supervision.py",
+        "src/smagm/features/point_guided/baseline_training.py",
+        "src/smagm/features/point_guided/baseline_metrics.py",
+        "src/smagm/features/point_guided/baseline_checkpoint.py",
+        "src/smagm/features/point_guided/baseline_inference.py",
+        "src/smagm/features/point_guided/model.py",
+        "src/smagm/training/point_guided.py",
+        "src/smagm/cli/point_guided_train.py",
+        "src/smagm/cli/point_guided_eval.py",
+        "tests/features/point_guided/**",
+        "tests/data/test_brats21_point_guided.py",
+        "configs/training/**",
+        "configs/evaluation/**",
+        "scripts/point_guided_*.sh",
+        "docs/POINT_GUIDED_SERVER_RUN.md"
+      ],
+      "blocked_paths": [
+        "src/smagm/anchors/**",
+        "src/smagm/fields/**",
+        "src/smagm/memory/**",
+        "src/smagm/routing/**",
+        "src/smagm/evaluation/**",
+        "src/smagm/reconstruction/**",
+        "src/smagm/data/brats21.py",
+        "src/smagm/features/point_guided/dynamic_triplane.py",
+        "src/smagm/features/point_guided/gate_h.py",
+        "src/smagm/features/point_guided/legacy_*.py"
+      ]
+    },
     "baseline_training": {
-      "purpose": "Maintain Gate F F1/F2 baseline readiness; F3/F4 remain blocked on real 3-D data. Gate-G software policy is separately owned; held-out testing, Gate H, and legacy training systems remain denied.",
+      "purpose": "Maintain Gate F F1/F2 baseline ownership and synthetic smoke helpers. Server F3/F4 execution is owned by server_pipeline; held-out testing, Gate H, and legacy training systems remain denied.",
       "entrypoints": [
         "src/smagm/features/point_guided/baseline_training.py",
         "src/smagm/features/point_guided/baseline_data.py",
@@ -421,7 +504,7 @@
       ]
     },
     "baseline_inference": {
-      "purpose": "Implement only active Gate G G1-G4 deterministic target-free software policy: hard greedy exact-no-revisit routing, per-subject stopping, compact diagnostics, and one final-Z decode. Gate F remains partial; trained-checkpoint execution, held-out evaluation, Gate H, and legacy systems remain denied.",
+      "purpose": "Maintain the active Gate G G1-G4 deterministic target-free model policy. Server_pipeline owns checkpoint loading and held-out metric orchestration; trained results, Gate H, and legacy systems remain denied until server evidence exists.",
       "entrypoints": [
         "src/smagm/features/point_guided/baseline_inference.py",
         "src/smagm/features/point_guided/model.py"

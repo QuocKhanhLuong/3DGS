@@ -1,0 +1,71 @@
+{
+  "model": {
+    "num_semantic_classes": 3,
+    "num_points": 2048,
+    "support_radius_mm": 4.0,
+    "max_displacement_mm": 2.0,
+    "coarse_backbone": "MedicalNet_ResNet10",
+    "freeze_coarse_backbone": true,
+    "detach_backbone_features": true,
+    "spectral_tap": "conv1_pre_maxpool",
+    "projection_mode": "axis_local_weighted",
+    "anchor_norm": "none",
+    "medicalnet_checkpoint_path": null,
+    "medicalnet_checkpoint_sha256": null,
+    "require_pretrained_backbone": false,
+    "offset_hidden_channels": 128,
+    "point_candidate_multiplier": 4,
+    "max_local_voxels_per_point": 4096
+  },
+  "trajectory": {
+    "lambda_travel": 0.05,
+    "lambda_overlap": 0.2,
+    "lambda_step": 0.05,
+    "k_max": 64,
+    "selection_temperature": 1.0,
+    "write_scale": 0.1,
+    "support_radius_mm": 4.0
+  },
+  "supervision": {
+    "lambda_ssim": 0.2,
+    "lambda_grad": 0.1,
+    "ssim_data_range": 1.0,
+    "lambda_local": 0.5,
+    "lambda_reward": 1.0,
+    "lambda_monotonic": 0.2,
+    "lambda_delta": 0.0001,
+    "counterfactual_candidates": 32,
+    "high_candidate_count": 16,
+    "random_candidate_count": 15,
+    "spill_weight_beta": 1.0,
+    "spill_sample_count": 12
+  },
+  "training": {
+    "learning_rate": 0.0001,
+    "weight_decay": 0.0,
+    "epochs": 100,
+    "batch_size": 1,
+    "gradient_accumulation": 1,
+    "gradient_clip": 1.0,
+    "decoder_chunk_size": 16384,
+    "lambda_semantic": 0.2,
+    "semantic_class_weights": null,
+    "num_workers": 2,
+    "seed": 20260813,
+    "amp": true,
+    "amp_dtype": "fp16",
+    "early_stopping_patience": 15,
+    "log_interval": 1,
+    "prediction_interval": 5,
+    "normalization_space": "normalized_input_derived_space"
+  },
+  "data": {
+    "split_seed": 20260813,
+    "split_fractions": [0.8, 0.1, 0.1],
+    "require_segmentation": true,
+    "normalization": {
+      "brain_mask_threshold": 0.0,
+      "normalization_epsilon": 0.000001
+    }
+  }
+}

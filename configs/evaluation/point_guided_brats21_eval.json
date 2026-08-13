@@ -1,0 +1,44 @@
+{
+  "model": {
+    "num_semantic_classes": 3,
+    "num_points": 2048,
+    "support_radius_mm": 4.0,
+    "max_displacement_mm": 2.0,
+    "coarse_backbone": "MedicalNet_ResNet10",
+    "freeze_coarse_backbone": true,
+    "detach_backbone_features": true,
+    "spectral_tap": "conv1_pre_maxpool",
+    "projection_mode": "axis_local_weighted",
+    "anchor_norm": "none",
+    "medicalnet_checkpoint_path": null,
+    "medicalnet_checkpoint_sha256": null,
+    "require_pretrained_backbone": false,
+    "offset_hidden_channels": 128,
+    "point_candidate_multiplier": 4,
+    "max_local_voxels_per_point": 4096
+  },
+  "trajectory": {
+    "lambda_travel": 0.05,
+    "lambda_overlap": 0.2,
+    "lambda_step": 0.05,
+    "k_max": 64,
+    "selection_temperature": 1.0,
+    "write_scale": 0.1,
+    "support_radius_mm": 4.0
+  },
+  "inference": {
+    "lambda_travel": 0.05,
+    "lambda_overlap": 0.2,
+    "lambda_step": 0.05,
+    "k_max": 64,
+    "decoder_chunk_size": 8192
+  },
+  "data": {
+    "split_seed": 20260813,
+    "split_fractions": [0.8, 0.1, 0.1],
+    "normalization": {
+      "brain_mask_threshold": 0.0,
+      "normalization_epsilon": 0.000001
+    }
+  }
+}

@@ -249,3 +249,43 @@ def test_codegraph_activates_only_gate_g_baseline_inference_paths() -> None:
     assert denied.returncode == 2
     assert "denied read paths" in denied.stderr
     assert all(path in denied.stderr for path in blocked)
+
+
+def test_codegraph_exposes_server_pipeline_without_unblocking_legacy_data() -> None:
+    allowed = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--task",
+            "server_pipeline",
+            "--check",
+            "src/smagm/data/brats21_point_guided.py",
+            "src/smagm/training/point_guided.py",
+            "src/smagm/cli/point_guided_eval.py",
+            "configs/training/point_guided_brats21_4070.json",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert allowed.returncode == 0, allowed.stderr
+    assert "server-ready" in allowed.stdout
+
+    denied = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--task",
+            "server_pipeline",
+            "--check",
+            "src/smagm/data/brats21.py",
+            "src/smagm/anchors/anchor.py",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert denied.returncode == 2
+    assert "denied read paths" in denied.stderr

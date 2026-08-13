@@ -323,6 +323,7 @@ class PointGuidedMRIModel(nn.Module):
                     feature_grid_geometry,
                     output.geometry,
                     config=config,
+                    semantic_probabilities=output.s_coarse,
                 )
         finally:
             self.train(was_training)

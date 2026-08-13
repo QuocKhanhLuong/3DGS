@@ -237,7 +237,11 @@ def _module_changed(before: tuple[Tensor, ...], module: torch.nn.Module) -> bool
 
 def _finite_nonzero_gradient(module: torch.nn.Module) -> bool:
     gradients = tuple(parameter.grad for parameter in module.parameters())
-    return bool(gradients) and all(
+    # A module is connected when at least one of its parameters receives a
+    # finite nonzero gradient.  Individual bias gradients can legitimately be
+    # exactly zero (for example, a symmetric softmax collapse), while the
+    # trainable module still participates through its weights.
+    return bool(gradients) and any(
         gradient is not None and bool(torch.isfinite(gradient).all()) and bool(torch.count_nonzero(gradient))
         for gradient in gradients
     )
