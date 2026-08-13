@@ -12,8 +12,11 @@ if [[ $# -lt 1 || $# -gt 2 ]]; then
 fi
 CHECKPOINT="$1"
 EVAL_OUTPUT_DIR="${2:-$OUTPUT_ROOT/eval-$(date -u +%Y%m%dT%H%M%SZ)}"
+RUN_DIR="$(dirname "$(dirname "$CHECKPOINT")")"
+SPLIT_FILE="$RUN_DIR/split.json"
 
 [[ -f "$CHECKPOINT" ]] || { echo "checkpoint is not a file: $CHECKPOINT" >&2; exit 2; }
+[[ -f "$SPLIT_FILE" ]] || { echo "training split is not a file: $SPLIT_FILE" >&2; exit 2; }
 [[ -d "$BRATS21_ROOT" ]] || { echo "BRATS21_ROOT is not a directory: $BRATS21_ROOT" >&2; exit 2; }
 [[ -f "$MEDICALNET_CKPT" ]] || { echo "MEDICALNET_CKPT is not a file: $MEDICALNET_CKPT" >&2; exit 2; }
 mkdir -p "$EVAL_OUTPUT_DIR"
@@ -30,6 +33,7 @@ print("PyTorch CUDA version:", torch.version.cuda)
 PY
 echo "Chosen config: configs/evaluation/point_guided_brats21_eval.json"
 echo "Checkpoint: $CHECKPOINT"
+echo "Training split: $SPLIT_FILE"
 echo "Evaluation output: $EVAL_OUTPUT_DIR"
 
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" PYTHONPATH=src python -m smagm.cli.point_guided_eval \
@@ -37,6 +41,7 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" PYTHONPATH=src python -m smagm
   --config configs/evaluation/point_guided_brats21_eval.json \
   --data-root "$BRATS21_ROOT" \
   --output-dir "$EVAL_OUTPUT_DIR" \
+  --split-file "$SPLIT_FILE" \
   --split test \
   --device cuda \
   --medicalnet-checkpoint "$MEDICALNET_CKPT" \

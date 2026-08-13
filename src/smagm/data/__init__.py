@@ -68,6 +68,8 @@ from .brats21_sampling import (
 )
 from .brats21_point_guided import (
     BRATS21_POINT_GUIDED_LABELS,
+    MASKED_ROBUST_01_POLICY,
+    MASKED_ZSCORE_POLICY,
     POINT_GUIDED_OBSERVATION_MODALITIES,
     POINT_GUIDED_SEGMENTATION_MODALITY,
     POINT_GUIDED_TARGET_MODALITY,
@@ -79,6 +81,7 @@ from .brats21_point_guided import (
     BraTS21PointGuidedValidationError,
     PointGuidedBatch,
     PointGuidedNormalizationConfig,
+    SUPPORTED_NORMALIZATION_POLICIES,
     collate_point_guided_samples,
     derive_input_brain_mask,
     deterministic_subject_split,
@@ -146,6 +149,9 @@ __all__ = [
     "build_sampling_plan",
     "physical_slice_positions",
     "BRATS21_POINT_GUIDED_LABELS",
+    "MASKED_ROBUST_01_POLICY",
+    "MASKED_ZSCORE_POLICY",
+    "SUPPORTED_NORMALIZATION_POLICIES",
     "POINT_GUIDED_OBSERVATION_MODALITIES",
     "POINT_GUIDED_SEGMENTATION_MODALITY",
     "POINT_GUIDED_TARGET_MODALITY",

@@ -16,6 +16,7 @@ from smagm.data.brats21_point_guided import (
     discover_point_guided_subject,
     load_point_guided_subject,
     nifti_xyz_to_dhw,
+    PointGuidedNormalizationConfig,
     xyz_shape_to_dhw,
 )
 
@@ -128,6 +129,102 @@ def test_target_and_segmentation_changes_do_not_change_input_observations_or_mas
     second = load_point_guided_subject(subject_dir, require_segmentation=True)
     torch.testing.assert_close(first.observations, second.observations)
     assert torch.equal(first.brain_mask, second.brain_mask)
+
+
+def test_masked_robust_01_clips_and_maps_masked_values_to_unit_range(tmp_path: Path) -> None:
+    subject_dir = _write_subject(tmp_path)
+    config = PointGuidedNormalizationConfig(
+        normalization_policy="masked_robust_01",
+        lower_percentile=20.0,
+        upper_percentile=80.0,
+    )
+    sample = BraTS21PointGuidedDataset(tmp_path, [subject_dir.name], config)[0]
+
+    nib = _nibabel()
+    raw_t1_xyz = np.asarray(nib.load(str(subject_dir / f"{subject_dir.name}_t1.nii.gz")).dataobj)
+    raw_t1_dhw = nifti_xyz_to_dhw(raw_t1_xyz)
+    mask = sample.brain_mask[0].numpy()
+    selected = raw_t1_dhw[mask]
+    clip_lower = float(np.percentile(selected, 20.0))
+    clip_upper = float(np.percentile(selected, 80.0))
+    expected = np.zeros(raw_t1_dhw.shape, dtype=np.float32)
+    expected[mask] = np.clip(
+        (selected - clip_lower) / (clip_upper - clip_lower),
+        0.0,
+        1.0,
+    ).astype(np.float32)
+
+    torch.testing.assert_close(sample.observations[0], torch.from_numpy(expected))
+    assert torch.equal(sample.observations[:, ~sample.brain_mask[0]], torch.zeros_like(sample.observations[:, ~sample.brain_mask[0]]))
+    assert float(sample.observations[:, sample.brain_mask[0]].min()) >= 0.0
+    assert float(sample.observations[:, sample.brain_mask[0]].max()) <= 1.0
+
+    metadata = sample.normalization_metadata["t1"]
+    assert metadata.normalization_policy == "masked_robust_01"
+    assert metadata.policy == metadata.normalization_policy
+    assert metadata.percentiles == (20.0, 80.0)
+    assert metadata.clip_bounds == pytest.approx((clip_lower, clip_upper))
+    assert metadata.output_range == (0.0, 1.0)
+    assert metadata.voxel_count == int(mask.sum())
+    assert metadata.mask_source == "raw_observation_nonzero_union"
+    assert len(metadata.metadata_hash) == 64
+    assert metadata.metadata_hash == metadata.record_hash
+    serialized = sample.to_metadata()["normalization_metadata"]["t1"]
+    assert serialized["normalization_policy"] == "masked_robust_01"
+    assert serialized["policy"] == "masked_robust_01"
+    assert serialized["percentiles"] == (20.0, 80.0)
+    assert serialized["clip_bounds"] == pytest.approx((clip_lower, clip_upper))
+    assert serialized["clip_low"] == pytest.approx(clip_lower)
+    assert serialized["clip_high"] == pytest.approx(clip_upper)
+    assert serialized["output_min"] == 0.0
+    assert serialized["output_max"] == 1.0
+    assert serialized["output_range"] == (0.0, 1.0)
+    assert serialized["voxel_count"] == int(mask.sum())
+    assert serialized["mask_source"] == "raw_observation_nonzero_union"
+    assert serialized["metadata_hash"] == metadata.metadata_hash
+
+
+def test_default_masked_zscore_is_compatible_with_explicit_policy(tmp_path: Path) -> None:
+    subject_dir = _write_subject(tmp_path)
+    implicit = load_point_guided_subject(subject_dir)
+    explicit = load_point_guided_subject(subject_dir, normalization_policy="masked_zscore")
+
+    torch.testing.assert_close(implicit.observations, explicit.observations)
+    torch.testing.assert_close(implicit.target, explicit.target)
+    assert implicit.to_metadata() == explicit.to_metadata()
+    metadata = explicit.normalization_metadata["t1"]
+    assert metadata.normalization_policy == "masked_zscore"
+    assert metadata.clip_bounds is None
+    assert metadata.output_range is None
+
+
+def test_normalization_config_rejects_invalid_or_empty_percentile_range() -> None:
+    with pytest.raises(BraTS21PointGuidedValidationError, match="percentile range"):
+        PointGuidedNormalizationConfig(
+            normalization_policy="masked_robust_01",
+            lower_percentile=50.0,
+            upper_percentile=50.0,
+        )
+    with pytest.raises(BraTS21PointGuidedValidationError, match=r"\[0, 100\]"):
+        PointGuidedNormalizationConfig(
+            normalization_policy="masked_robust_01",
+            lower_percentile=-1.0,
+        )
+
+
+def test_masked_robust_01_rejects_empty_data_percentile_range(tmp_path: Path) -> None:
+    subject_dir = _write_subject(tmp_path)
+    nib = _nibabel()
+    affine = np.diag((2.0, 3.0, 4.0, 1.0))
+    constant = np.full((4, 3, 2), 5.0, dtype=np.float32)
+    for modality in ("t1", "t2", "flair"):
+        nib.save(
+            nib.Nifti1Image(constant, affine),
+            str(subject_dir / f"{subject_dir.name}_{modality}.nii.gz"),
+        )
+
+    with pytest.raises(BraTS21PointGuidedValidationError, match="percentile range"):
+        load_point_guided_subject(subject_dir, normalization_policy="masked_robust_01")
 
 
 def test_optional_target_and_segmentation_loading_can_be_disabled(tmp_path: Path) -> None:

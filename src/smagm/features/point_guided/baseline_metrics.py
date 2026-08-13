@@ -24,7 +24,7 @@ class ReconstructionMetrics:
     psnr: float
     ssim: float
     voxel_count: int
-    intensity_space: str = "normalized_input_derived_space"
+    intensity_space: str = "masked_robust_01_[0,1]"
 
 
 @dataclass(frozen=True)
@@ -78,6 +78,7 @@ def compute_reconstruction_metrics(
     valid_mask: Tensor | None = None,
     *,
     data_range: float = 1.0,
+    intensity_space: str = "masked_robust_01_[0,1]",
 ) -> ReconstructionMetrics:
     """Compute MAE, PSNR, and 3-D SSIM after inference.
 
@@ -91,6 +92,8 @@ def compute_reconstruction_metrics(
     data_range = float(data_range)
     if not math.isfinite(data_range) or data_range <= 0.0:
         raise ValueError("data_range must be positive and finite")
+    if not isinstance(intensity_space, str) or not intensity_space:
+        raise ValueError("intensity_space must be a non-empty string")
     count = int(valid_mask.sum().detach().cpu())
     safe_target = torch.where(valid_mask, target, torch.zeros_like(target))
     residual = prediction - safe_target
@@ -128,6 +131,7 @@ def compute_reconstruction_metrics(
         psnr=psnr,
         ssim=ssim,
         voxel_count=count,
+        intensity_space=intensity_space,
     )
 
 

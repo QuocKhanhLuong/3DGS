@@ -57,14 +57,17 @@
     "early_stopping_patience": 15,
     "log_interval": 1,
     "prediction_interval": 5,
-    "normalization_space": "normalized_input_derived_space"
+    "normalization_space": "masked_robust_01_[0,1]"
   },
   "data": {
     "split_seed": 20260813,
     "split_fractions": [0.8, 0.1, 0.1],
     "require_segmentation": true,
     "normalization": {
+      "normalization_policy": "masked_robust_01",
       "brain_mask_threshold": 0.0,
+      "lower_percentile": 1.0,
+      "upper_percentile": 99.0,
       "normalization_epsilon": 0.000001
     }
   }

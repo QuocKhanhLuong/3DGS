@@ -33,11 +33,17 @@
     "k_max": 64,
     "decoder_chunk_size": 8192
   },
+  "supervision": {
+    "ssim_data_range": 1.0
+  },
   "data": {
     "split_seed": 20260813,
     "split_fractions": [0.8, 0.1, 0.1],
     "normalization": {
+      "normalization_policy": "masked_robust_01",
       "brain_mask_threshold": 0.0,
+      "lower_percentile": 1.0,
+      "upper_percentile": 99.0,
       "normalization_epsilon": 0.000001
     }
   }

@@ -61,9 +61,15 @@ The adapter validates matching 3-D shapes, qform/sform and affine agreement,
 finite positive spacing, finite tensors, and segmentation labels in
 `{0,1,2,4}`. NIfTI `[X,Y,Z]` is explicitly copied to tensor `[D=Z,H=Y,W=X]`;
 the original affine remains the physical `[x,y,z] == [w,h,d]` mapping.
-No crop or resize is performed. Each T1/T2/FLAIR volume is masked-z-score
-normalized using the raw input-derived union mask. The normalized-space name
-is recorded as `normalized_input_derived_space`.
+No crop or resize is performed. MAIN preprocessing independently computes the
+1st and 99th percentiles inside the raw input-derived union mask, clips, and
+maps each modality to `[0,1]` with `masked_robust_01`. These percentile values
+are tunable preprocessing settings and are recorded per modality. T1ce uses
+the same input-derived mask but its own target-only percentile statistics;
+those statistics never affect observations, points, or routing. The recorded
+intensity-space name is `masked_robust_01_[0,1]`. The legacy
+`masked_zscore` policy remains available for debugging, but requires an
+explicit metric data range rather than silently assuming `1.0`.
 
 ## 3. Preflight
 
@@ -124,8 +130,10 @@ bash scripts/point_guided_train_2xa4000.sh
 
 Only rank 0 writes checkpoints, normal logs, W&B records, and the summary.
 Validation indices are sharded without padding, so a subject is not counted
-twice merely to equalize rank lengths. The process group is destroyed on
-normal exit and failure cleanup.
+twice merely to equalize rank lengths. Validation uses the raw local model
+module rather than the DDP wrapper, and only final validation statistics are
+all-reduced. The process group is destroyed on normal exit and failure
+cleanup.
 
 ## 7. Resume
 
@@ -150,9 +158,12 @@ rejected rather than silently continuing on different subjects.
 ## 8. Evaluation
 
 Evaluation loads the clean checkpoint through the strict existing validated
-loader. It calls only the target-free baseline inference API first; T1ce is
-read afterward for MAE/PSNR/SSIM, and segmentation is read afterward for
-semantic Dice diagnostics.
+loader and automatically requires the exact `<run>/split.json` next to the
+checkpoint. An explicit `--split-file` may override the path, but no split is
+silently regenerated for a trained checkpoint. It calls only the target-free
+baseline inference API first; T1ce is read afterward for MAE/PSNR/SSIM, and
+segmentation is read afterward for semantic Dice diagnostics. MAIN
+PSNR/SSIM uses `data_range=1.0`, matching the robust `[0,1]` preprocessing.
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
@@ -208,6 +219,9 @@ The best checkpoint is selected by lowest validation reconstruction loss.
 Evaluation adds `per_subject_metrics.json`, `aggregate_metrics.json`,
 `trajectory_diagnostics.json`, `evaluation_metadata.json`, and optionally a
 `predictions/` directory.
+
+`evaluation_metadata.json` records the exact split file, split hash, training
+run directory, and normalization-space label used for metrics.
 
 ## 10. OOM knobs
 

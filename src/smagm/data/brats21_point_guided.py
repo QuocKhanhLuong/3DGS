@@ -44,6 +44,9 @@ POINT_GUIDED_MODALITIES: tuple[str, ...] = (
 BRATS21_POINT_GUIDED_LABELS = frozenset({0, 1, 2, 4})
 BRATS21_POINT_GUIDED_SUBJECT_PATTERN = re.compile(r"^BraTS2021_(?P<number>\d{5})$")
 NORMALIZATION_VERSION = "masked_zscore_v1"
+MASKED_ZSCORE_POLICY = "masked_zscore"
+MASKED_ROBUST_01_POLICY = "masked_robust_01"
+SUPPORTED_NORMALIZATION_POLICIES = frozenset({MASKED_ZSCORE_POLICY, MASKED_ROBUST_01_POLICY})
 SPLIT_VERSION = "brats21_point_guided_split_v1"
 
 
@@ -70,6 +73,34 @@ def _finite_float(value: object, name: str) -> float:
     if not math.isfinite(result):
         raise BraTS21PointGuidedValidationError(f"{name} must be finite")
     return result
+
+
+def _normalization_policy(value: object) -> str:
+    if not isinstance(value, str) or value not in SUPPORTED_NORMALIZATION_POLICIES:
+        raise BraTS21PointGuidedValidationError(
+            "normalization_policy must be one of "
+            f"{tuple(sorted(SUPPORTED_NORMALIZATION_POLICIES))}, got {value!r}"
+        )
+    return value
+
+
+def _percentile(value: object, name: str) -> float:
+    if isinstance(value, bool):
+        raise BraTS21PointGuidedValidationError(f"{name} must be a finite percentile in [0, 100]")
+    result = _finite_float(value, name)
+    if not 0.0 <= result <= 100.0:
+        raise BraTS21PointGuidedValidationError(f"{name} must be in [0, 100]")
+    return result
+
+
+def _validate_percentile_range(lower: object, upper: object) -> tuple[float, float]:
+    lower_value = _percentile(lower, "lower_percentile")
+    upper_value = _percentile(upper, "upper_percentile")
+    if upper_value <= lower_value:
+        raise BraTS21PointGuidedValidationError(
+            "lower_percentile must be strictly less than upper_percentile; the percentile range is empty"
+        )
+    return lower_value, upper_value
 
 
 def _validate_subject_id(subject_id: object) -> str:
@@ -224,7 +255,7 @@ class NiftiGeometryMetadata:
 
 @dataclass(frozen=True)
 class ModalityNormalizationMetadata:
-    """Reproducible statistics for one modality's masked z-score transform."""
+    """Reproducible statistics for one modality's masked transform."""
 
     modality: str
     voxel_count: int
@@ -235,6 +266,12 @@ class ModalityNormalizationMetadata:
     maximum: float
     mask_source: str = "raw_observation_nonzero_union"
     version: str = NORMALIZATION_VERSION
+    normalization_policy: str = MASKED_ZSCORE_POLICY
+    lower_percentile: float = 1.0
+    upper_percentile: float = 99.0
+    clip_lower: float | None = None
+    clip_upper: float | None = None
+    output_range: tuple[float, float] | None = None
     metadata_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -255,11 +292,55 @@ class ModalityNormalizationMetadata:
             raise BraTS21PointGuidedValidationError("normalization mask_source must be non-empty")
         if self.version != NORMALIZATION_VERSION:
             raise BraTS21PointGuidedValidationError(f"unsupported normalization version: {self.version!r}")
+        policy = _normalization_policy(self.normalization_policy)
+        lower_percentile, upper_percentile = _validate_percentile_range(
+            self.lower_percentile,
+            self.upper_percentile,
+        )
+        clip_lower = None if self.clip_lower is None else _finite_float(self.clip_lower, "normalization clip_lower")
+        clip_upper = None if self.clip_upper is None else _finite_float(self.clip_upper, "normalization clip_upper")
+        if (clip_lower is None) != (clip_upper is None):
+            raise BraTS21PointGuidedValidationError("normalization clip bounds must be both present or both absent")
+        if clip_lower is not None and clip_upper is not None and clip_upper <= clip_lower:
+            raise BraTS21PointGuidedValidationError("normalization clip bounds define an empty range")
+        output_range: tuple[float, float] | None
+        if self.output_range is None:
+            output_range = None
+        else:
+            try:
+                raw_output_range = tuple(self.output_range)
+            except TypeError as error:
+                raise BraTS21PointGuidedValidationError(
+                    "normalization output_range must contain two finite values"
+                ) from error
+            if len(raw_output_range) != 2:
+                raise BraTS21PointGuidedValidationError("normalization output_range must contain two values")
+            output_range = (
+                _finite_float(raw_output_range[0], "normalization output_range lower"),
+                _finite_float(raw_output_range[1], "normalization output_range upper"),
+            )
+            if output_range[1] <= output_range[0]:
+                raise BraTS21PointGuidedValidationError("normalization output_range defines an empty range")
+        if policy == MASKED_ROBUST_01_POLICY:
+            if clip_lower is None or clip_upper is None:
+                raise BraTS21PointGuidedValidationError(
+                    "masked_robust_01 metadata requires finite clip bounds"
+                )
+            if output_range != (0.0, 1.0):
+                raise BraTS21PointGuidedValidationError(
+                    "masked_robust_01 metadata must record output_range=(0.0, 1.0)"
+                )
         object.__setattr__(self, "mean", values["mean"])
         object.__setattr__(self, "std", values["std"])
         object.__setattr__(self, "scale", values["scale"])
         object.__setattr__(self, "minimum", values["minimum"])
         object.__setattr__(self, "maximum", values["maximum"])
+        object.__setattr__(self, "normalization_policy", policy)
+        object.__setattr__(self, "lower_percentile", lower_percentile)
+        object.__setattr__(self, "upper_percentile", upper_percentile)
+        object.__setattr__(self, "clip_lower", clip_lower)
+        object.__setattr__(self, "clip_upper", clip_upper)
+        object.__setattr__(self, "output_range", output_range)
         object.__setattr__(self, "metadata_hash", _canonical_hash(self._unsigned_dict()))
 
     @property
@@ -270,15 +351,60 @@ class ModalityNormalizationMetadata:
     def record_hash(self) -> str:
         return self.metadata_hash
 
+    @property
+    def policy(self) -> str:
+        """Short alias for the explicit normalization policy."""
+
+        return self.normalization_policy
+
+    @property
+    def percentiles(self) -> tuple[float, float]:
+        return (self.lower_percentile, self.upper_percentile)
+
+    @property
+    def clip_bounds(self) -> tuple[float, float] | None:
+        if self.clip_lower is None or self.clip_upper is None:
+            return None
+        return (self.clip_lower, self.clip_upper)
+
+    @property
+    def clip_low(self) -> float | None:
+        return self.clip_lower
+
+    @property
+    def clip_high(self) -> float | None:
+        return self.clip_upper
+
+    @property
+    def output_min(self) -> float | None:
+        return None if self.output_range is None else self.output_range[0]
+
+    @property
+    def output_max(self) -> float | None:
+        return None if self.output_range is None else self.output_range[1]
+
     def _unsigned_dict(self) -> dict[str, object]:
         return {
+            "clip_bounds": self.clip_bounds,
+            "clip_lower": self.clip_lower,
+            "clip_upper": self.clip_upper,
+            "clip_high": self.clip_high,
+            "clip_low": self.clip_low,
+            "lower_percentile": self.lower_percentile,
             "mask_source": self.mask_source,
             "maximum": self.maximum,
             "mean": self.mean,
             "minimum": self.minimum,
             "modality": self.modality,
+            "normalization_policy": self.normalization_policy,
+            "output_max": self.output_max,
+            "output_min": self.output_min,
+            "output_range": self.output_range,
+            "policy": self.policy,
+            "percentiles": self.percentiles,
             "scale": self.scale,
             "std": self.std,
+            "upper_percentile": self.upper_percentile,
             "version": self.version,
             "voxel_count": self.voxel_count,
         }
@@ -508,6 +634,9 @@ def _normalize_masked(
     *,
     modality: str,
     epsilon: float,
+    normalization_policy: str,
+    lower_percentile: float,
+    upper_percentile: float,
 ) -> tuple[torch.Tensor, ModalityNormalizationMetadata]:
     values = np.asarray(values_dhw, dtype=np.float64)
     mask = np.asarray(mask_dhw, dtype=bool)
@@ -516,11 +645,31 @@ def _normalize_masked(
     selected = values[mask]
     if not np.isfinite(selected).all():
         raise BraTS21PointGuidedValidationError(f"{modality}: normalization values are non-finite")
+    policy = _normalization_policy(normalization_policy)
+    lower_percentile_value, upper_percentile_value = _validate_percentile_range(
+        lower_percentile,
+        upper_percentile,
+    )
     mean = float(np.mean(selected, dtype=np.float64))
     std = float(np.std(selected, dtype=np.float64))
-    scale = std if std >= epsilon else 1.0
     normalized = np.zeros(values.shape, dtype=np.float64)
-    normalized[mask] = (selected - mean) / scale
+    clip_lower: float | None = None
+    clip_upper: float | None = None
+    output_range: tuple[float, float] | None = None
+    if policy == MASKED_ZSCORE_POLICY:
+        scale = std if std >= epsilon else 1.0
+        normalized[mask] = (selected - mean) / scale
+    else:
+        clip_lower = float(np.percentile(selected, lower_percentile_value))
+        clip_upper = float(np.percentile(selected, upper_percentile_value))
+        if not math.isfinite(clip_lower) or not math.isfinite(clip_upper) or clip_upper <= clip_lower:
+            raise BraTS21PointGuidedValidationError(
+                f"{modality}: masked_robust_01 percentile range is invalid or empty"
+            )
+        scale = clip_upper - clip_lower
+        clipped = np.clip(selected, clip_lower, clip_upper)
+        normalized[mask] = (clipped - clip_lower) / scale
+        output_range = (0.0, 1.0)
     normalized_float32 = normalized.astype(np.float32)
     if not np.isfinite(normalized_float32).all():
         raise BraTS21PointGuidedValidationError(f"{modality}: normalized values overflowed float32")
@@ -532,6 +681,12 @@ def _normalize_masked(
         scale=scale,
         minimum=float(np.min(selected)),
         maximum=float(np.max(selected)),
+        normalization_policy=policy,
+        lower_percentile=lower_percentile_value,
+        upper_percentile=upper_percentile_value,
+        clip_lower=clip_lower,
+        clip_upper=clip_upper,
+        output_range=output_range,
     )
     return torch.from_numpy(np.ascontiguousarray(normalized_float32)), metadata
 
@@ -635,6 +790,9 @@ class PointGuidedNormalizationConfig:
 
     brain_mask_threshold: float = 0.0
     normalization_epsilon: float = 1e-6
+    normalization_policy: str = MASKED_ZSCORE_POLICY
+    lower_percentile: float = 1.0
+    upper_percentile: float = 99.0
 
     def __post_init__(self) -> None:
         threshold = _finite_float(self.brain_mask_threshold, "brain_mask_threshold")
@@ -643,8 +801,16 @@ class PointGuidedNormalizationConfig:
             raise BraTS21PointGuidedValidationError(
                 "brain_mask_threshold must be non-negative and normalization_epsilon positive"
             )
+        policy = _normalization_policy(self.normalization_policy)
+        lower_percentile, upper_percentile = _validate_percentile_range(
+            self.lower_percentile,
+            self.upper_percentile,
+        )
         object.__setattr__(self, "brain_mask_threshold", threshold)
         object.__setattr__(self, "normalization_epsilon", epsilon)
+        object.__setattr__(self, "normalization_policy", policy)
+        object.__setattr__(self, "lower_percentile", lower_percentile)
+        object.__setattr__(self, "upper_percentile", upper_percentile)
 
 
 @dataclass(frozen=True)
@@ -704,10 +870,28 @@ def _normalization_config(value: object | None) -> PointGuidedNormalizationConfi
     if isinstance(value, Mapping):
         threshold = value.get("brain_mask_threshold", value.get("mask_threshold", 0.0))
         epsilon = value.get("normalization_epsilon", value.get("epsilon", 1e-6))
-        return PointGuidedNormalizationConfig(threshold, epsilon)
+        policy = value.get("normalization_policy", value.get("policy", MASKED_ZSCORE_POLICY))
+        lower_percentile = value.get("lower_percentile", 1.0)
+        upper_percentile = value.get("upper_percentile", 99.0)
+        return PointGuidedNormalizationConfig(
+            brain_mask_threshold=threshold,
+            normalization_epsilon=epsilon,
+            normalization_policy=policy,
+            lower_percentile=lower_percentile,
+            upper_percentile=upper_percentile,
+        )
     threshold = getattr(value, "brain_mask_threshold", getattr(value, "mask_threshold", 0.0))
     epsilon = getattr(value, "normalization_epsilon", getattr(value, "epsilon", 1e-6))
-    return PointGuidedNormalizationConfig(threshold, epsilon)
+    policy = getattr(value, "normalization_policy", getattr(value, "policy", MASKED_ZSCORE_POLICY))
+    lower_percentile = getattr(value, "lower_percentile", 1.0)
+    upper_percentile = getattr(value, "upper_percentile", 99.0)
+    return PointGuidedNormalizationConfig(
+        brain_mask_threshold=threshold,
+        normalization_epsilon=epsilon,
+        normalization_policy=policy,
+        lower_percentile=lower_percentile,
+        upper_percentile=upper_percentile,
+    )
 
 
 def load_point_guided_subject(
@@ -719,6 +903,9 @@ def load_point_guided_subject(
     load_segmentation: bool = True,
     brain_mask_threshold: float = 0.0,
     normalization_epsilon: float = 1e-6,
+    normalization_policy: str = MASKED_ZSCORE_POLICY,
+    lower_percentile: float = 1.0,
+    upper_percentile: float = 99.0,
 ) -> BraTS21PointGuidedSample:
     """Load and normalize one full volume under the point-guided contract."""
 
@@ -738,9 +925,13 @@ def load_point_guided_subject(
         raise BraTS21PointGuidedValidationError(
             "require_segmentation=True cannot be combined with load_segmentation=False"
         )
-    epsilon = _finite_float(normalization_epsilon, "normalization_epsilon")
-    if epsilon <= 0.0:
-        raise BraTS21PointGuidedValidationError("normalization_epsilon must be positive")
+    normalization_config = PointGuidedNormalizationConfig(
+        brain_mask_threshold=brain_mask_threshold,
+        normalization_epsilon=normalization_epsilon,
+        normalization_policy=normalization_policy,
+        lower_percentile=lower_percentile,
+        upper_percentile=upper_percentile,
+    )
 
     raw_observations: list[np.ndarray] = []
     reference_geometry: NiftiGeometryMetadata | None = None
@@ -756,7 +947,10 @@ def load_point_guided_subject(
 
     # Derive this before reading or normalizing target data.  Target and
     # segmentation therefore cannot influence observation topology.
-    brain_mask_xyz = derive_input_brain_mask(observations_xyz, threshold=brain_mask_threshold)
+    brain_mask_xyz = derive_input_brain_mask(
+        observations_xyz,
+        threshold=normalization_config.brain_mask_threshold,
+    )
     brain_mask_dhw = torch.from_numpy(nifti_xyz_to_dhw(brain_mask_xyz).copy())
     normalized_observations: list[torch.Tensor] = []
     normalization: dict[str, ModalityNormalizationMetadata] = {}
@@ -765,7 +959,10 @@ def load_point_guided_subject(
             nifti_xyz_to_dhw(observations_xyz[index]),
             brain_mask_dhw.numpy(),
             modality=modality,
-            epsilon=epsilon,
+            epsilon=normalization_config.normalization_epsilon,
+            normalization_policy=normalization_config.normalization_policy,
+            lower_percentile=normalization_config.lower_percentile,
+            upper_percentile=normalization_config.upper_percentile,
         )
         normalized_observations.append(normalized)
         normalization[modality] = metadata
@@ -778,7 +975,10 @@ def load_point_guided_subject(
             nifti_xyz_to_dhw(target_xyz),
             brain_mask_dhw.numpy(),
             modality=POINT_GUIDED_TARGET_MODALITY,
-            epsilon=epsilon,
+            epsilon=normalization_config.normalization_epsilon,
+            normalization_policy=normalization_config.normalization_policy,
+            lower_percentile=normalization_config.lower_percentile,
+            upper_percentile=normalization_config.upper_percentile,
         )
         normalization[POINT_GUIDED_TARGET_MODALITY] = target_metadata
 
@@ -920,6 +1120,9 @@ class BraTS21PointGuidedDataset(Dataset):
             require_segmentation=self.require_segmentation,
             brain_mask_threshold=self.normalization_config.brain_mask_threshold,
             normalization_epsilon=self.normalization_config.normalization_epsilon,
+            normalization_policy=self.normalization_config.normalization_policy,
+            lower_percentile=self.normalization_config.lower_percentile,
+            upper_percentile=self.normalization_config.upper_percentile,
         )
 
 
@@ -1165,6 +1368,9 @@ class BraTS21PointGuidedAdapter:
         load_segmentation: bool = True,
         brain_mask_threshold: float = 0.0,
         normalization_epsilon: float = 1e-6,
+        normalization_policy: str = MASKED_ZSCORE_POLICY,
+        lower_percentile: float = 1.0,
+        upper_percentile: float = 99.0,
     ) -> None:
         try:
             resolved_root = Path(root).resolve(strict=True)
@@ -1185,17 +1391,23 @@ class BraTS21PointGuidedAdapter:
             raise BraTS21PointGuidedValidationError(
                 "require_segmentation=True cannot be combined with load_segmentation=False"
             )
-        threshold = _finite_float(brain_mask_threshold, "brain_mask_threshold")
-        epsilon = _finite_float(normalization_epsilon, "normalization_epsilon")
-        if threshold < 0.0 or epsilon <= 0.0:
-            raise BraTS21PointGuidedValidationError("brain mask threshold must be non-negative and epsilon positive")
+        normalization_config = PointGuidedNormalizationConfig(
+            brain_mask_threshold=brain_mask_threshold,
+            normalization_epsilon=normalization_epsilon,
+            normalization_policy=normalization_policy,
+            lower_percentile=lower_percentile,
+            upper_percentile=upper_percentile,
+        )
         self.root = resolved_root
         self.require_target = require_target
         self.require_segmentation = require_segmentation
         self.load_target = load_target
         self.load_segmentation = load_segmentation
-        self.brain_mask_threshold = threshold
-        self.normalization_epsilon = epsilon
+        self.brain_mask_threshold = normalization_config.brain_mask_threshold
+        self.normalization_epsilon = normalization_config.normalization_epsilon
+        self.normalization_policy = normalization_config.normalization_policy
+        self.lower_percentile = normalization_config.lower_percentile
+        self.upper_percentile = normalization_config.upper_percentile
 
     def discover_subjects(self) -> tuple[BraTS21PointGuidedSubject, ...]:
         return discover_point_guided_subjects(self.root)
@@ -1223,6 +1435,9 @@ class BraTS21PointGuidedAdapter:
             load_segmentation=self.load_segmentation if load_segmentation is None else load_segmentation,
             brain_mask_threshold=self.brain_mask_threshold,
             normalization_epsilon=self.normalization_epsilon,
+            normalization_policy=self.normalization_policy,
+            lower_percentile=self.lower_percentile,
+            upper_percentile=self.upper_percentile,
         )
 
     def __len__(self) -> int:
@@ -1249,6 +1464,9 @@ class BraTS21PointGuidedAdapter:
 __all__ = [
     "BRATS21_POINT_GUIDED_LABELS",
     "BRATS21_POINT_GUIDED_SUBJECT_PATTERN",
+    "MASKED_ROBUST_01_POLICY",
+    "MASKED_ZSCORE_POLICY",
+    "SUPPORTED_NORMALIZATION_POLICIES",
     "BraTS21PointGuidedAdapter",
     "BraTS21PointGuidedDataset",
     "BraTS21PointGuidedDependencyError",

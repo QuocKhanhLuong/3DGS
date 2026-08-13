@@ -9,7 +9,7 @@ that for the training-only semantic auxiliary term.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import csv
 import json
@@ -149,7 +149,7 @@ class PointGuidedTrainingSettings:
     early_stopping_patience: int = 10
     log_interval: int = 1
     prediction_interval: int = 1
-    normalization_space: str = "normalized_input_derived_space"
+    normalization_space: str = "masked_robust_01_[0,1]"
 
     def __post_init__(self) -> None:
         for name in ("learning_rate",):
@@ -481,12 +481,14 @@ class PointGuidedTrainer:
         self.context = context
         self.scaler = _scaler(context, settings)
         self.global_step = 0
+        self.train_context_module: nn.Module | None = None
+        self.eval_context_module: nn.Module | None = None
 
     def _forward_objective(self, batch: PointGuidedBatch, *, training: bool) -> tuple[object, Tensor, Tensor, ReconstructionMetrics, SemanticDiceMetrics | None, dict[str, Any]]:
         observations, brain_mask, spacing, affine = _prepare_batch(batch, self.context)
         # This call is intentionally target-free.  The target is the next
         # local variable passed only to compute_training_objective below.
-        context = self._context_module(
+        context = self._context_module(training)(
             observations,
             brain_mask,
             spacing,
@@ -542,16 +544,22 @@ class PointGuidedTrainer:
             target.detach(),
             brain_mask,
             data_range=self.supervision.ssim_data_range,
+            intensity_space=self.settings.normalization_space,
         )
         route_stats = _route_stats(context, context.frontend.refined_points_ras_mm)
         return objective, total, semantic_loss, metrics, semantic_metrics, route_stats
 
-    def _context_module(self, *args: object) -> tuple[object, Tensor]:
-        return self.context_module(*args)  # type: ignore[return-value]
+    def _context_module(self, training: bool) -> nn.Module:
+        module = self.train_context_module if training else self.eval_context_module
+        if module is None:
+            raise RuntimeError(
+                "PointGuidedTrainer requires separate training and evaluation context modules"
+            )
+        return module
 
     def run_epoch(self, loader: DataLoader[PointGuidedBatch], *, training: bool) -> dict[str, Any]:
         self.model.train(training)
-        self.context_module.train(training)
+        self._context_module(training).train(training)
         if training:
             self.optimizer.zero_grad(set_to_none=True)
         accumulator = _empty_stats()
@@ -618,8 +626,31 @@ class PointGuidedTrainer:
             self.global_step += 1
         return _reduce_stats(accumulator, self.context)
 
+    def bind_context_modules(self, train_module: nn.Module, eval_module: nn.Module | None = None) -> None:
+        """Bind separate training and validation context modules.
+
+        Training may use DDP, while validation must use the raw local module
+        because ``DistributedEvalSampler`` intentionally produces uneven,
+        non-padded shards. The one-module form remains available through
+        :meth:`bind_context_module` for CPU synthetic callers.
+        """
+
+        if not isinstance(train_module, nn.Module):
+            raise TypeError("train_module must be a torch.nn.Module")
+        if eval_module is not None and not isinstance(eval_module, nn.Module):
+            raise TypeError("eval_module must be a torch.nn.Module when supplied")
+        self.train_context_module = train_module
+        self.eval_context_module = train_module if eval_module is None else eval_module
+
     def bind_context_module(self, module: nn.Module) -> None:
-        self.context_module = module
+        """Compatibility alias for one-module CPU/synthetic callers."""
+
+        self.bind_context_modules(module, module)
+
+    def context_module_for(self, *, training: bool) -> nn.Module:
+        """Return the context module selected for an epoch."""
+
+        return self._context_module(training)
 
 
 def _settings_from_mapping(value: Mapping[str, Any]) -> PointGuidedTrainingSettings:
@@ -628,6 +659,69 @@ def _settings_from_mapping(value: Mapping[str, Any]) -> PointGuidedTrainingSetti
     if isinstance(values.get("semantic_class_weights"), list):
         values["semantic_class_weights"] = tuple(values["semantic_class_weights"])
     return PointGuidedTrainingSettings(**values)
+
+
+def normalization_policy_from_config(value: object | None) -> str:
+    """Return the explicit full-volume normalization policy name."""
+
+    if value is None:
+        return "masked_zscore"
+    if isinstance(value, Mapping):
+        policy = value.get("normalization_policy", "masked_zscore")
+    else:
+        policy = getattr(value, "normalization_policy", "masked_zscore")
+    policy = str(policy)
+    if policy not in ("masked_zscore", "masked_robust_01"):
+        raise ValueError(
+            "normalization_policy must be 'masked_zscore' or 'masked_robust_01'"
+        )
+    return policy
+
+
+def normalization_space_from_config(value: object | None) -> str:
+    """Return the declared metric/intensity-space label for run metadata."""
+
+    policy = normalization_policy_from_config(value)
+    if policy == "masked_robust_01":
+        return "masked_robust_01_[0,1]"
+    return "masked_zscore_explicit_metric_range"
+
+
+def validate_metric_data_range(
+    normalization_config: object | None,
+    supervision: SupervisionConfig,
+) -> None:
+    """Reject silent PSNR/SSIM range assumptions for masked z-score data."""
+
+    policy = normalization_policy_from_config(normalization_config)
+    explicit = None
+    if isinstance(normalization_config, Mapping):
+        explicit = normalization_config.get("metric_data_range")
+    elif normalization_config is not None:
+        explicit = getattr(normalization_config, "metric_data_range", None)
+    if policy == "masked_zscore":
+        if explicit is None:
+            raise ValueError(
+                "masked_zscore requires data.normalization.metric_data_range "
+                "for PSNR/SSIM; it cannot silently use 1.0"
+            )
+        explicit_value = float(explicit)
+        if not math.isfinite(explicit_value) or explicit_value <= 0.0:
+            raise ValueError("metric_data_range must be positive and finite")
+        if not math.isclose(explicit_value, supervision.ssim_data_range, rel_tol=0.0, abs_tol=1e-8):
+            raise ValueError(
+                "data.normalization.metric_data_range must equal "
+                "supervision.ssim_data_range"
+            )
+    elif explicit is not None:
+        explicit_value = float(explicit)
+        if not math.isfinite(explicit_value) or explicit_value <= 0.0:
+            raise ValueError("metric_data_range must be positive and finite")
+        if not math.isclose(explicit_value, supervision.ssim_data_range, rel_tol=0.0, abs_tol=1e-8):
+            raise ValueError(
+                "data.normalization.metric_data_range must equal "
+                "supervision.ssim_data_range"
+            )
 
 
 def build_model_from_config(raw: Mapping[str, Any], overrides: Mapping[str, Any] | None = None) -> tuple[PointGuidedMRIModel, SupervisionConfig, PointGuidedTrainingSettings]:
@@ -811,6 +905,10 @@ def _save_overfit_predictions(
     trajectory = model.trajectory
     if trajectory is None:
         raise RuntimeError("overfit prediction snapshots require the explicit trajectory")
+    try:
+        device = next(model.parameters()).device
+    except StopIteration as error:
+        raise RuntimeError("overfit prediction snapshots require a model with parameters") from error
     inference_config = GateGInferenceConfig(
         lambda_travel=trajectory.config.lambda_travel,
         lambda_overlap=trajectory.config.lambda_overlap,
@@ -825,8 +923,8 @@ def _save_overfit_predictions(
         sample = dataset[index]
         with torch.no_grad():
             result = model.forward_baseline_inference(
-                sample.observations.unsqueeze(0),
-                brain_mask=sample.brain_mask.unsqueeze(0),
+                sample.observations.unsqueeze(0).to(device, non_blocking=True),
+                brain_mask=sample.brain_mask.unsqueeze(0).to(device, non_blocking=True),
                 spacing_mm=sample.spacing_xyz_mm,
                 voxel_to_ras_mm=sample.voxel_to_ras_mm,
                 inference_config=inference_config,
@@ -865,6 +963,13 @@ def run_training(
     try:
         _set_seed(int(raw_config.get("training", {}).get("seed", 20260813)), context.rank)
         model, supervision, settings = build_model_from_config(raw_config, overrides)
+        data_config = raw_config.get("data", {})
+        normalization_config = data_config.get("normalization")
+        validate_metric_data_range(normalization_config, supervision)
+        settings = replace(
+            settings,
+            normalization_space=normalization_space_from_config(normalization_config),
+        )
         model.to(context.device)
         subjects = discover_point_guided_subjects(data_root)
         split, split_hash = _resolve_split(
@@ -938,15 +1043,16 @@ def run_training(
             checkpoint_directory=str(run_dir / "checkpoints"),
         )
         optimizer, ownership = build_baseline_optimizer(model, baseline_config)
-        wrapped: nn.Module = _TrainingContextModule(model)
+        raw_context_module = _TrainingContextModule(model)
+        train_context_module: nn.Module = raw_context_module
         if context.is_distributed:
-            wrapped = DistributedDataParallel(
-                wrapped,
+            train_context_module = DistributedDataParallel(
+                raw_context_module,
                 device_ids=[context.local_rank] if context.device.type == "cuda" else None,
                 find_unused_parameters=False,
             )
         trainer = PointGuidedTrainer(model, optimizer, settings, supervision, context)
-        trainer.bind_context_module(wrapped)
+        trainer.bind_context_modules(train_context_module, raw_context_module)
 
         start_epoch = 1
         best_metric = math.inf
@@ -966,18 +1072,17 @@ def run_training(
 
         train_ids = tuple(split["train"])
         val_ids = train_ids if overfit else tuple(split["val"])
-        data_config = raw_config.get("data", {})
         require_segmentation = bool(data_config.get("require_segmentation", True))
         train_dataset = BraTS21PointGuidedDataset(
             data_root,
             subject_ids=train_ids,
-            normalization_config=data_config.get("normalization"),
+            normalization_config=normalization_config,
             require_segmentation=require_segmentation,
         )
         val_dataset = BraTS21PointGuidedDataset(
             data_root,
             subject_ids=val_ids,
-            normalization_config=data_config.get("normalization"),
+            normalization_config=normalization_config,
             require_segmentation=require_segmentation,
         )
         train_loader, train_sampler = _make_loader(train_dataset, context=context, settings=settings, training=True)
@@ -1165,6 +1270,9 @@ __all__ = [
     "build_model_from_config",
     "destroy_distributed",
     "initialize_distributed",
+    "normalization_policy_from_config",
+    "normalization_space_from_config",
     "preflight",
     "run_training",
+    "validate_metric_data_range",
 ]

@@ -10,14 +10,19 @@ from typing import Any, Mapping
 
 import torch
 
-from ..data.brats21_point_guided import BraTS21PointGuidedAdapter, deterministic_subject_split, discover_point_guided_subjects
+from ..data.brats21_point_guided import BraTS21PointGuidedDataset, discover_point_guided_subjects
 from ..features.point_guided.baseline_inference import (
     GateGInferenceConfig,
     load_validated_baseline_checkpoint,
 )
 from ..features.point_guided.baseline_metrics import compute_reconstruction_metrics, semantic_dice
 from ..features.point_guided.semantic_supervision import build_coarse_semantic_target
-from ..training.point_guided import build_model_from_config
+from ..features.point_guided.training_objective import SupervisionConfig
+from ..training.point_guided import (
+    build_model_from_config,
+    normalization_space_from_config,
+    validate_metric_data_range,
+)
 
 
 def _atomic_json(path: Path, payload: object) -> None:
@@ -27,20 +32,28 @@ def _atomic_json(path: Path, payload: object) -> None:
     temporary.replace(path)
 
 
+def resolve_split_file(checkpoint: Path, split_file: Path | None = None) -> Path:
+    """Resolve the exact split artifact belonging to a training checkpoint."""
+
+    checkpoint = checkpoint.resolve()
+    if split_file is None:
+        candidate = checkpoint.parent.parent / "split.json"
+    else:
+        candidate = split_file.resolve()
+    if not candidate.is_file():
+        source = "inferred training run" if split_file is None else "explicit argument"
+        raise FileNotFoundError(
+            f"exact training split.json is required ({source}) but was not found: {candidate}"
+        )
+    return candidate
+
+
 def _load_split(
-    path: Path | None,
+    path: Path,
     subjects: tuple[str, ...],
-    *,
-    seed: int = 20260813,
-    split_fractions: tuple[float, float, float] = (0.8, 0.1, 0.1),
 ) -> tuple[dict[str, tuple[str, ...]], str]:
-    if path is None:
-        split = deterministic_subject_split(subjects, seed=seed, split_fractions=split_fractions)
-        return {
-            "train": split.train_subject_ids,
-            "val": split.val_subject_ids,
-            "test": split.test_subject_ids,
-        }, split.split_hash
+    if not path.is_file():
+        raise FileNotFoundError(f"split file does not exist: {path}")
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, Mapping):
         raise ValueError("split file must contain a JSON object")
@@ -92,6 +105,10 @@ def evaluate(
     raw_config = json.loads(config_path.read_text(encoding="utf-8"))
     if not isinstance(raw_config, dict):
         raise ValueError("evaluation config must contain a JSON object")
+    data_config = raw_config.get("data", {})
+    normalization_config = data_config.get("normalization")
+    supervision = SupervisionConfig(**raw_config.get("supervision", {}))
+    validate_metric_data_range(normalization_config, supervision)
     device = torch.device(device_name)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA evaluation requested but CUDA is unavailable")
@@ -106,27 +123,27 @@ def evaluate(
     model.to(device).eval()
     subjects = discover_point_guided_subjects(data_root)
     subject_ids = tuple(subject.subject_id for subject in subjects)
-    data_config = raw_config.get("data", {})
-    groups, split_hash = _load_split(
-        split_file,
-        subject_ids,
-        seed=int(data_config.get("split_seed", 20260813)),
-        split_fractions=tuple(data_config.get("split_fractions", (0.8, 0.1, 0.1))),  # type: ignore[arg-type]
-    )
+    resolved_split_file = resolve_split_file(checkpoint, split_file)
+    groups, split_hash = _load_split(resolved_split_file, subject_ids)
     selected_ids = list(groups[split_name])
     if max_subjects is not None:
         if max_subjects <= 0:
             raise ValueError("max_subjects must be positive when supplied")
         selected_ids = selected_ids[:max_subjects]
-    adapter = BraTS21PointGuidedAdapter(data_root, require_target=True, require_segmentation=False)
+    dataset = BraTS21PointGuidedDataset(
+        data_root,
+        selected_ids,
+        normalization_config=normalization_config,
+        require_segmentation=False,
+    )
     inference_values = dict(raw_config.get("inference", {}))
     inference_config = GateGInferenceConfig(**inference_values)
     output_dir.mkdir(parents=True, exist_ok=True)
     per_subject: list[dict[str, Any]] = []
     stop_histogram: Counter[str] = Counter()
     with torch.no_grad():
-        for subject_id in selected_ids:
-            sample = adapter.load(subject_id)
+        for sample in dataset:
+            subject_id = sample.subject_id
             if sample.target_t1ce is None:
                 raise ValueError(f"{subject_id}: evaluation requires a T1ce target")
             observations = sample.observations.unsqueeze(0).to(device)
@@ -140,7 +157,13 @@ def evaluate(
                 inference_config=inference_config,
             )
             target = sample.target_t1ce.unsqueeze(0).to(device)
-            metrics = compute_reconstruction_metrics(result.prediction, target, brain_mask)
+            metrics = compute_reconstruction_metrics(
+                result.prediction,
+                target,
+                brain_mask,
+                data_range=supervision.ssim_data_range,
+                intensity_space=normalization_space_from_config(normalization_config),
+            )
             semantic = None
             if sample.segmentation_labels is not None and result.semantic_probabilities is not None:
                 semantic_target = build_coarse_semantic_target(
@@ -196,7 +219,7 @@ def evaluate(
             for name in ("dice_normal", "dice_edema", "dice_core")
         },
         "stop_reason_histogram": dict(stop_histogram),
-        "normalization_space": "normalized_input_derived_space",
+        "normalization_space": normalization_space_from_config(normalization_config),
         "clinical_quality_claim": False,
     }
     _atomic_json(output_dir / "per_subject_metrics.json", per_subject)
@@ -205,9 +228,11 @@ def evaluate(
     _atomic_json(output_dir / "evaluation_metadata.json", {
         "checkpoint": str(checkpoint.resolve()),
         "git_head": None,
+        "split_file": str(resolved_split_file),
         "split_hash": split_hash,
         "split": split_name,
-        "normalization_space": "normalized_input_derived_space",
+        "training_run_dir": str(checkpoint.resolve().parent.parent),
+        "normalization_space": normalization_space_from_config(normalization_config),
         "target_used_after_inference_only": True,
         "segmentation_used_after_inference_only": True,
     })
