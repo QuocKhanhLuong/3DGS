@@ -43,7 +43,12 @@ class OffsetPredictor(nn.Module):
             )
         if not bool(torch.isfinite(descriptor).all()):
             raise ValueError("descriptor must be finite")
-        return self.network(descriptor)
+        raw_displacement = self.network(descriptor)
+        # The MLP may execute under AMP, but its output is a physical RAS-mm
+        # displacement that immediately enters the refinement geometry path.
+        # Restore the caller's coordinate dtype at this module boundary rather
+        # than weakening physical-coordinate validation downstream.
+        return raw_displacement.to(dtype=descriptor.dtype)
 
 
 __all__ = ["OffsetPredictor"]

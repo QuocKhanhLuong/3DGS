@@ -57,6 +57,8 @@ class CounterfactualConfig:
     random_candidate_count: int = 15
     spill_weight_beta: float = 1.0
     spill_sample_count: int = 12
+    reward_ranking_weight: float = 0.0
+    reward_ranking_min_target_gap: float = 0.001
 
     def __post_init__(self) -> None:
         maximum = _require_int("counterfactual_candidates", self.counterfactual_candidates, minimum=1)
@@ -80,6 +82,16 @@ class CounterfactualConfig:
         if spill_count not in (0,) and spill_count < 3:
             raise ValueError("spill_sample_count must be zero or at least 3 to retain XY/XZ/YZ fibres")
         object.__setattr__(self, "spill_sample_count", spill_count)
+        object.__setattr__(
+            self,
+            "reward_ranking_weight",
+            _require_nonnegative_finite("reward_ranking_weight", self.reward_ranking_weight),
+        )
+        object.__setattr__(
+            self,
+            "reward_ranking_min_target_gap",
+            _require_nonnegative_finite("reward_ranking_min_target_gap", self.reward_ranking_min_target_gap),
+        )
 
 
 @dataclass(frozen=True)
@@ -151,7 +163,14 @@ class CounterfactualRewardResult:
     reward_prediction: Tensor  # [B,M], live RewardNet output
     reward_target: Tensor  # [B,M], detached [0,1]
     valid_mask: Tensor  # [B,M], bool local-supervision availability
-    loss: Tensor  # scalar SmoothL1 mean over valid entries
+    loss: Tensor  # scalar absolute loss + weighted pairwise ranking loss
+    absolute_loss: Tensor  # scalar masked SmoothL1 mean over valid entries
+    ranking_loss: Tensor  # scalar mean over informative within-subject pairs
+    ranking_weighted_loss: Tensor  # reward_ranking_weight * ranking_loss
+    valid_pair_count: int  # unique valid candidate pairs before gap filtering
+    informative_pair_count: int  # unique valid pairs meeting the target-gap threshold
+    ranking_violation_fraction: float  # fraction of informative pairs with positive hinge
+    mean_target_pair_gap: float  # mean target gap over informative pairs
     candidates: CandidateSubset
     local_before: Tensor  # [B,M]
     local_after: Tensor  # [B,M]
@@ -178,14 +197,114 @@ class CounterfactualRewardResult:
             raise ValueError("measured reward_target must be clamped to [0,1]")
         if not isinstance(self.valid_mask, Tensor) or self.valid_mask.dtype != torch.bool or self.valid_mask.shape != reference.shape or self.valid_mask.device != reference.device:
             raise ValueError("valid_mask must be a bool [B,M] tensor aligned with reward_prediction")
-        if not isinstance(self.loss, Tensor) or self.loss.ndim != 0 or self.loss.dtype != reference.dtype or self.loss.device != reference.device:
-            raise ValueError("loss must be a scalar tensor aligned with reward_prediction")
-        if not bool(torch.isfinite(self.loss)):
-            raise ValueError("counterfactual reward loss must be finite")
+        for name in ("loss", "absolute_loss", "ranking_loss", "ranking_weighted_loss"):
+            value = getattr(self, name)
+            if not isinstance(value, Tensor) or value.ndim != 0 or value.dtype != reference.dtype or value.device != reference.device:
+                raise ValueError(f"{name} must be a scalar tensor aligned with reward_prediction")
+            if not bool(torch.isfinite(value)):
+                raise ValueError(f"{name} must be finite")
+        for name in ("valid_pair_count", "informative_pair_count"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if self.informative_pair_count > self.valid_pair_count:
+            raise ValueError("informative_pair_count cannot exceed valid_pair_count")
+        if not isinstance(self.ranking_violation_fraction, float) or not math.isfinite(self.ranking_violation_fraction) or not 0.0 <= self.ranking_violation_fraction <= 1.0:
+            raise ValueError("ranking_violation_fraction must be a finite fraction")
+        if not isinstance(self.mean_target_pair_gap, float) or not math.isfinite(self.mean_target_pair_gap) or self.mean_target_pair_gap < 0.0:
+            raise ValueError("mean_target_pair_gap must be finite and non-negative")
 
     @property
     def valid_count(self) -> int:
         return int(self.valid_mask.sum().detach().cpu())
+
+
+@dataclass(frozen=True)
+class RewardRankingResult:
+    """Within-subject pairwise ranking evidence for RewardNet supervision."""
+
+    loss: Tensor
+    valid_pair_count: int
+    informative_pair_count: int
+    violation_count: int
+    violation_fraction: float
+    mean_target_pair_gap: float
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.loss, Tensor) or self.loss.ndim != 0 or not self.loss.is_floating_point() or not bool(torch.isfinite(self.loss)):
+            raise ValueError("ranking loss must be one finite scalar tensor")
+        for name in ("valid_pair_count", "informative_pair_count", "violation_count"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if self.informative_pair_count > self.valid_pair_count or self.violation_count > self.informative_pair_count:
+            raise ValueError("ranking pair counts are inconsistent")
+        if not isinstance(self.violation_fraction, float) or not math.isfinite(self.violation_fraction) or not 0.0 <= self.violation_fraction <= 1.0:
+            raise ValueError("violation_fraction must be a finite fraction")
+        if not isinstance(self.mean_target_pair_gap, float) or not math.isfinite(self.mean_target_pair_gap) or self.mean_target_pair_gap < 0.0:
+            raise ValueError("mean_target_pair_gap must be finite and non-negative")
+
+
+def pairwise_reward_ranking_loss(
+    reward_prediction: Tensor,
+    reward_target: Tensor,
+    valid_mask: Tensor,
+    *,
+    min_target_gap: float,
+) -> RewardRankingResult:
+    """Compute a differentiable within-subject pairwise reward ranking hinge.
+
+    Candidate rows are subjects and candidate columns are slots.  Only unique
+    ``i < j`` pairs within each row participate; measured targets remain
+    detached and the prediction path remains differentiable.
+    """
+
+    if not isinstance(reward_prediction, Tensor) or reward_prediction.ndim != 2 or not reward_prediction.is_floating_point():
+        raise ValueError("reward_prediction must be a floating [B,M] tensor")
+    if not isinstance(reward_target, Tensor) or reward_target.shape != reward_prediction.shape or reward_target.dtype != reward_prediction.dtype or reward_target.device != reward_prediction.device or not reward_target.is_floating_point():
+        raise ValueError("reward_target must match reward_prediction")
+    if reward_target.requires_grad:
+        raise ValueError("reward_target must be detached")
+    if not isinstance(valid_mask, Tensor) or valid_mask.dtype != torch.bool or valid_mask.shape != reward_prediction.shape or valid_mask.device != reward_prediction.device:
+        raise ValueError("valid_mask must be a bool tensor matching reward_prediction")
+    if not bool(torch.isfinite(reward_prediction).all()) or not bool(torch.isfinite(reward_target).all()):
+        raise ValueError("reward prediction and target must be finite")
+    gap_threshold = _require_nonnegative_finite("reward_ranking_min_target_gap", min_target_gap)
+
+    candidate_count = reward_prediction.shape[1]
+    upper_triangle = torch.triu(
+        torch.ones((candidate_count, candidate_count), dtype=torch.bool, device=reward_prediction.device),
+        diagonal=1,
+    )
+    valid_pairs = valid_mask.unsqueeze(2) & valid_mask.unsqueeze(1) & upper_triangle.unsqueeze(0)
+    delta_target = reward_target.unsqueeze(2) - reward_target.unsqueeze(1)
+    target_gap = delta_target.abs()
+    informative_pairs = valid_pairs & (target_gap >= gap_threshold) & (target_gap > 0.0)
+    valid_pair_count = int(valid_pairs.sum().detach().cpu())
+    informative_pair_count = int(informative_pairs.sum().detach().cpu())
+
+    delta_prediction = reward_prediction.unsqueeze(2) - reward_prediction.unsqueeze(1)
+    direction = torch.sign(delta_target)
+    pair_loss = torch.relu(target_gap - direction * delta_prediction)
+    if informative_pair_count:
+        selected_loss = pair_loss[informative_pairs]
+        loss = selected_loss.mean()
+        violation_count = int((selected_loss > 0.0).sum().detach().cpu())
+        violation_fraction = float(violation_count / informative_pair_count)
+        mean_target_pair_gap = float(target_gap[informative_pairs].mean().detach().cpu())
+    else:
+        loss = reward_prediction.sum() * 0.0
+        violation_count = 0
+        violation_fraction = 0.0
+        mean_target_pair_gap = 0.0
+    return RewardRankingResult(
+        loss=loss,
+        valid_pair_count=valid_pair_count,
+        informative_pair_count=informative_pair_count,
+        violation_count=violation_count,
+        violation_fraction=violation_fraction,
+        mean_target_pair_gap=mean_target_pair_gap,
+    )
 
 
 def _randperm(length: int, *, generator: torch.Generator | None, device: torch.device) -> Tensor:
@@ -544,7 +663,18 @@ def counterfactual_reward_supervision(
     )
 
     dynamic_samples = trajectory.dynamic_state_query(state, reference, feature_geometry)
-    descriptor = build_reward_descriptor(dynamic_samples, point_semantic, gate_b_descriptors, reliability)
+    updater_input = torch.cat((dynamic_samples.packed, f_spec, point_semantic, reliability), dim=-1)
+    candidate_updates = trajectory.update_net.forward_candidates(
+        updater_input,
+        write_scale=trajectory.config.write_scale,
+    )
+    descriptor = build_reward_descriptor(
+        dynamic_samples,
+        point_semantic,
+        gate_b_descriptors,
+        reliability,
+        candidate_updates.packed,
+    )
     all_reward_prediction = trajectory.reward_net(descriptor.detach())
     candidates = sample_counterfactual_candidates(all_reward_prediction.detach(), selected_indices, config, generator=generator)
     reward_prediction = all_reward_prediction.gather(1, candidates.indices)
@@ -615,16 +745,31 @@ def counterfactual_reward_supervision(
     )
     unreduced = F.smooth_l1_loss(reward_prediction, reward_target, reduction="none")
     valid_count = local_available.sum()
-    loss = torch.where(
+    absolute_loss = torch.where(
         valid_count > 0,
         torch.where(local_available, unreduced, torch.zeros_like(unreduced)).sum() / valid_count.to(dtype=unreduced.dtype),
         reward_prediction.sum() * 0.0,
     )
+    ranking = pairwise_reward_ranking_loss(
+        reward_prediction,
+        reward_target,
+        local_available,
+        min_target_gap=config.reward_ranking_min_target_gap,
+    )
+    ranking_weighted_loss = config.reward_ranking_weight * ranking.loss
+    loss = absolute_loss + ranking_weighted_loss
     return CounterfactualRewardResult(
         reward_prediction=reward_prediction,
         reward_target=reward_target,
         valid_mask=local_available,
         loss=loss,
+        absolute_loss=absolute_loss,
+        ranking_loss=ranking.loss,
+        ranking_weighted_loss=ranking_weighted_loss,
+        valid_pair_count=ranking.valid_pair_count,
+        informative_pair_count=ranking.informative_pair_count,
+        ranking_violation_fraction=ranking.violation_fraction,
+        mean_target_pair_gap=ranking.mean_target_pair_gap,
         candidates=candidates,
         local_before=local_before,
         local_after=local_after,
@@ -638,9 +783,11 @@ __all__ = [
     "CounterfactualConfig",
     "CounterfactualRewardResult",
     "PhysicalPointSamples",
+    "RewardRankingResult",
     "build_local_support_samples",
     "build_spill_samples",
     "counterfactual_reward_supervision",
+    "pairwise_reward_ranking_loss",
     "sample_counterfactual_candidates",
     "spill_aware_reward_target",
 ]

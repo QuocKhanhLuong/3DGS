@@ -63,6 +63,94 @@ class BraTS21PointGuidedValidationError(ValueError):
 BraTS21PointGuidedError = BraTS21PointGuidedValidationError
 
 
+@dataclass(frozen=True)
+class BraTS21PointGuidedExcludedSubject:
+    """One rejected subject from a cohort inventory, without payload values."""
+
+    subject_id: str
+    classification: str
+    detail: str
+
+
+@dataclass(frozen=True)
+class BraTS21PointGuidedStructuralExclusion:
+    """A target-free filesystem eligibility failure for one subject modality."""
+
+    subject_id: str
+    modality: str
+    reason: str
+    path: Path | None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "modality": self.modality,
+            "path": None if self.path is None else str(self.path),
+            "reason": self.reason,
+            "subject_id": self.subject_id,
+        }
+
+
+@dataclass(frozen=True)
+class BraTS21PointGuidedStructuralInventory:
+    """Filesystem-only eligibility inventory created before subject splitting.
+
+    This inventory deliberately never opens NIfTI files, headers, memory maps,
+    or payload arrays. It is the only cohort-wide data check permitted before
+    the held-out split is fixed.
+    """
+
+    root: Path
+    discovered_subject_ids: tuple[str, ...]
+    eligible_subject_ids: tuple[str, ...]
+    excluded_subjects: tuple[BraTS21PointGuidedStructuralExclusion, ...]
+    require_target: bool
+    require_segmentation: bool
+
+    def to_dict(self) -> dict[str, object]:
+        payload = {
+            "discovered_subject_ids": list(self.discovered_subject_ids),
+            "eligible_subject_ids": list(self.eligible_subject_ids),
+            "excluded_subjects": [item.to_dict() for item in self.excluded_subjects],
+            "require_segmentation": self.require_segmentation,
+            "require_target": self.require_target,
+            "root": str(self.root),
+        }
+        return payload | {
+            "discovered_subject_count": len(self.discovered_subject_ids),
+            "eligible_subject_count": len(self.eligible_subject_ids),
+            "excluded_subject_count": len(self.excluded_subjects),
+            "inventory_hash": _canonical_hash(payload),
+        }
+
+
+@dataclass(frozen=True)
+class BraTS21PointGuidedInventory:
+    """Deterministic complete-subject inventory for a partially copied cohort.
+
+    A subject is retained only after the existing per-subject discovery and
+    payload validation have both succeeded. Rejected subjects therefore never
+    enter a split, loader, model context, or target-derived objective.
+    """
+
+    root: Path
+    complete_subjects: tuple["BraTS21PointGuidedSubject", ...]
+    excluded_subjects: tuple[BraTS21PointGuidedExcludedSubject, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "root": str(self.root),
+            "complete_subject_ids": [subject.subject_id for subject in self.complete_subjects],
+            "excluded_subjects": [
+                {
+                    "subject_id": subject.subject_id,
+                    "classification": subject.classification,
+                    "detail": subject.detail,
+                }
+                for subject in self.excluded_subjects
+            ],
+        }
+
+
 def _canonical_hash(value: object) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -551,6 +639,272 @@ def discover_point_guided_subjects(root: str | Path) -> tuple[BraTS21PointGuided
     return tuple(discover_point_guided_subject(item) for item in directories)
 
 
+def discover_point_guided_subject_ids(root: str | Path) -> tuple[str, ...]:
+    """Return deterministic BraTS IDs without opening NIfTI payloads.
+
+    This permits assignment of a train/validation/test split before any
+    held-out payload is decoded. Selected train and validation subjects still
+    require payload validation through :func:`inventory_point_guided_subjects`.
+    """
+
+    try:
+        source_root = Path(root).resolve(strict=True)
+    except FileNotFoundError as error:
+        raise BraTS21PointGuidedValidationError(f"source root does not exist: {root}") from error
+    if not source_root.is_dir():
+        raise BraTS21PointGuidedValidationError(f"source root is not a directory: {source_root}")
+    identifiers = tuple(
+        directory.name
+        for directory in sorted(item for item in source_root.iterdir() if item.is_dir())
+        if BRATS21_POINT_GUIDED_SUBJECT_PATTERN.fullmatch(directory.name) is not None
+    )
+    if not identifiers:
+        raise BraTS21PointGuidedValidationError("no BraTS2021 subject directories were found")
+    return identifiers
+
+
+def _required_modalities(
+    *,
+    require_target: bool,
+    require_segmentation: bool,
+) -> tuple[str, ...]:
+    required = list(POINT_GUIDED_OBSERVATION_MODALITIES)
+    if require_target:
+        required.append(POINT_GUIDED_TARGET_MODALITY)
+    if require_segmentation:
+        required.append(POINT_GUIDED_SEGMENTATION_MODALITY)
+    return tuple(required)
+
+
+def _structural_modality_problem(
+    directory: Path,
+    subject_id: str,
+    modality: str,
+) -> tuple[str, Path | None]:
+    """Check one expected NIfTI binding without touching NIfTI contents."""
+
+    candidates = tuple(
+        directory / f"{subject_id}_{modality}{extension}"
+        for extension in (".nii.gz", ".nii")
+    )
+    existing = tuple(path for path in candidates if path.exists())
+    if not existing:
+        return "missing_file", None
+    if len(existing) > 1:
+        return "duplicate_file", existing[0]
+    path = existing[0]
+    if not path.is_file():
+        return "not_regular_file", path
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return "stat_failed", path
+    if size <= 0:
+        return "empty_file", path
+    return "", path
+
+
+def structural_inventory_point_guided_subjects(
+    root: str | Path,
+    *,
+    require_target: bool = True,
+    require_segmentation: bool = False,
+) -> BraTS21PointGuidedStructuralInventory:
+    """Return pre-split eligibility from filesystem metadata only.
+
+    The required modality files are checked only with ``exists()``,
+    ``is_file()``, and ``stat().st_size``. This intentionally does not call
+    subject discovery, nibabel, NIfTI header inspection, or payload loading.
+    """
+
+    try:
+        source_root = Path(root).resolve(strict=True)
+    except FileNotFoundError as error:
+        raise BraTS21PointGuidedValidationError(f"source root does not exist: {root}") from error
+    if not source_root.is_dir():
+        raise BraTS21PointGuidedValidationError(f"source root is not a directory: {source_root}")
+    if not isinstance(require_target, bool) or not isinstance(require_segmentation, bool):
+        raise TypeError("require_target and require_segmentation must be bool")
+
+    directories = tuple(
+        directory
+        for directory in sorted(item for item in source_root.iterdir() if item.is_dir())
+        if BRATS21_POINT_GUIDED_SUBJECT_PATTERN.fullmatch(directory.name) is not None
+    )
+    if not directories:
+        raise BraTS21PointGuidedValidationError("no BraTS2021 subject directories were found")
+    discovered = tuple(directory.name for directory in directories)
+    eligible: list[str] = []
+    excluded: list[BraTS21PointGuidedStructuralExclusion] = []
+    for directory in directories:
+        subject_id = directory.name
+        for modality in _required_modalities(
+            require_target=require_target,
+            require_segmentation=require_segmentation,
+        ):
+            reason, path = _structural_modality_problem(directory, subject_id, modality)
+            if reason:
+                excluded.append(
+                    BraTS21PointGuidedStructuralExclusion(
+                        subject_id=subject_id,
+                        modality=modality,
+                        reason=reason,
+                        path=path,
+                    )
+                )
+                break
+        else:
+            eligible.append(subject_id)
+    if not eligible:
+        raise BraTS21PointGuidedValidationError("no structurally eligible BraTS21 subjects are available")
+    return BraTS21PointGuidedStructuralInventory(
+        root=source_root,
+        discovered_subject_ids=discovered,
+        eligible_subject_ids=tuple(eligible),
+        excluded_subjects=tuple(excluded),
+        require_target=require_target,
+        require_segmentation=require_segmentation,
+    )
+
+
+def _inventory_file_problem(
+    directory: Path,
+    subject_id: str,
+    *,
+    require_target: bool,
+    require_segmentation: bool,
+) -> tuple[str, str] | None:
+    """Classify missing or duplicate required files without opening payloads."""
+
+    known = (*POINT_GUIDED_MODALITIES, POINT_GUIDED_SEGMENTATION_MODALITY)
+    discovered: dict[str, list[Path]] = {}
+    for nifti_path in _nifti_files(directory):
+        suffix = _suffix(subject_id, nifti_path)
+        if suffix in known:
+            discovered.setdefault(suffix, []).append(nifti_path)
+    required = list(_required_modalities(
+        require_target=require_target,
+        require_segmentation=require_segmentation,
+    ))
+    missing = [modality for modality in required if len(discovered.get(modality, ())) == 0]
+    duplicates = [modality for modality in required if len(discovered.get(modality, ())) > 1]
+    if duplicates:
+        return "DUPLICATE_MODALITY", f"duplicate required modalities: {duplicates}"
+    if missing:
+        return f"MISSING_{missing[0].upper()}", f"missing required modalities: {missing}"
+    return None
+
+
+def _inventory_failure_classification(error: BraTS21PointGuidedValidationError) -> str:
+    detail = str(error).lower()
+    geometry_terms = (
+        "geometry",
+        "affine",
+        "qform",
+        "sform",
+        "spacing",
+        "shape",
+        "singular",
+        "orientation",
+    )
+    return "INVALID_GEOMETRY" if any(term in detail for term in geometry_terms) else "OTHER_INVALID"
+
+
+def inventory_point_guided_subjects(
+    root: str | Path,
+    *,
+    require_target: bool = True,
+    require_segmentation: bool = False,
+    subject_ids: Iterable[str] | None = None,
+) -> BraTS21PointGuidedInventory:
+    """Retain only complete, payload-valid subjects from a partial BraTS root.
+
+    :func:`discover_point_guided_subjects` remains globally fail-closed. This
+    explicit inventory boundary records each excluded directory and validates
+    retained subjects with the same discovery, modality, finite-value,
+    geometry, and segmentation checks used by training. It never exposes
+    source arrays in its result.
+    """
+
+    try:
+        source_root = Path(root).resolve(strict=True)
+    except FileNotFoundError as error:
+        raise BraTS21PointGuidedValidationError(f"source root does not exist: {root}") from error
+    if not source_root.is_dir():
+        raise BraTS21PointGuidedValidationError(f"source root is not a directory: {source_root}")
+    if not isinstance(require_target, bool) or not isinstance(require_segmentation, bool):
+        raise TypeError("require_target and require_segmentation must be bool")
+
+    all_directories = {
+        directory.name: directory
+        for directory in sorted(item for item in source_root.iterdir() if item.is_dir())
+    }
+    if subject_ids is None:
+        directories = tuple(all_directories.values())
+    else:
+        requested = tuple(_validate_subject_id(subject_id) for subject_id in subject_ids)
+        if not requested or len(set(requested)) != len(requested):
+            raise BraTS21PointGuidedValidationError("inventory subject_ids must be non-empty and unique")
+        missing = tuple(subject_id for subject_id in requested if subject_id not in all_directories)
+        if missing:
+            raise BraTS21PointGuidedValidationError(
+                f"inventory subject_ids are missing from root: {list(missing)}"
+            )
+        directories = tuple(all_directories[subject_id] for subject_id in sorted(requested))
+
+    complete: list[BraTS21PointGuidedSubject] = []
+    excluded: list[BraTS21PointGuidedExcludedSubject] = []
+    for directory in directories:
+        subject_id = directory.name
+        if BRATS21_POINT_GUIDED_SUBJECT_PATTERN.fullmatch(subject_id) is None:
+            excluded.append(
+                BraTS21PointGuidedExcludedSubject(
+                    subject_id=subject_id,
+                    classification="OTHER_INVALID",
+                    detail="malformed subject directory name",
+                )
+            )
+            continue
+        file_problem = _inventory_file_problem(
+            directory,
+            subject_id,
+            require_target=require_target,
+            require_segmentation=require_segmentation,
+        )
+        if file_problem is not None:
+            classification, detail = file_problem
+            excluded.append(
+                BraTS21PointGuidedExcludedSubject(
+                    subject_id=subject_id,
+                    classification=classification,
+                    detail=detail,
+                )
+            )
+            continue
+        try:
+            subject = discover_point_guided_subject(directory)
+            load_point_guided_subject(
+                subject,
+                require_target=require_target,
+                require_segmentation=require_segmentation,
+            )
+        except BraTS21PointGuidedValidationError as error:
+            excluded.append(
+                BraTS21PointGuidedExcludedSubject(
+                    subject_id=subject_id,
+                    classification=_inventory_failure_classification(error),
+                    detail=str(error),
+                )
+            )
+        else:
+            complete.append(subject)
+    return BraTS21PointGuidedInventory(
+        root=source_root,
+        complete_subjects=tuple(complete),
+        excluded_subjects=tuple(excluded),
+    )
+
+
 discover_subject = discover_point_guided_subject
 discover_subjects = discover_point_guided_subjects
 
@@ -737,6 +1091,23 @@ class BraTS21PointGuidedSample:
         object.__setattr__(self, "normalization_metadata", MappingProxyType(metadata))
         object.__setattr__(self, "source_paths", MappingProxyType(paths))
 
+    def __reduce__(self):
+        """Serialize immutable mapping views as ordinary mappings for workers."""
+
+        return (
+            type(self),
+            (
+                self.subject_id,
+                self.observations,
+                self.target,
+                self.segmentation,
+                self.brain_mask,
+                self.geometry,
+                dict(self.normalization_metadata),
+                dict(self.source_paths),
+            ),
+        )
+
     @property
     def inputs(self) -> torch.Tensor:
         """Alias for the model-ready ``[3,D,H,W]`` observation tensor."""
@@ -860,6 +1231,16 @@ class PointGuidedBatch:
             raise BraTS21PointGuidedValidationError("normalization_metadata must contain one record per subject")
         object.__setattr__(self, "subject_ids", tuple(str(value) for value in self.subject_ids))
         object.__setattr__(self, "normalization_metadata", tuple(self.normalization_metadata))
+
+    def __reduce__(self):
+        return (
+            type(self),
+            (
+                self.observations, self.target_t1ce, self.segmentation, self.brain_mask,
+                self.spacing_xyz_mm, self.voxel_to_ras_mm, self.subject_ids,
+                tuple(dict(item) for item in self.normalization_metadata),
+            ),
+        )
 
 
 def _normalization_config(value: object | None) -> PointGuidedNormalizationConfig:
@@ -1471,6 +1852,10 @@ __all__ = [
     "BraTS21PointGuidedDataset",
     "BraTS21PointGuidedDependencyError",
     "BraTS21PointGuidedError",
+    "BraTS21PointGuidedExcludedSubject",
+    "BraTS21PointGuidedInventory",
+    "BraTS21PointGuidedStructuralExclusion",
+    "BraTS21PointGuidedStructuralInventory",
     "BraTS21PointGuidedSample",
     "BraTS21PointGuidedSplit",
     "BraTS21PointGuidedSubject",
@@ -1492,7 +1877,10 @@ __all__ = [
     "derive_input_brain_mask",
     "deterministic_subject_split",
     "discover_point_guided_subject",
+    "discover_point_guided_subject_ids",
     "discover_point_guided_subjects",
+    "inventory_point_guided_subjects",
+    "structural_inventory_point_guided_subjects",
     "discover_subject",
     "discover_subjects",
     "load_point_guided_subject",

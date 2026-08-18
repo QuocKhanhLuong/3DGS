@@ -9,6 +9,7 @@ that for the training-only semantic auxiliary term.
 from __future__ import annotations
 
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import csv
@@ -60,7 +61,8 @@ from ..data.brats21_point_guided import (
     PointGuidedBatch,
     collate_point_guided_samples,
     deterministic_subject_split,
-    discover_point_guided_subjects,
+    inventory_point_guided_subjects,
+    structural_inventory_point_guided_subjects,
 )
 
 
@@ -81,6 +83,20 @@ _STAT_KEYS = (
     "predicted_reward",
     "utility",
     "update_magnitude",
+    "fraction_K0",
+    "fraction_positive_utility",
+    "candidate_reward_mean",
+    "candidate_reward_max",
+    "r_star_mean",
+    "r_star_max",
+    "r_star_positive_fraction",
+    "travel_cost_mean",
+    "overlap_cost_mean",
+    "step_cost",
+    "utility_before_cost_mean",
+    "utility_after_cost_mean",
+    "utility_after_cost_max",
+    "grad_norm",
     "dice_normal",
     "dice_edema",
     "dice_core",
@@ -279,6 +295,7 @@ class _TrainingContextModule(nn.Module):
         spacing_mm: tuple[float, float, float],
         voxel_to_ras_mm: tuple[tuple[float, ...], ...],
         chunk_size: int,
+        stage_timer: Any | None = None,
     ) -> tuple[object, Tensor]:
         context = self.model.forward_training_context(
             observations,
@@ -286,6 +303,7 @@ class _TrainingContextModule(nn.Module):
             spacing_mm=spacing_mm,
             voxel_to_ras_mm=voxel_to_ras_mm,
             chunk_size=chunk_size,
+            stage_timer=stage_timer,
         )
         # Return a tensor in addition to the typed context so DDP can discover
         # the autograd graph even though the context is a frozen dataclass.
@@ -313,6 +331,37 @@ def _scaler(context: DistributedContext, settings: PointGuidedTrainingSettings) 
     if not enabled:
         return None
     return torch.cuda.amp.GradScaler(enabled=True)
+
+
+def _assert_finite_optimizer_gradients(optimizer: Optimizer) -> None:
+    """Fail before an optimizer can absorb a non-finite gradient state."""
+
+    for group_index, group in enumerate(optimizer.param_groups):
+        for parameter_index, parameter in enumerate(group["params"]):
+            gradient = parameter.grad
+            if gradient is not None and not bool(torch.isfinite(gradient).all()):
+                raise FloatingPointError(
+                    "non-finite gradient before optimizer step "
+                    f"(parameter_group={group_index}, parameter_index={parameter_index})"
+                )
+
+
+def _assert_finite_optimizer_state_and_parameters(optimizer: Optimizer) -> None:
+    """Fail after a step if parameters or Adam state became non-finite."""
+
+    for group_index, group in enumerate(optimizer.param_groups):
+        for parameter_index, parameter in enumerate(group["params"]):
+            if not bool(torch.isfinite(parameter).all()):
+                raise FloatingPointError(
+                    "non-finite parameter after optimizer step "
+                    f"(parameter_group={group_index}, parameter_index={parameter_index})"
+                )
+            for state_name, value in optimizer.state.get(parameter, {}).items():
+                if isinstance(value, Tensor) and not bool(torch.isfinite(value).all()):
+                    raise FloatingPointError(
+                        "non-finite optimizer state after optimizer step "
+                        f"(parameter_group={group_index}, parameter_index={parameter_index}, state={state_name})"
+                    )
 
 
 def _cuda_memory(context: DistributedContext) -> dict[str, int]:
@@ -347,17 +396,76 @@ def _prepare_batch(
     return observations, brain_mask, spacing, affine
 
 
-def _route_stats(context: object, points: Tensor) -> dict[str, Any]:
+def _route_stats(
+    context: object,
+    points: Tensor,
+    objective: object,
+    *,
+    step_cost: float,
+) -> dict[str, Any]:
+    """Return detached route and post-inference reward-scale diagnostics.
+
+    ``R_star`` is read only from the already-built Gate-E objective.  It is
+    logged after inference and cannot enter the target-free route decision.
+    """
+
     route = getattr(context, "trajectory")
     batch = points.shape[0]
+    candidate_count = route.candidate_evaluations.to(dtype=points.dtype)
+    candidate_count_safe = candidate_count.clamp_min(1.0)
+
+    def _candidate_mean(name: str) -> Tensor:
+        return (getattr(route, name) / candidate_count_safe).mean()
+
+    seen = route.candidate_evaluations > 0
+    def _candidate_max(name: str) -> Tensor:
+        values = getattr(route, name)
+        return torch.where(seen, values, torch.full_like(values, -torch.inf)).amax().nan_to_num(0.0, 0.0, 0.0)
+
+    r_star_sum = points.new_zeros(())
+    r_star_count = torch.zeros((), dtype=torch.long, device=points.device)
+    r_star_positive_count = torch.zeros((), dtype=torch.long, device=points.device)
+    r_star_max = torch.full((), -torch.inf, dtype=points.dtype, device=points.device)
+    for result in getattr(objective, "reward_supervision"):
+        valid = result.valid_mask
+        target = result.reward_target.detach()
+        r_star_sum = r_star_sum + torch.where(valid, target, torch.zeros_like(target)).sum()
+        r_star_count = r_star_count + valid.sum(dtype=torch.long)
+        r_star_positive_count = r_star_positive_count + ((target > 0.0) & valid).sum(dtype=torch.long)
+        r_star_max = torch.maximum(
+            r_star_max,
+            torch.where(valid, target, torch.full_like(target, -torch.inf)).amax(),
+        )
+    r_star_count_float = r_star_count.to(dtype=points.dtype)
+    r_star_valid = r_star_count > 0
+    r_star_mean = torch.where(r_star_valid, r_star_sum / r_star_count_float.clamp_min(1.0), points.new_zeros(()))
+    r_star_max = torch.where(r_star_valid, r_star_max, points.new_zeros(()))
+    r_star_positive_fraction = torch.where(
+        r_star_valid,
+        r_star_positive_count.to(dtype=points.dtype) / r_star_count_float.clamp_min(1.0),
+        points.new_zeros(()),
+    )
     if not route.steps:
         zero = torch.zeros(batch, dtype=points.dtype, device=points.device)
         return {
-            "k_used": 0.0,
-            "path_length_mm": 0.0,
-            "predicted_reward": 0.0,
-            "utility": 0.0,
-            "update_magnitude": 0.0,
+            "k_used": zero.mean(),
+            "path_length_mm": zero.mean(),
+            "predicted_reward": zero.mean(),
+            "utility": zero.mean(),
+            "update_magnitude": zero.mean(),
+            "fraction_K0": torch.ones_like(zero).mean(),
+            "fraction_positive_utility": route.positive_utility_candidate_count.to(dtype=points.dtype).sum() / candidate_count.sum().clamp_min(1.0),
+            "candidate_reward_mean": _candidate_mean("candidate_reward_sum"),
+            "candidate_reward_max": _candidate_max("candidate_reward_max"),
+            "r_star_mean": r_star_mean,
+            "r_star_max": r_star_max,
+            "r_star_positive_fraction": r_star_positive_fraction,
+            "travel_cost_mean": _candidate_mean("candidate_travel_cost_sum"),
+            "overlap_cost_mean": _candidate_mean("candidate_overlap_cost_sum"),
+            "step_cost": points.new_tensor(step_cost),
+            "utility_before_cost_mean": _candidate_mean("candidate_reward_sum"),
+            "utility_after_cost_mean": _candidate_mean("candidate_utility_sum"),
+            "utility_after_cost_max": _candidate_max("candidate_utility_max"),
             "stop_reasons": Counter(route.stop_reasons),
         }
     indices = route.selected_indices
@@ -378,69 +486,95 @@ def _route_stats(context: object, points: Tensor) -> dict[str, Any]:
     updates = torch.stack(tuple(step.selected_update_norm for step in route.steps), dim=1)
     count = active.sum(dim=1).clamp_min(1).to(dtype=points.dtype)
     return {
-        "k_used": float(k_used.mean().detach().cpu()),
-        "path_length_mm": float(path.mean().detach().cpu()),
-        "predicted_reward": float((rewards * active.to(rewards.dtype)).sum(dim=1).div(count).mean().detach().cpu()),
-        "utility": float((utilities * active.to(utilities.dtype)).sum(dim=1).div(count).mean().detach().cpu()),
-        "update_magnitude": float((updates * active.to(updates.dtype)).sum(dim=1).div(count).mean().detach().cpu()),
+        "k_used": k_used.mean(),
+        "path_length_mm": path.mean(),
+        "predicted_reward": (rewards * active.to(rewards.dtype)).sum(dim=1).div(count).mean(),
+        "utility": (utilities * active.to(utilities.dtype)).sum(dim=1).div(count).mean(),
+        "update_magnitude": (updates * active.to(updates.dtype)).sum(dim=1).div(count).mean(),
+        "fraction_K0": (k_used == 0).to(dtype=points.dtype).mean(),
+        "fraction_positive_utility": route.positive_utility_candidate_count.to(dtype=points.dtype).sum() / candidate_count.sum().clamp_min(1.0),
+        "candidate_reward_mean": _candidate_mean("candidate_reward_sum"),
+        "candidate_reward_max": _candidate_max("candidate_reward_max"),
+        "r_star_mean": r_star_mean,
+        "r_star_max": r_star_max,
+        "r_star_positive_fraction": r_star_positive_fraction,
+        "travel_cost_mean": _candidate_mean("candidate_travel_cost_sum"),
+        "overlap_cost_mean": _candidate_mean("candidate_overlap_cost_sum"),
+        "step_cost": points.new_tensor(step_cost),
+        "utility_before_cost_mean": _candidate_mean("candidate_reward_sum"),
+        "utility_after_cost_mean": _candidate_mean("candidate_utility_sum"),
+        "utility_after_cost_max": _candidate_max("candidate_utility_max"),
         "stop_reasons": Counter(route.stop_reasons),
     }
 
 
 def _record_stats(
-    accumulator: dict[str, float],
+    accumulator: dict[str, Any],
     *,
     objective: object,
     total_loss: Tensor,
     semantic_loss: Tensor,
-    reconstruction_metrics: ReconstructionMetrics,
+    reconstruction_metrics: ReconstructionMetrics | None,
     semantic_metrics: SemanticDiceMetrics | None,
     route_stats: Mapping[str, Any],
     batch_size: int,
+    gradient_norm: Tensor | None,
 ) -> None:
-    count = float(batch_size)
-    values = {
-        "total_loss": float(total_loss.detach().cpu()),
-        "reconstruction_loss": float(objective.reconstruction.total.detach().cpu()),
-        "semantic_loss": float(semantic_loss.detach().cpu()),
-        "reward_loss": float(objective.reward.detach().cpu()),
-        "local_loss": float(objective.local.detach().cpu()),
-        "monotonic_loss": float(objective.monotonic.detach().cpu()),
-        "update_regularization": float(objective.delta.detach().cpu()),
-        "MAE": reconstruction_metrics.mae,
-        "PSNR": reconstruction_metrics.psnr,
-        "SSIM": reconstruction_metrics.ssim,
-        "k_used": float(route_stats["k_used"]),
-        "path_length_mm": float(route_stats["path_length_mm"]),
-        "predicted_reward": float(route_stats["predicted_reward"]),
-        "utility": float(route_stats["utility"]),
-        "update_magnitude": float(route_stats["update_magnitude"]),
-    }
-    for name, value in values.items():
-        accumulator[name] = accumulator.get(name, 0.0) + value * count
-    accumulator["examples"] = accumulator.get("examples", 0.0) + count
-    if semantic_metrics is not None:
-        for name, value in (
-            ("dice_normal", semantic_metrics.dice_normal),
-            ("dice_edema", semantic_metrics.dice_edema),
-            ("dice_core", semantic_metrics.dice_core),
-        ):
-            accumulator[name] = accumulator.get(name, 0.0) + value * count
+    device_values = accumulator["numeric"]
+    metric_values = (0.0, 0.0, 0.0) if reconstruction_metrics is None else (
+        reconstruction_metrics.mae,
+        reconstruction_metrics.psnr,
+        reconstruction_metrics.ssim,
+    )
+    values = (
+        total_loss.detach(),
+        objective.reconstruction.total.detach(),
+        semantic_loss.detach(),
+        objective.reward.detach(),
+        objective.local.detach(),
+        objective.monotonic.detach(),
+        objective.delta.detach(),
+        *metric_values,
+        route_stats["k_used"].detach(),
+        route_stats["path_length_mm"].detach(),
+        route_stats["predicted_reward"].detach(),
+        route_stats["utility"].detach(),
+        route_stats["update_magnitude"].detach(),
+        route_stats["fraction_K0"].detach(),
+        route_stats["fraction_positive_utility"].detach(),
+        route_stats["candidate_reward_mean"].detach(),
+        route_stats["candidate_reward_max"].detach(),
+        route_stats["r_star_mean"].detach(),
+        route_stats["r_star_max"].detach(),
+        route_stats["r_star_positive_fraction"].detach(),
+        route_stats["travel_cost_mean"].detach(),
+        route_stats["overlap_cost_mean"].detach(),
+        route_stats["step_cost"].detach(),
+        route_stats["utility_before_cost_mean"].detach(),
+        route_stats["utility_after_cost_mean"].detach(),
+        route_stats["utility_after_cost_max"].detach(),
+        total_loss.new_zeros(()) if gradient_norm is None else gradient_norm.detach(),
+        *(
+            (0.0, 0.0, 0.0) if semantic_metrics is None else (
+                semantic_metrics.dice_normal,
+                semantic_metrics.dice_edema,
+                semantic_metrics.dice_core,
+            )
+        ),
+        float(batch_size),
+    )
+    stacked = torch.stack(tuple(torch.as_tensor(value, device=device_values.device, dtype=device_values.dtype) for value in values))
+    stacked[:-1].mul_(float(batch_size))
+    device_values.add_(stacked)
     reasons = accumulator.setdefault("stop_reasons", Counter())
     reasons.update(route_stats["stop_reasons"])
 
 
 def _reduce_stats(accumulator: dict[str, Any], context: DistributedContext) -> dict[str, Any]:
     numeric_keys = _STAT_KEYS
+    values = accumulator["numeric"]
     if context.is_distributed:
-        values = torch.tensor(
-            [float(accumulator.get(key, 0.0)) for key in numeric_keys],
-            dtype=torch.float64,
-            device=context.device,
-        )
         torch.distributed.all_reduce(values, op=torch.distributed.ReduceOp.SUM)
-        for key, value in zip(numeric_keys, values.tolist()):
-            accumulator[key] = float(value)
         stop_values = torch.tensor(
             [float(accumulator.get("stop_reasons", Counter()).get(reason, 0)) for reason in _STOP_REASONS],
             dtype=torch.float64,
@@ -448,9 +582,11 @@ def _reduce_stats(accumulator: dict[str, Any], context: DistributedContext) -> d
         )
         torch.distributed.all_reduce(stop_values, op=torch.distributed.ReduceOp.SUM)
         accumulator["stop_reasons"] = Counter({reason: int(value) for reason, value in zip(_STOP_REASONS, stop_values.tolist())})
-    count = max(float(accumulator.get("examples", 0.0)), 1.0)
+    numeric_values = values.detach().cpu().tolist()
+    numeric = dict(zip(numeric_keys, numeric_values))
+    count = max(float(numeric["examples"]), 1.0)
     result = {
-        key: float(accumulator.get(key, 0.0)) / count
+        key: float(numeric[key]) / count
         for key in numeric_keys
         if key != "examples"
     }
@@ -459,8 +595,61 @@ def _reduce_stats(accumulator: dict[str, Any], context: DistributedContext) -> d
     return result
 
 
-def _empty_stats() -> dict[str, Any]:
-    return {"stop_reasons": Counter()}
+def _empty_stats(device: torch.device) -> dict[str, Any]:
+    return {
+        "numeric": torch.zeros(len(_STAT_KEYS), dtype=torch.float64, device=device),
+        "stop_reasons": Counter(),
+    }
+
+
+class _StageTiming:
+    """Accumulate named CPU/CUDA stage durations with one epoch-end sync."""
+
+    def __init__(self, device: torch.device) -> None:
+        self.device = device
+        self.cpu_seconds: Counter[str] = Counter()
+        self.cuda_events: dict[str, list[tuple[torch.cuda.Event, torch.cuda.Event]]] = {}
+
+    def add_cpu_seconds(self, name: str, seconds: float) -> None:
+        self.cpu_seconds[name] += max(float(seconds), 0.0)
+
+    @contextmanager
+    def measure(self, name: str):
+        if self.device.type != "cuda":
+            started = time.perf_counter()
+            try:
+                yield
+            finally:
+                self.add_cpu_seconds(name, time.perf_counter() - started)
+            return
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        try:
+            yield
+        finally:
+            end.record()
+            self.cuda_events.setdefault(name, []).append((start, end))
+
+    def as_dict(self) -> dict[str, float]:
+        values = dict(self.cpu_seconds)
+        if self.cuda_events:
+            torch.cuda.synchronize(self.device)
+            for name, events in self.cuda_events.items():
+                values[name] = values.get(name, 0.0) + sum(
+                    start.elapsed_time(end) / 1000.0
+                    for start, end in events
+                )
+        return {f"timing_{name}_seconds": float(values.get(name, 0.0)) for name in (
+            "data_wait",
+            "frontend",
+            "trajectory",
+            "decoder",
+            "gate_e_loss",
+            "diagnostic_metrics",
+            "backward",
+            "optimizer_step",
+        )}
 
 
 class PointGuidedTrainer:
@@ -484,7 +673,13 @@ class PointGuidedTrainer:
         self.train_context_module: nn.Module | None = None
         self.eval_context_module: nn.Module | None = None
 
-    def _forward_objective(self, batch: PointGuidedBatch, *, training: bool) -> tuple[object, Tensor, Tensor, ReconstructionMetrics, SemanticDiceMetrics | None, dict[str, Any]]:
+    def _forward_objective(
+        self,
+        batch: PointGuidedBatch,
+        *,
+        training: bool,
+        stage_timer: _StageTiming,
+    ) -> tuple[object, Tensor, Tensor, tuple[Tensor, Tensor, Tensor] | None, SemanticDiceMetrics | None, dict[str, Any]]:
         observations, brain_mask, spacing, affine = _prepare_batch(batch, self.context)
         # This call is intentionally target-free.  The target is the next
         # local variable passed only to compute_training_objective below.
@@ -494,6 +689,7 @@ class PointGuidedTrainer:
             spacing,
             affine,
             self.settings.decoder_chunk_size,
+            stage_timer=stage_timer,
         )[0]
         # T1ce is fetched and introduced only after target-free context
         # construction; it is never part of the wrapped model call.
@@ -503,31 +699,33 @@ class PointGuidedTrainer:
         target = raw_target.to(self.context.device, non_blocking=True)
         raw_segmentation = _field(batch, "segmentation")
         segmentation = None if raw_segmentation is None else raw_segmentation.to(self.context.device, non_blocking=True)
-        objective = self.model.compute_training_objective(
-            context,
-            target,
-            config=self.supervision,
-            valid_mask=brain_mask,
-            generator=torch.Generator(device=observations.device).manual_seed(self.settings.seed + self.global_step),
-        )
-        semantic_loss = target.new_zeros(())
-        semantic_metrics = None
-        if segmentation is not None:
-            # Segmentation enters only after the target-after-inference
-            # objective has been constructed and never enters routing.
-            semantic_target = build_coarse_semantic_target(
-                segmentation,
-                brain_mask,
-                ignore_index=255,
+        with stage_timer.measure("gate_e_loss"):
+            objective = self.model.compute_training_objective(
+                context,
+                target,
+                config=self.supervision,
+                valid_mask=brain_mask,
+                generator=torch.Generator(device=observations.device).manual_seed(self.settings.seed + self.global_step),
             )
-            semantic_result = compute_semantic_grounding_loss(
-                context.frontend.s_coarse.clamp_min(torch.finfo(context.frontend.s_coarse.dtype).tiny).log(),
-                semantic_target,
-                ignore_index=255,
-                class_weights=self.settings.semantic_class_weights,
-            )
-            semantic_loss = semantic_result.loss
-            semantic_metrics = semantic_dice(context.frontend.s_coarse.detach(), semantic_target.detach(), ignore_index=255)
+            semantic_loss = target.new_zeros(())
+            semantic_metrics = None
+            if segmentation is not None:
+                # Segmentation enters only after the target-after-inference
+                # objective has been constructed and never enters routing.
+                semantic_target = build_coarse_semantic_target(
+                    segmentation,
+                    brain_mask,
+                    ignore_index=255,
+                )
+                semantic_result = compute_semantic_grounding_loss(
+                    context.frontend.s_coarse.clamp_min(torch.finfo(context.frontend.s_coarse.dtype).tiny).log(),
+                    semantic_target,
+                    ignore_index=255,
+                    class_weights=self.settings.semantic_class_weights,
+                )
+                semantic_loss = semantic_result.loss
+                if not training:
+                    semantic_metrics = semantic_dice(context.frontend.s_coarse.detach(), semantic_target.detach(), ignore_index=255)
         total = objective.total + self.settings.lambda_semantic * semantic_loss
         if self.context.is_distributed:
             # Every DDP parameter must participate in the reducer graph even
@@ -539,15 +737,22 @@ class PointGuidedTrainer:
                 for parameter in self.model.parameters()
                 if parameter.requires_grad
             )
-        metrics = compute_reconstruction_metrics(
+        # SSIM diagnostics allocate another full-volume window pyramid. During
+        # training, defer that target-after-inference reporting computation
+        # until after backward has released the Gate-E graph. The metric inputs
+        # are detached views, so this changes neither the loss nor gradients.
+        metric_inputs = None if training else (
             context.reconstruction.prediction.detach(),
             target.detach(),
-            brain_mask,
-            data_range=self.supervision.ssim_data_range,
-            intensity_space=self.settings.normalization_space,
+            brain_mask.detach(),
         )
-        route_stats = _route_stats(context, context.frontend.refined_points_ras_mm)
-        return objective, total, semantic_loss, metrics, semantic_metrics, route_stats
+        route_stats = _route_stats(
+            context,
+            context.frontend.refined_points_ras_mm,
+            objective,
+            step_cost=self.model.trajectory.config.lambda_step,
+        )
+        return objective, total, semantic_loss, metric_inputs, semantic_metrics, route_stats
 
     def _context_module(self, training: bool) -> nn.Module:
         module = self.train_context_module if training else self.eval_context_module
@@ -562,38 +767,65 @@ class PointGuidedTrainer:
         self._context_module(training).train(training)
         if training:
             self.optimizer.zero_grad(set_to_none=True)
-        accumulator = _empty_stats()
+        accumulator = _empty_stats(self.context.device)
+        stage_timing = _StageTiming(self.context.device)
         batch_count = 0
-        for batch_index, batch in enumerate(loader):
+        iterator = iter(loader)
+        batch_index = 0
+        while True:
+            data_wait_started = time.perf_counter()
+            try:
+                batch = next(iterator)
+            except StopIteration:
+                break
+            stage_timing.add_cpu_seconds("data_wait", time.perf_counter() - data_wait_started)
             batch_count += 1
+            gradient_norm: Tensor | None = None
             try:
                 inference_context = torch.no_grad() if not training else torch.enable_grad()
                 with inference_context, _autocast_context(self.context, self.settings):
-                    objective, total_loss, semantic_loss, reconstruction_metrics, semantic_metrics, route_stats = self._forward_objective(
+                    objective, total_loss, semantic_loss, metric_inputs, semantic_metrics, route_stats = self._forward_objective(
                         batch,
                         training=training,
+                        stage_timer=stage_timing,
                     )
                     loss = total_loss
                     if training:
                         loss = loss / float(self.settings.gradient_accumulation)
                 if training:
-                    if self.scaler is not None:
-                        self.scaler.scale(loss).backward()
-                    else:
-                        loss.backward()
+                    with stage_timing.measure("backward"):
+                        if self.scaler is not None:
+                            self.scaler.scale(loss).backward()
+                        else:
+                            loss.backward()
                     should_step = (batch_index + 1) % self.settings.gradient_accumulation == 0
                     if should_step:
-                        if self.scaler is not None:
-                            self.scaler.unscale_(self.optimizer)
-                        if self.settings.gradient_clip is not None:
-                            torch.nn.utils.clip_grad_norm_(self.optimizer.param_groups[0]["params"], self.settings.gradient_clip)
-                        if self.scaler is not None:
-                            self.scaler.step(self.optimizer)
-                            self.scaler.update()
-                        else:
-                            self.optimizer.step()
-                        self.optimizer.zero_grad(set_to_none=True)
-                        self.global_step += 1
+                        with stage_timing.measure("optimizer_step"):
+                            if self.scaler is not None:
+                                self.scaler.unscale_(self.optimizer)
+                            _assert_finite_optimizer_gradients(self.optimizer)
+                            if self.settings.gradient_clip is not None:
+                                gradient_norm = torch.nn.utils.clip_grad_norm_(
+                                    self.optimizer.param_groups[0]["params"],
+                                    self.settings.gradient_clip,
+                                    error_if_nonfinite=True,
+                                )
+                            if self.scaler is not None:
+                                self.scaler.step(self.optimizer)
+                                self.scaler.update()
+                            else:
+                                self.optimizer.step()
+                            _assert_finite_optimizer_state_and_parameters(self.optimizer)
+                            self.optimizer.zero_grad(set_to_none=True)
+                            self.global_step += 1
+                reconstruction_metrics = None
+                if metric_inputs is not None:
+                    with torch.no_grad(), stage_timing.measure("diagnostic_metrics"):
+                        reconstruction_metrics = compute_reconstruction_metrics(
+                            *metric_inputs,
+                            data_range=self.supervision.ssim_data_range,
+                            intensity_space=self.settings.normalization_space,
+                        )
                 _record_stats(
                     accumulator,
                     objective=objective,
@@ -603,6 +835,7 @@ class PointGuidedTrainer:
                     semantic_metrics=semantic_metrics,
                     route_stats=route_stats,
                     batch_size=int(_field(batch, "observations").shape[0]),
+                    gradient_norm=gradient_norm,
                 )
             except RuntimeError as error:
                 if "out of memory" in str(error).lower() and self.context.device.type == "cuda":
@@ -612,19 +845,27 @@ class PointGuidedTrainer:
                         "scientific settings were not changed automatically. DDP does not pool GPU memory."
                     ) from error
                 raise
+            batch_index += 1
         if training and batch_count % self.settings.gradient_accumulation != 0:
-            if self.scaler is not None:
-                self.scaler.unscale_(self.optimizer)
-            if self.settings.gradient_clip is not None:
-                torch.nn.utils.clip_grad_norm_(self.optimizer.param_groups[0]["params"], self.settings.gradient_clip)
-            if self.scaler is not None:
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-            else:
-                self.optimizer.step()
-            self.optimizer.zero_grad(set_to_none=True)
-            self.global_step += 1
-        return _reduce_stats(accumulator, self.context)
+            with stage_timing.measure("optimizer_step"):
+                if self.scaler is not None:
+                    self.scaler.unscale_(self.optimizer)
+                _assert_finite_optimizer_gradients(self.optimizer)
+                if self.settings.gradient_clip is not None:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.optimizer.param_groups[0]["params"],
+                        self.settings.gradient_clip,
+                        error_if_nonfinite=True,
+                    )
+                if self.scaler is not None:
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    self.optimizer.step()
+                _assert_finite_optimizer_state_and_parameters(self.optimizer)
+                self.optimizer.zero_grad(set_to_none=True)
+                self.global_step += 1
+        return _reduce_stats(accumulator, self.context) | stage_timing.as_dict()
 
     def bind_context_modules(self, train_module: nn.Module, eval_module: nn.Module | None = None) -> None:
         """Bind separate training and validation context modules.
@@ -749,6 +990,7 @@ def build_model_from_config(raw: Mapping[str, Any], overrides: Mapping[str, Any]
         "gradient_clip",
         "learning_rate",
         "weight_decay",
+        "epochs",
         "semantic_class_weights",
     ):
         if key in overrides and overrides[key] is not None:
@@ -880,6 +1122,58 @@ def _resolve_split(
     return payload, split_object.split_hash
 
 
+def _prepare_structurally_eligible_split(
+    *,
+    data_root: str | Path,
+    seed: int,
+    split_fractions: Sequence[float],
+    split_file: str | Path | None,
+    max_train_subjects: int | None,
+    max_val_subjects: int | None,
+    max_test_subjects: int | None,
+    require_segmentation: bool,
+    overfit: bool,
+) -> tuple[Any, dict[str, Any], str, tuple[str, ...], Any]:
+    """Build a split from filesystem-eligible IDs, then validate active payloads.
+
+    The structural inventory is cohort-wide but target-free.  NIfTI payloads
+    are opened only after the split, and only for train plus validation; test
+    payloads remain unopened at this F4 preflight/training boundary.
+    """
+
+    structural_inventory = structural_inventory_point_guided_subjects(
+        data_root,
+        require_target=True,
+        require_segmentation=require_segmentation,
+    )
+    split, split_hash = _resolve_split(
+        structural_inventory.eligible_subject_ids,
+        seed=seed,
+        split_fractions=split_fractions,
+        split_file=split_file,
+        max_train_subjects=max_train_subjects,
+        max_val_subjects=max_val_subjects,
+        max_test_subjects=max_test_subjects,
+    )
+    train_ids = tuple(split["train"])
+    val_ids = train_ids if overfit else tuple(split["val"])
+    active_subject_ids = tuple(dict.fromkeys((*train_ids, *val_ids)))
+    active_payload_inventory = inventory_point_guided_subjects(
+        data_root,
+        require_target=True,
+        require_segmentation=require_segmentation,
+        subject_ids=active_subject_ids,
+    )
+    complete_ids = {subject.subject_id for subject in active_payload_inventory.complete_subjects}
+    if complete_ids != set(active_subject_ids):
+        invalid_ids = sorted(set(active_subject_ids).difference(complete_ids))
+        raise ValueError(
+            "train/validation split contains payload-invalid subjects; "
+            f"repair the selected subjects: {invalid_ids}"
+        )
+    return structural_inventory, split, split_hash, active_subject_ids, active_payload_inventory
+
+
 def _write_epoch_logs(run_dir: Path, record: Mapping[str, Any], *, header_written: bool) -> None:
     with (run_dir / "train.jsonl").open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
@@ -971,16 +1265,27 @@ def run_training(
             normalization_space=normalization_space_from_config(normalization_config),
         )
         model.to(context.device)
-        subjects = discover_point_guided_subjects(data_root)
-        split, split_hash = _resolve_split(
-            tuple(subject.subject_id for subject in subjects),
+        data_config = raw_config.get("data", {})
+        require_segmentation = bool(data_config.get("require_segmentation", True))
+        (
+            structural_inventory,
+            split,
+            split_hash,
+            active_subject_ids,
+            inventory,
+        ) = _prepare_structurally_eligible_split(
+            data_root=data_root,
             seed=int(raw_config.get("data", {}).get("split_seed", 20260813)),
             split_fractions=tuple(raw_config.get("data", {}).get("split_fractions", (0.8, 0.1, 0.1))),
             split_file=split_file,
             max_train_subjects=max_train_subjects,
             max_val_subjects=max_val_subjects,
             max_test_subjects=max_test_subjects,
+            require_segmentation=require_segmentation,
+            overfit=overfit,
         )
+        train_ids = tuple(split["train"])
+        val_ids = train_ids if overfit else tuple(split["val"])
         root = Path(output_root)
         if resume is not None:
             run_dir = Path(resume).resolve().parent.parent
@@ -1012,6 +1317,7 @@ def run_training(
                 "gradient_clip",
                 "learning_rate",
                 "weight_decay",
+                "epochs",
                 "semantic_class_weights",
             ):
                 if key in overrides:
@@ -1026,6 +1332,21 @@ def run_training(
                 },
             )
             _atomic_json(run_dir / "split.json", split)
+            _atomic_json(run_dir / "structural_inventory.json", structural_inventory.to_dict())
+            active_payload_payload = inventory.to_dict() | {
+                "requested_subject_ids": list(active_subject_ids),
+                "scope": "train_and_validation_only",
+                "test_payload_validation": "not_performed",
+            }
+            _atomic_json(run_dir / "active_payload_inventory.json", active_payload_payload)
+            _atomic_json(
+                run_dir / "subject_inventory.json",
+                {
+                    "active_payload_inventory": active_payload_payload,
+                    "structural_inventory": structural_inventory.to_dict(),
+                    "test_payload_validation": "not_performed",
+                },
+            )
             _atomic_json(run_dir / "environment.json", _environment(context, model, settings))
         if context.is_distributed:
             torch.distributed.barrier()
@@ -1070,9 +1391,6 @@ def run_training(
             if context.is_distributed:
                 torch.distributed.barrier()
 
-        train_ids = tuple(split["train"])
-        val_ids = train_ids if overfit else tuple(split["val"])
-        require_segmentation = bool(data_config.get("require_segmentation", True))
         train_dataset = BraTS21PointGuidedDataset(
             data_root,
             subject_ids=train_ids,
@@ -1112,24 +1430,35 @@ def run_training(
             if isinstance(val_sampler, DistributedSampler):
                 val_sampler.set_epoch(epoch)
             started = time.perf_counter()
+            train_started = time.perf_counter()
             train_stats = trainer.run_epoch(train_loader, training=True)
+            train_seconds = time.perf_counter() - train_started
+            validation_started = time.perf_counter()
             val_stats = trainer.run_epoch(val_loader, training=False)
+            validation_seconds = time.perf_counter() - validation_started
             epoch_seconds = time.perf_counter() - started
             row: dict[str, Any] = {
                 "epoch": epoch,
                 "global_step": trainer.global_step,
                 "train/total_loss": train_stats.get("total_loss", math.nan),
                 "train/reconstruction_loss": train_stats.get("reconstruction_loss", math.nan),
+                "train/l_rec": train_stats.get("reconstruction_loss", math.nan),
                 "train/semantic_loss": train_stats.get("semantic_loss", math.nan),
+                "train/grad_norm": train_stats.get("grad_norm", math.nan),
+                "train/lr": float(optimizer.param_groups[0]["lr"]),
                 "train/reward_loss": train_stats.get("reward_loss", math.nan),
                 "train/local_loss": train_stats.get("local_loss", math.nan),
                 "train/monotonic_loss": train_stats.get("monotonic_loss", math.nan),
                 "train/update_regularization": train_stats.get("update_regularization", math.nan),
                 "val/total_loss": val_stats.get("total_loss", math.nan),
                 "val/reconstruction_loss": val_stats.get("reconstruction_loss", math.nan),
+                "val/l_rec": val_stats.get("reconstruction_loss", math.nan),
                 "val/MAE": val_stats.get("MAE", math.nan),
                 "val/PSNR": val_stats.get("PSNR", math.nan),
                 "val/SSIM": val_stats.get("SSIM", math.nan),
+                "val/mae": val_stats.get("MAE", math.nan),
+                "val/psnr": val_stats.get("PSNR", math.nan),
+                "val/ssim": val_stats.get("SSIM", math.nan),
                 "val/dice_normal": val_stats.get("dice_normal", math.nan),
                 "val/dice_edema": val_stats.get("dice_edema", math.nan),
                 "val/dice_core": val_stats.get("dice_core", math.nan),
@@ -1138,13 +1467,67 @@ def run_training(
                 "trajectory/mean_predicted_reward": val_stats.get("predicted_reward", math.nan),
                 "trajectory/mean_utility": val_stats.get("utility", math.nan),
                 "trajectory/mean_update_magnitude": val_stats.get("update_magnitude", math.nan),
+                "trajectory/k_used": val_stats.get("k_used", math.nan),
+                "trajectory/path_length_mm": val_stats.get("path_length_mm", math.nan),
+                "trajectory/reward": val_stats.get("predicted_reward", math.nan),
+                "trajectory/utility": val_stats.get("utility", math.nan),
+                "trajectory/update_magnitude": val_stats.get("update_magnitude", math.nan),
+                "trajectory/fraction_K0": val_stats.get("fraction_K0", math.nan),
+                "trajectory/fraction_positive_utility": val_stats.get("fraction_positive_utility", math.nan),
+                "trajectory/predicted_reward_mean": val_stats.get("candidate_reward_mean", math.nan),
+                "trajectory/predicted_reward_max": val_stats.get("candidate_reward_max", math.nan),
+                "trajectory/R_star_mean": val_stats.get("r_star_mean", math.nan),
+                "trajectory/R_star_max": val_stats.get("r_star_max", math.nan),
+                "trajectory/R_star_positive_fraction": val_stats.get("r_star_positive_fraction", math.nan),
+                "trajectory/travel_cost_mean": val_stats.get("travel_cost_mean", math.nan),
+                "trajectory/overlap_cost_mean": val_stats.get("overlap_cost_mean", math.nan),
+                "trajectory/step_cost": val_stats.get("step_cost", math.nan),
+                "trajectory/utility_before_cost_mean": val_stats.get("utility_before_cost_mean", math.nan),
+                "trajectory/utility_after_cost_mean": val_stats.get("utility_after_cost_mean", math.nan),
+                "trajectory/utility_after_cost_max": val_stats.get("utility_after_cost_max", math.nan),
                 "trajectory/stop_reason_histogram": json.dumps(val_stats.get("stop_reasons", {}), sort_keys=True),
                 "system/epoch_seconds": epoch_seconds,
+                "runtime/train_seconds": train_seconds,
+                "runtime/validation_seconds": validation_seconds,
+                "runtime/step_seconds": train_seconds / max(float(train_stats.get("examples", 0.0)), 1.0),
+                "runtime/epoch_seconds": epoch_seconds,
                 "system/gpu_allocated": _cuda_memory(context)["allocated"],
                 "system/gpu_reserved": _cuda_memory(context)["reserved"],
                 "system/gpu_peak_allocated": _cuda_memory(context)["max_allocated"],
                 "validation_is_held_out": not overfit,
             }
+            for key in (
+                "fraction_K0",
+                "fraction_positive_utility",
+                "candidate_reward_mean",
+                "candidate_reward_max",
+                "r_star_mean",
+                "r_star_max",
+                "r_star_positive_fraction",
+                "travel_cost_mean",
+                "overlap_cost_mean",
+                "step_cost",
+                "utility_before_cost_mean",
+                "utility_after_cost_mean",
+                "utility_after_cost_max",
+            ):
+                row[f"train/trajectory_{key}"] = train_stats.get(key, math.nan)
+                row[f"val/trajectory_{key}"] = val_stats.get(key, math.nan)
+            for phase, stats in (("train", train_stats), ("validation", val_stats)):
+                for stage in (
+                    "data_wait",
+                    "frontend",
+                    "trajectory",
+                    "decoder",
+                    "gate_e_loss",
+                    "diagnostic_metrics",
+                    "backward",
+                    "optimizer_step",
+                ):
+                    row[f"runtime/{phase}_{stage}_seconds"] = stats.get(
+                        f"timing_{stage}_seconds",
+                        math.nan,
+                    )
             if first_train_reconstruction_loss is None:
                 first_train_reconstruction_loss = float(train_stats.get("reconstruction_loss", math.nan))
             stop_training = False
@@ -1199,6 +1582,7 @@ def run_training(
                     ),
                     "split_hash": split_hash,
                     "git_head": _git_head(),
+                    "wandb_url": None if wandb_run is None else wandb_run.url,
                 }
                 _atomic_json(run_dir / "summary.json", summary)
                 stop_training = patience_count >= settings.early_stopping_patience
@@ -1227,14 +1611,49 @@ def preflight(
     data_root: str | Path,
     checkpoint: str | Path | None = None,
     expected_sha256: str | None = None,
+    require_segmentation: bool = True,
+    split_seed: int = 20260813,
+    split_fractions: Sequence[float] = (0.8, 0.1, 0.1),
+    split_file: str | Path | None = None,
+    max_train_subjects: int | None = None,
+    max_val_subjects: int | None = None,
+    max_test_subjects: int | None = None,
+    overfit: bool = False,
 ) -> dict[str, Any]:
-    """Read-only server preflight; never downloads data or weights."""
+    """Read-only F4 preflight with an unopened held-out payload boundary."""
 
-    subjects = discover_point_guided_subjects(data_root)
+    (
+        structural_inventory,
+        split,
+        split_hash,
+        active_subject_ids,
+        inventory,
+    ) = _prepare_structurally_eligible_split(
+        data_root=data_root,
+        seed=split_seed,
+        split_fractions=split_fractions,
+        split_file=split_file,
+        max_train_subjects=max_train_subjects,
+        max_val_subjects=max_val_subjects,
+        max_test_subjects=max_test_subjects,
+        require_segmentation=require_segmentation,
+        overfit=overfit,
+    )
+    subjects = inventory.complete_subjects
     result: dict[str, Any] = {
         "dataset_root": str(Path(data_root).resolve()),
+        "eligible_subject_count": len(structural_inventory.eligible_subject_ids),
         "subject_count": len(subjects),
         "subject_ids_sample": [subject.subject_id for subject in subjects[:5]],
+        "structural_inventory": structural_inventory.to_dict(),
+        "active_payload_inventory": inventory.to_dict()
+        | {
+            "requested_subject_ids": list(active_subject_ids),
+            "scope": "train_and_validation_only",
+        },
+        "split": split,
+        "split_hash": split_hash,
+        "test_payload_validation": "not_performed",
         "git_head": _git_head(),
         "hostname": socket.gethostname(),
         "python": platform.python_version(),

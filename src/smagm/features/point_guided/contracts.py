@@ -403,8 +403,6 @@ class FrontendOutput:
                 raise ValueError(f"{name} must retain its base-plane grid with exactly 56 channels")
             if anchor_plane.device != self.s_coarse.device:
                 raise ValueError(f"{name} device must match s_coarse")
-            if anchor_plane.dtype != self.s_coarse.dtype:
-                raise ValueError(f"{name} dtype must match s_coarse")
 
         if not isinstance(self.spectral_evidence, PointSpectralEvidence):
             raise TypeError("spectral_evidence must be a PointSpectralEvidence instance")

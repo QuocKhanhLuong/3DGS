@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import math
-from typing import Sequence
+from contextlib import nullcontext
+from typing import Any, Sequence
 
 import torch
 from torch import nn
@@ -29,6 +30,12 @@ from .training_objective import (
     _compute_training_objective,
 )
 from .triplane_projection import BaseTriPlaneProjector
+
+
+def _stage_scope(stage_timer: Any | None, name: str):
+    """Return the optional runtime-profiling scope without changing model math."""
+
+    return nullcontext() if stage_timer is None else stage_timer.measure(name)
 
 
 class PointGuidedMRIModel(nn.Module):
@@ -337,6 +344,7 @@ class PointGuidedMRIModel(nn.Module):
         voxel_to_ras_mm: Sequence[Sequence[float]] | None = None,
         chunk_size: int,
         availability_policy: RouteAvailabilityPolicy | None = None,
+        stage_timer: Any | None = None,
     ) -> GateESupervisionContext:
         """Build one target-free Gate-E supervision context.
 
@@ -348,32 +356,35 @@ class PointGuidedMRIModel(nn.Module):
 
         if self.trajectory is None or self.decoder is None:
             raise RuntimeError("forward_training_context requires an explicit TrajectoryConfig at model construction")
-        output, gate_b_descriptors, feature_grid_geometry = self._forward_frontend_with_gate_b_context(
-            x,
-            brain_mask,
-            spacing_mm,
-            voxel_to_ras_mm=voxel_to_ras_mm,
-        )
-        trace = self.trajectory._forward_with_training_trace(
-            output.base_planes,
-            output.refined_points_ras_mm,
-            output.point_semantic,
-            output.f_spec,
-            output.reliability,
-            gate_b_descriptors,
-            feature_grid_geometry,
-            output.geometry,
-            availability_policy=availability_policy,
-        )
-        reconstruction = ReconstructionOutput(
-            prediction=self.decoder(
-                trace.result.final_state,
+        with _stage_scope(stage_timer, "frontend"):
+            output, gate_b_descriptors, feature_grid_geometry = self._forward_frontend_with_gate_b_context(
+                x,
+                brain_mask,
+                spacing_mm,
+                voxel_to_ras_mm=voxel_to_ras_mm,
+            )
+        with _stage_scope(stage_timer, "trajectory"):
+            trace = self.trajectory._forward_with_training_trace(
+                output.base_planes,
+                output.refined_points_ras_mm,
+                output.point_semantic,
+                output.f_spec,
+                output.reliability,
+                gate_b_descriptors,
                 feature_grid_geometry,
                 output.geometry,
-                chunk_size=chunk_size,
-            ),
-            geometry=output.geometry,
-        )
+                availability_policy=availability_policy,
+            )
+        with _stage_scope(stage_timer, "decoder"):
+            reconstruction = ReconstructionOutput(
+                prediction=self.decoder(
+                    trace.result.final_state,
+                    feature_grid_geometry,
+                    output.geometry,
+                    chunk_size=chunk_size,
+                ),
+                geometry=output.geometry,
+            )
         return GateESupervisionContext(
             frontend=output,
             _trace=trace,

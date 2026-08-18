@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import inspect
+
+import pytest
 import torch
 
 from smagm.features.point_guided.contracts import VolumeGeometry
 from smagm.features.point_guided.reward import (
+    ACTION_DESCRIPTOR_CHANNELS,
     DynamicStatePointQuery,
     GateBDescriptorContext,
     REWARD_DESCRIPTOR_CHANNELS,
@@ -55,17 +59,92 @@ def test_dynamic_query_is_pointwise_bilinear_and_uses_xy_xz_yz_axis_order() -> N
     assert sum(parameter.numel() for parameter in DynamicStatePointQuery().parameters()) == 0
 
 
-def test_reward_descriptor_is_exact_126_d_and_reliability_weighted_q_bar() -> None:
+def test_dynamic_query_preserves_same_dtype_float64_behavior() -> None:
+    geometry = _geometry()
+    state = DynamicTriPlanes(
+        xy=_state().xy.double(),
+        xz=_state().xz.double(),
+        yz=_state().yz.double(),
+    )
+    points = geometry.feature_dhw_to_ras_mm(
+        torch.tensor([[[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]], dtype=torch.float64)
+    )
+
+    samples = DynamicStatePointQuery()(state, points, geometry)
+
+    assert samples.xy.dtype == samples.xz.dtype == samples.yz.dtype == torch.float64
+    torch.testing.assert_close(samples.xy[0, 0], state.xy[0, :, 2, 3])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA device diversity")
+def test_dynamic_query_keeps_same_device_validation_fail_closed() -> None:
+    geometry = _geometry()
+    points = geometry.feature_dhw_to_ras_mm(torch.tensor([[[1.0, 2.0, 3.0]]], dtype=torch.float32))
+    state = DynamicTriPlanes(
+        xy=_state().xy.cuda(),
+        xz=_state().xz.cuda(),
+        yz=_state().yz.cuda(),
+    )
+
+    with pytest.raises(ValueError, match="batch and device"):
+        DynamicStatePointQuery()(state, points, geometry)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA AMP")
+def test_dynamic_query_preserves_fp32_geometry_and_gradients_with_fp16_state_under_cuda_amp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    geometry = _geometry()
+    state = DynamicTriPlanes(
+        xy=torch.arange(32 * 5 * 7, dtype=torch.float16, device="cuda").reshape(1, 32, 5, 7).requires_grad_(),
+        xz=torch.arange(32 * 3 * 7, dtype=torch.float16, device="cuda").reshape(1, 32, 3, 7).requires_grad_(),
+        yz=torch.arange(32 * 3 * 5, dtype=torch.float16, device="cuda").reshape(1, 32, 3, 5).requires_grad_(),
+    )
+    points = torch.tensor(
+        [[[3.25, 2.25, 1.25], [4.50, 3.50, 1.50]]],
+        dtype=torch.float32,
+        device="cuda",
+        requires_grad=True,
+    )
+    observed_sampling_dtypes: list[tuple[torch.dtype, torch.dtype]] = []
+    original_grid_sample = torch.nn.functional.grid_sample
+
+    def traced_grid_sample(input: torch.Tensor, grid: torch.Tensor, **kwargs: object) -> torch.Tensor:
+        observed_sampling_dtypes.append((input.dtype, grid.dtype))
+        return original_grid_sample(input, grid, **kwargs)
+
+    monkeypatch.setattr("smagm.features.point_guided.reward.F.grid_sample", traced_grid_sample)
+    with torch.autocast(device_type="cuda", dtype=torch.float16):
+        samples = DynamicStatePointQuery()(state, points, geometry)
+
+    assert samples.xy.dtype == samples.xz.dtype == samples.yz.dtype == torch.float32
+    assert all(torch.isfinite(value).all() for value in (samples.xy, samples.xz, samples.yz))
+    assert observed_sampling_dtypes == [(torch.float32, torch.float32)] * 3
+    samples.packed.square().mean().backward()
+    assert points.grad is not None and bool(torch.isfinite(points.grad).all()) and bool(points.grad.abs().sum() > 0.0)
+    for plane in (state.xy, state.xz, state.yz):
+        assert plane.grad is not None and bool(torch.isfinite(plane.grad).all()) and bool(plane.grad.abs().sum() > 0.0)
+
+
+def test_reward_descriptor_is_exact_222_d_and_reliability_weighted_q_bar_with_candidate_update() -> None:
     geometry = _geometry()
     points = geometry.feature_dhw_to_ras_mm(torch.tensor([[[1.0, 2.0, 3.0], [1.0, 3.0, 4.0]]]))
     samples = DynamicStatePointQuery()(_state(), points, geometry)
     semantic = torch.tensor([[[0.2, 0.3, 0.5], [0.4, 0.4, 0.2]]])
     reliability = torch.tensor([[[0.2, 0.3, 0.5], [1.0, 0.0, 0.0]]])
-    descriptor = build_reward_descriptor(samples, semantic, _gate_b(), reliability)
+    candidate_updates = torch.arange(2 * ACTION_DESCRIPTOR_CHANNELS, dtype=torch.float32).reshape(1, 2, ACTION_DESCRIPTOR_CHANNELS)
+    descriptor = build_reward_descriptor(samples, semantic, _gate_b(), reliability, candidate_updates)
 
     assert descriptor.shape == (1, 2, REWARD_DESCRIPTOR_CHANNELS)
     torch.testing.assert_close(descriptor[..., 99:123], torch.tensor([[[2.3] * 24, [1.0] * 24]]))
-    torch.testing.assert_close(descriptor[..., 123:], reliability)
+    torch.testing.assert_close(descriptor[..., 123:126], reliability)
+    torch.testing.assert_close(descriptor[..., 126:], candidate_updates)
+
+
+def test_reward_descriptor_api_is_target_free() -> None:
+    parameter_names = set(inspect.signature(build_reward_descriptor).parameters)
+    assert parameter_names == {"dynamic_samples", "point_semantic", "gate_b_descriptors", "reliability", "candidate_updates"}
+    assert not parameter_names.intersection({"target", "t1ce", "segmentation", "r_star", "local_before", "local_after", "spill_before", "spill_after"})
 
 
 def test_shared_reward_net_is_state_dependent_bounded_and_receives_gradient() -> None:
@@ -76,7 +155,7 @@ def test_shared_reward_net_is_state_dependent_bounded_and_receives_gradient() ->
 
     assert reward.shape == (2, 5)
     assert bool(((reward >= 0.0) & (reward <= 1.0)).all())
-    assert sum(parameter.numel() for parameter in reward_net.parameters()) == 8193
+    assert sum(parameter.numel() for parameter in reward_net.parameters()) == 14337
     changed = descriptor.detach().clone()
     changed[..., :96] += 1.0
     assert not torch.allclose(reward, reward_net(changed))

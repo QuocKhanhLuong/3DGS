@@ -35,7 +35,13 @@ def bound_displacement_ras_mm(raw_displacement_ras_mm: torch.Tensor, max_displac
     if not math.isfinite(float(max_displacement_mm)) or max_displacement_mm <= 0.0:
         raise ValueError("max_displacement_mm must be positive and finite")
     norm = torch.linalg.vector_norm(raw_displacement_ras_mm, dim=-1, keepdim=True)
-    scale = torch.clamp(float(max_displacement_mm) / norm, max=1.0)
+    nonzero = norm != 0.0
+    safe_norm = torch.where(nonzero, norm, torch.ones_like(norm))
+    scale = torch.where(
+        nonzero,
+        torch.clamp(float(max_displacement_mm) / safe_norm, max=1.0),
+        torch.ones_like(norm),
+    )
     return raw_displacement_ras_mm * scale
 
 
@@ -76,8 +82,10 @@ def project_displacement_to_validity(
         device=original_voxel_dhw.device,
     )
     infinity = torch.full_like(delta_voxel_dhw, float("inf"))
-    upper_limit = (upper - original_voxel_dhw) / delta_voxel_dhw
-    lower_limit = -original_voxel_dhw / delta_voxel_dhw
+    nonzero = delta_voxel_dhw != 0.0
+    safe_delta = torch.where(nonzero, delta_voxel_dhw, torch.ones_like(delta_voxel_dhw))
+    upper_limit = (upper - original_voxel_dhw) / safe_delta
+    lower_limit = -original_voxel_dhw / safe_delta
     limits = torch.where(
         delta_voxel_dhw > 0.0,
         upper_limit,

@@ -11,10 +11,13 @@ from torch.nn import functional as F
 from .cross_plane_consistency import CONSISTENCY_DESCRIPTOR_CHANNELS
 from .spectral_query import FeatureGridGeometry
 from .state_init import DYNAMIC_STATE_CHANNELS, DynamicTriPlanes
+from .updater import UPDATER_OUTPUT_CHANNELS
 
 
 STATE_QUERY_CHANNELS = 3 * DYNAMIC_STATE_CHANNELS
-REWARD_DESCRIPTOR_CHANNELS = STATE_QUERY_CHANNELS + 3 + CONSISTENCY_DESCRIPTOR_CHANNELS + 3
+BASE_REWARD_DESCRIPTOR_CHANNELS = STATE_QUERY_CHANNELS + 3 + CONSISTENCY_DESCRIPTOR_CHANNELS + 3
+ACTION_DESCRIPTOR_CHANNELS = UPDATER_OUTPUT_CHANNELS
+REWARD_DESCRIPTOR_CHANNELS = BASE_REWARD_DESCRIPTOR_CHANNELS + ACTION_DESCRIPTOR_CHANNELS
 REWARD_HIDDEN_CHANNELS = 64
 
 
@@ -35,7 +38,19 @@ def _sample_plane(plane: Tensor, row: Tensor, column: Tensor) -> Tensor:
         ),
         dim=-1,
     ).unsqueeze(2)
-    sampled = F.grid_sample(plane, grid, mode="bilinear", padding_mode="zeros", align_corners=False)
+    # ``grid`` derives from physical RAS-mm geometry and deliberately retains
+    # its coordinate dtype.  The dynamic state is latent storage and may be
+    # autocast to lower precision, so align it to the physical query only at
+    # the differentiable sampling boundary rather than narrowing geometry.
+    with torch.autocast(device_type=grid.device.type, enabled=False):
+        sampling_plane = plane.to(dtype=grid.dtype)
+        sampled = F.grid_sample(
+            sampling_plane,
+            grid,
+            mode="bilinear",
+            padding_mode="zeros",
+            align_corners=False,
+        )
     return sampled[..., 0].transpose(1, 2)
 
 
@@ -101,8 +116,8 @@ class DynamicStatePointQuery(nn.Module):
         if not isinstance(feature_geometry, FeatureGridGeometry):
             raise TypeError("feature_geometry must be a FeatureGridGeometry instance")
         _float_tensor("points_ras_mm", points_ras_mm, rank=3, last=3)
-        if points_ras_mm.shape[0] != state.xy.shape[0] or points_ras_mm.dtype != state.xy.dtype or points_ras_mm.device != state.xy.device:
-            raise ValueError("points_ras_mm must match dynamic-state batch, dtype, and device")
+        if points_ras_mm.shape[0] != state.xy.shape[0] or points_ras_mm.device != state.xy.device:
+            raise ValueError("points_ras_mm must match dynamic-state batch and device")
         depth, height, width = feature_geometry.shape_dhw
         expected = ((state.xy, (height, width)), (state.xz, (depth, width)), (state.yz, (depth, height)))
         if any(tuple(plane.shape[-2:]) != shape for plane, shape in expected):
@@ -120,8 +135,9 @@ def build_reward_descriptor(
     point_semantic: Tensor,
     gate_b_descriptors: GateBDescriptorContext,
     reliability: Tensor,
+    candidate_updates: Tensor,
 ) -> Tensor:
-    """Build exact `[z_xy|z_xz|z_yz, pi, q_bar, alpha]` 126-d input."""
+    """Build the target-free ``[base descriptor | candidate update]`` input."""
 
     if not isinstance(dynamic_samples, DynamicPointSamples):
         raise TypeError("dynamic_samples must be a DynamicPointSamples instance")
@@ -129,21 +145,33 @@ def build_reward_descriptor(
         raise TypeError("gate_b_descriptors must be a GateBDescriptorContext instance")
     _float_tensor("point_semantic", point_semantic, rank=3, last=3)
     _float_tensor("reliability", reliability, rank=3, last=3)
+    _float_tensor("candidate_updates", candidate_updates, rank=3, last=ACTION_DESCRIPTOR_CHANNELS)
     reference = dynamic_samples.xy
-    for name, value in (("point_semantic", point_semantic), ("reliability", reliability), ("q_xy", gate_b_descriptors.q_xy)):
+    for name, value in (
+        ("point_semantic", point_semantic),
+        ("reliability", reliability),
+        ("q_xy", gate_b_descriptors.q_xy),
+        ("candidate_updates", candidate_updates),
+    ):
         if value.shape[:2] != reference.shape[:2] or value.dtype != reference.dtype or value.device != reference.device:
             raise ValueError(f"{name} must align with dynamic state samples")
     descriptor = torch.cat(
-        (dynamic_samples.packed, point_semantic, gate_b_descriptors.reliability_weighted_mean(reliability), reliability),
+        (
+            dynamic_samples.packed,
+            point_semantic,
+            gate_b_descriptors.reliability_weighted_mean(reliability),
+            reliability,
+            candidate_updates,
+        ),
         dim=-1,
     )
     if descriptor.shape[-1] != REWARD_DESCRIPTOR_CHANNELS:
-        raise RuntimeError("Gate-C RewardNet descriptor must have exactly 126 channels")
+        raise RuntimeError(f"Gate-C RewardNet descriptor must have exactly {REWARD_DESCRIPTOR_CHANNELS} channels")
     return descriptor
 
 
 class RewardNet(nn.Module):
-    """The one shared locked state-dependent `126 -> 64 -> 1 -> sigmoid` score."""
+    """The one shared locked state/action-dependent `222 -> 64 -> 1 -> sigmoid` score."""
 
     def __init__(self, *, hidden_channels: int = REWARD_HIDDEN_CHANNELS) -> None:
         super().__init__()
@@ -165,6 +193,8 @@ __all__ = [
     "DynamicPointSamples",
     "DynamicStatePointQuery",
     "GateBDescriptorContext",
+    "ACTION_DESCRIPTOR_CHANNELS",
+    "BASE_REWARD_DESCRIPTOR_CHANNELS",
     "REWARD_DESCRIPTOR_CHANNELS",
     "REWARD_HIDDEN_CHANNELS",
     "RewardNet",

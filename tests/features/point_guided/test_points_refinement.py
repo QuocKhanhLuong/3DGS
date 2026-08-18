@@ -13,8 +13,14 @@ from smagm.features.point_guided.directional import (
     build_directional_descriptor,
     directional_locations_ras_mm,
 )
+from smagm.features.point_guided.offset_predictor import OffsetPredictor
 from smagm.features.point_guided.points import DeterministicPointInitializer, initialize_quasi_uniform_points
-from smagm.features.point_guided.refinement import PointRefiner, refine_points_ras_mm
+from smagm.features.point_guided.refinement import (
+    PointRefiner,
+    bound_displacement_ras_mm,
+    project_displacement_to_validity,
+    refine_points_ras_mm,
+)
 from smagm.features.point_guided.sampling import (
     ras_mm_in_bounds,
     ras_mm_to_voxel_dhw,
@@ -38,6 +44,55 @@ def _config(*, num_points: int = 8) -> PointGuidedConfig:
         point_candidate_multiplier=3,
         offset_hidden_channels=12,
     )
+
+
+def _rotated_sheared_geometry() -> VolumeGeometry:
+    return VolumeGeometry(
+        (7, 8, 9),
+        (
+            (0.0, -1.0, 0.5, 7.0),
+            (1.0, 0.0, 0.0, -3.0),
+            (0.0, 0.0, 1.0, 11.0),
+            (0.0, 0.0, 0.0, 1.0),
+        ),
+    )
+
+
+def _previous_non_singular_projection_formula(
+    original_centres_ras_mm: torch.Tensor,
+    bounded_displacement_ras_mm: torch.Tensor,
+    geometry: VolumeGeometry,
+) -> torch.Tensor:
+    """Reference the pre-fix formula only where every denominator is nonzero."""
+
+    original_voxel_dhw = ras_mm_to_voxel_dhw(original_centres_ras_mm, geometry)
+    candidate_voxel_dhw = ras_mm_to_voxel_dhw(original_centres_ras_mm + bounded_displacement_ras_mm, geometry)
+    delta_voxel_dhw = candidate_voxel_dhw - original_voxel_dhw
+    assert bool((delta_voxel_dhw != 0.0).all())
+    upper = torch.as_tensor(
+        tuple(length - 1 for length in geometry.shape_dhw),
+        dtype=original_voxel_dhw.dtype,
+        device=original_voxel_dhw.device,
+    )
+    infinity = torch.full_like(delta_voxel_dhw, float("inf"))
+    upper_limit = (upper - original_voxel_dhw) / delta_voxel_dhw
+    lower_limit = -original_voxel_dhw / delta_voxel_dhw
+    limits = torch.where(
+        delta_voxel_dhw > 0.0,
+        upper_limit,
+        torch.where(delta_voxel_dhw < 0.0, lower_limit, infinity),
+    )
+    fraction = torch.clamp(limits.amin(dim=-1, keepdim=True), min=0.0, max=1.0)
+    return bounded_displacement_ras_mm * fraction
+
+
+def _ras_displacement_for_voxel_delta(
+    original_centres_ras_mm: torch.Tensor,
+    voxel_delta_dhw: torch.Tensor,
+    geometry: VolumeGeometry,
+) -> torch.Tensor:
+    original_voxel_dhw = ras_mm_to_voxel_dhw(original_centres_ras_mm, geometry)
+    return voxel_dhw_to_ras_mm(original_voxel_dhw + voxel_delta_dhw, geometry) - original_centres_ras_mm
 
 
 def test_ras_sampler_is_identity_at_voxel_centres_and_reports_bounds() -> None:
@@ -85,6 +140,158 @@ def test_ras_sampler_round_trips_a_rotated_sheared_affine_without_axis_guessing(
         atol=1e-4,
         rtol=0.0,
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the AMP geometry regression")
+@pytest.mark.parametrize("dtype", (torch.float32, torch.float64))
+def test_voxel_to_ras_preserves_coordinate_dtype_under_cuda_amp(dtype: torch.dtype) -> None:
+    geometry = _geometry()
+    voxel_dhw = torch.tensor([[[1.25, 2.5, 3.75]]], dtype=dtype, device="cuda")
+
+    with torch.autocast(device_type="cuda", dtype=torch.float16):
+        ras_mm = voxel_dhw_to_ras_mm(voxel_dhw, geometry)
+
+    assert ras_mm.dtype == dtype
+    assert ras_mm.device == voxel_dhw.device
+    assert bool(torch.isfinite(ras_mm).all())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the AMP geometry regression")
+@pytest.mark.parametrize("dtype", (torch.float32, torch.float64))
+def test_ras_to_voxel_preserves_coordinate_dtype_under_cuda_amp(dtype: torch.dtype) -> None:
+    geometry = _geometry()
+    voxel_dhw = torch.tensor([[[1.25, 2.5, 3.75]]], dtype=dtype, device="cuda")
+    ras_mm = voxel_dhw_to_ras_mm(voxel_dhw, geometry)
+
+    with torch.autocast(device_type="cuda", dtype=torch.float16):
+        recovered = ras_mm_to_voxel_dhw(ras_mm, geometry)
+
+    assert recovered.dtype == dtype
+    assert recovered.device == ras_mm.device
+    assert bool(torch.isfinite(recovered).all())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the AMP geometry regression")
+def test_affine_coordinate_round_trip_remains_float32_and_consistent_under_cuda_amp() -> None:
+    geometry = _geometry()
+    voxel_dhw = torch.tensor([[[1.25, 2.5, 3.75], [4.5, 5.25, 6.0]]], dtype=torch.float32, device="cuda")
+
+    with torch.autocast(device_type="cuda", dtype=torch.float16):
+        ras_mm = voxel_dhw_to_ras_mm(voxel_dhw, geometry)
+        recovered = ras_mm_to_voxel_dhw(ras_mm, geometry)
+
+    assert ras_mm.dtype == torch.float32
+    assert recovered.dtype == torch.float32
+    torch.testing.assert_close(recovered, voxel_dhw, atol=1e-5, rtol=0.0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the AMP geometry regression")
+def test_initializer_preserves_float32_points_under_cuda_amp() -> None:
+    geometry = _geometry()
+    initializer = DeterministicPointInitializer(_config(num_points=11)).cuda()
+
+    with torch.autocast(device_type="cuda", dtype=torch.float16):
+        points = initializer(geometry, batch_size=1, device="cuda", dtype=torch.float32)
+
+    assert points.dtype == torch.float32
+    assert points.device.type == "cuda"
+    assert bool(ras_mm_in_bounds(points, geometry).all())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the AMP geometry regression")
+def test_directional_descriptor_accepts_float32_geometry_points_under_cuda_amp() -> None:
+    geometry = _geometry()
+    initializer = DeterministicPointInitializer(_config(num_points=2)).cuda()
+    mri = torch.randn(1, 3, *geometry.shape_dhw, dtype=torch.float32, device="cuda")
+    semantic = torch.softmax(
+        torch.randn(1, 3, *geometry.shape_dhw, dtype=torch.float32, device="cuda"),
+        dim=1,
+    )
+
+    with torch.autocast(device_type="cuda", dtype=torch.float16):
+        points = initializer(geometry, batch_size=1, device="cuda", dtype=torch.float32)
+        descriptor = build_directional_descriptor(mri, semantic, points, geometry)
+
+    assert points.dtype == mri.dtype
+    assert descriptor.shape == (1, 2, 19 * 6)
+    assert bool(torch.isfinite(descriptor).all())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the AMP predictor regression")
+def test_offset_predictor_restores_float32_ras_displacement_under_cuda_amp_with_gradients() -> None:
+    config = _config(num_points=2)
+    predictor = OffsetPredictor.from_config(config).cuda().train()
+    descriptor = torch.randn(
+        1,
+        2,
+        predictor.descriptor_channels,
+        dtype=torch.float32,
+        device="cuda",
+        requires_grad=True,
+    )
+
+    with torch.autocast(device_type="cuda", dtype=torch.float16):
+        displacement = predictor(descriptor)
+
+    assert displacement.dtype == descriptor.dtype
+    assert displacement.device == descriptor.device
+    assert displacement.requires_grad
+    assert bool(torch.isfinite(displacement).all())
+    displacement.square().sum().backward()
+    for layer in (predictor.network[0], predictor.network[-1]):
+        assert isinstance(layer, torch.nn.Linear)
+        assert layer.weight.grad is not None
+        assert bool(torch.isfinite(layer.weight.grad).all())
+        assert bool(layer.weight.grad.abs().sum() > 0.0)
+
+
+@pytest.mark.parametrize("dtype", (torch.float32, torch.float64))
+def test_offset_predictor_preserves_descriptor_dtype_without_amp(dtype: torch.dtype) -> None:
+    config = _config(num_points=2)
+    predictor = OffsetPredictor.from_config(config).to(dtype=dtype)
+    descriptor = torch.randn(1, 2, predictor.descriptor_channels, dtype=dtype, requires_grad=True)
+
+    displacement = predictor(descriptor)
+
+    assert displacement.dtype == dtype
+    assert displacement.device == descriptor.device
+    assert displacement.requires_grad
+    displacement.square().sum().backward()
+    assert predictor.network[0].weight.grad is not None
+    assert predictor.network[-1].weight.grad is not None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the AMP refinement regression")
+def test_refinement_accepts_float32_predictor_displacement_under_cuda_amp() -> None:
+    geometry = _geometry()
+    config = _config(num_points=2)
+    refiner = PointRefiner(config).cuda().eval()
+    mri = torch.randn(1, 3, *geometry.shape_dhw, dtype=torch.float32, device="cuda")
+    semantic = torch.softmax(
+        torch.randn(1, 3, *geometry.shape_dhw, dtype=torch.float32, device="cuda"),
+        dim=1,
+    )
+    original = voxel_dhw_to_ras_mm(
+        torch.tensor([[[3.0, 4.0, 5.0], [2.0, 3.0, 4.0]]], dtype=torch.float32, device="cuda"),
+        geometry,
+    )
+
+    with torch.autocast(device_type="cuda", dtype=torch.float16):
+        descriptor = refiner.directional_descriptor(mri, semantic, original, geometry)
+        raw_displacement = refiner.offset_predictor(descriptor)
+        refined, displacement = refine_points_ras_mm(
+            original,
+            raw_displacement,
+            geometry,
+            config.max_displacement_mm,
+        )
+
+    assert descriptor.dtype == torch.float32
+    assert raw_displacement.dtype == torch.float32
+    assert refined.dtype == torch.float32
+    assert displacement.dtype == torch.float32
+    assert bool((torch.linalg.vector_norm(displacement, dim=-1) <= 2.0 + 1e-6).all())
+    assert bool(ras_mm_in_bounds(refined, geometry).all())
 
 
 def test_directional_locations_are_exact_ras_mm_offsets_under_anisotropic_spacing() -> None:
@@ -204,6 +411,123 @@ def test_refinement_is_original_relative_bounded_and_valid() -> None:
     torch.testing.assert_close(refined - original, displacement, atol=1e-6, rtol=0.0)
     assert bool((torch.linalg.vector_norm(displacement, dim=-1) <= 2.0 + 1e-6).all())
     assert bool(ras_mm_in_bounds(refined, geometry).all())
+
+
+def test_safe_refinement_preserves_zero_axes_boundaries_and_affine_geometry() -> None:
+    geometry = _geometry()
+    original = voxel_dhw_to_ras_mm(torch.tensor([[[3.0, 4.0, 5.0]]]), geometry)
+
+    # A. An exact zero vector stays exact after radial and validity projection.
+    zero = torch.zeros_like(original)
+    torch.testing.assert_close(bound_displacement_ras_mm(zero, 2.0), zero, atol=0.0, rtol=0.0)
+    torch.testing.assert_close(project_displacement_to_validity(original, zero, geometry), zero, atol=0.0, rtol=0.0)
+
+    # B/C. Exact zero voxel axes impose no artificial constraint.
+    for voxel_delta_dhw in (
+        torch.tensor([[[0.5, 0.0, 0.25]]]),
+        torch.tensor([[[0.0, 0.0, 0.5]]]),
+    ):
+        displacement = _ras_displacement_for_voxel_delta(original, voxel_delta_dhw, geometry)
+        recovered_delta = ras_mm_to_voxel_dhw(original + displacement, geometry) - ras_mm_to_voxel_dhw(original, geometry)
+        assert bool((recovered_delta == 0.0).any())
+        torch.testing.assert_close(project_displacement_to_validity(original, displacement, geometry), displacement, atol=1e-6, rtol=0.0)
+
+    # D/E. Positive and negative directions are line-projected at the boundary.
+    for voxel, delta in (
+        (torch.tensor([[[5.8, 6.8, 7.8]]]), torch.tensor([[[0.8, 0.8, 0.8]]])),
+        (torch.tensor([[[0.2, 0.2, 0.2]]]), torch.tensor([[[-0.8, -0.8, -0.8]]])),
+    ):
+        boundary_original = voxel_dhw_to_ras_mm(voxel, geometry)
+        displacement = _ras_displacement_for_voxel_delta(boundary_original, delta, geometry)
+        projected = project_displacement_to_validity(boundary_original, displacement, geometry)
+        assert bool(torch.linalg.vector_norm(projected, dim=-1) < torch.linalg.vector_norm(displacement, dim=-1))
+        assert bool(ras_mm_in_bounds(boundary_original + projected, geometry).all())
+
+    # F. An interior direction remains unprojected.
+    interior = _ras_displacement_for_voxel_delta(original, torch.tensor([[[0.25, -0.25, 0.25]]]), geometry)
+    torch.testing.assert_close(project_displacement_to_validity(original, interior, geometry), interior, atol=1e-6, rtol=0.0)
+
+    # G. The same invariant holds for a rotated/sheared physical affine.
+    rotated = _rotated_sheared_geometry()
+    rotated_original = voxel_dhw_to_ras_mm(torch.tensor([[[3.0, 4.0, 5.0]]]), rotated)
+    rotated_displacement = _ras_displacement_for_voxel_delta(
+        rotated_original,
+        torch.tensor([[[0.5, 0.0, 0.25]]]),
+        rotated,
+    )
+    rotated_delta = ras_mm_to_voxel_dhw(rotated_original + rotated_displacement, rotated) - ras_mm_to_voxel_dhw(rotated_original, rotated)
+    assert bool((rotated_delta == 0.0).any())
+    torch.testing.assert_close(
+        project_displacement_to_validity(rotated_original, rotated_displacement, rotated),
+        rotated_displacement,
+        atol=1e-6,
+        rtol=0.0,
+    )
+
+    # H. Exactly 2 mm is retained by the radial bound for a nonzero vector.
+    at_bound = torch.tensor([[[2.0, 0.0, 0.0]]])
+    torch.testing.assert_close(bound_displacement_ras_mm(at_bound, 2.0), at_bound, atol=0.0, rtol=0.0)
+
+
+def test_safe_projection_matches_pre_fix_formula_for_non_singular_cases() -> None:
+    cases = (
+        (_geometry(), torch.tensor([[[3.0, 4.0, 5.0]]]), torch.tensor([[[0.4, -0.3, 0.2]]])),
+        (_geometry(), torch.tensor([[[5.8, 6.8, 7.8]]]), torch.tensor([[[0.8, 0.8, 0.8]]])),
+        (_geometry(), torch.tensor([[[0.2, 0.2, 0.2]]]), torch.tensor([[[-0.8, -0.8, -0.8]]])),
+        (_rotated_sheared_geometry(), torch.tensor([[[3.0, 4.0, 5.0]]]), torch.tensor([[[0.4, -0.3, 0.2]]])),
+    )
+    for geometry, original_voxel, displacement in cases:
+        original = voxel_dhw_to_ras_mm(original_voxel, geometry)
+        patched = project_displacement_to_validity(original, displacement, geometry)
+        previous = _previous_non_singular_projection_formula(original, displacement, geometry)
+        torch.testing.assert_close(patched, previous, atol=1e-6, rtol=1e-6)
+
+
+def _assert_singular_refinement_backward_is_finite(case: str, device: torch.device) -> None:
+    geometry = _rotated_sheared_geometry() if case == "rotated_sheared_zero_axis" else _geometry()
+    original = voxel_dhw_to_ras_mm(
+        torch.tensor([[[3.0, 4.0, 5.0]]], dtype=torch.float32, device=device),
+        geometry,
+    )
+    if case == "zero_displacement":
+        raw_value = torch.zeros_like(original)
+        zero_axis = None
+    elif case == "exact_zero_voxel_axis":
+        raw_value = torch.tensor([[[0.5, 0.0, 1.0]]], dtype=torch.float32, device=device)
+        zero_axis = 1
+    elif case == "rotated_sheared_zero_axis":
+        raw_value = torch.tensor([[[0.25, 0.25, 0.5]]], dtype=torch.float32, device=device)
+        zero_axis = 1
+    else:
+        raise AssertionError(f"unknown refinement backward case: {case}")
+
+    raw = raw_value.detach().requires_grad_(True)
+    bounded = bound_displacement_ras_mm(raw, 2.0)
+    delta_voxel_dhw = ras_mm_to_voxel_dhw(original + bounded, geometry) - ras_mm_to_voxel_dhw(original, geometry)
+    if zero_axis is not None:
+        assert bool((delta_voxel_dhw[..., zero_axis] == 0.0).all())
+    refined, displacement = refine_points_ras_mm(original, raw, geometry, max_displacement_mm=2.0)
+    (refined.square().mean() + displacement.square().mean()).backward()
+
+    assert raw.grad is not None
+    assert bool(torch.isfinite(raw.grad).all())
+
+
+@pytest.mark.parametrize(
+    "case",
+    ("zero_displacement", "exact_zero_voxel_axis", "rotated_sheared_zero_axis"),
+)
+def test_singular_refinement_backward_is_finite_on_cpu(case: str) -> None:
+    _assert_singular_refinement_backward_is_finite(case, torch.device("cpu"))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the refinement backward regression")
+@pytest.mark.parametrize(
+    "case",
+    ("zero_displacement", "exact_zero_voxel_axis", "rotated_sheared_zero_axis"),
+)
+def test_singular_refinement_backward_is_finite_on_cuda(case: str) -> None:
+    _assert_singular_refinement_backward_is_finite(case, torch.device("cuda"))
 
 
 def test_refiner_keeps_gradient_to_the_offset_mlp() -> None:

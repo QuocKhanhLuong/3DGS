@@ -233,6 +233,65 @@ def test_frontend_output_rejects_an_anchor_with_a_grid_mismatched_to_base_planes
         replace(output, spectral_anchor=mismatched)
 
 
+def test_frontend_output_allows_a_lower_precision_static_anchor_with_float32_evidence() -> None:
+    model = _small_model().eval()
+    with torch.no_grad():
+        output = model.forward_frontend(torch.randn(1, 3, 7, 7, 7))
+
+    mixed_precision_anchor = SpectralAnchor(
+        xy=output.spectral_anchor.xy.to(dtype=torch.float16),
+        xz=output.spectral_anchor.xz.to(dtype=torch.float16),
+        yz=output.spectral_anchor.yz.to(dtype=torch.float16),
+    )
+    reconstructed = replace(output, spectral_anchor=mixed_precision_anchor)
+
+    assert reconstructed.s_coarse.dtype == torch.float32
+    assert reconstructed.base_planes.xy.dtype == torch.float32
+    assert reconstructed.spectral_anchor.xy.dtype == torch.float16
+    assert reconstructed.f_spec.dtype == torch.float32
+    assert reconstructed.reliability.dtype == torch.float32
+
+
+def test_spectral_anchor_remains_strict_about_its_internal_dtype_contract() -> None:
+    model = _small_model().eval()
+    with torch.no_grad():
+        output = model.forward_frontend(torch.randn(1, 3, 7, 7, 7))
+
+    with pytest.raises(ValueError, match="share one dtype"):
+        SpectralAnchor(
+            xy=output.spectral_anchor.xy,
+            xz=output.spectral_anchor.xz.double(),
+            yz=output.spectral_anchor.yz,
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA device diversity")
+def test_spectral_anchor_remains_strict_about_its_internal_device_contract() -> None:
+    model = _small_model().eval()
+    with torch.no_grad():
+        output = model.forward_frontend(torch.randn(1, 3, 7, 7, 7))
+
+    with pytest.raises(ValueError, match="share one device"):
+        SpectralAnchor(
+            xy=output.spectral_anchor.xy.cuda(),
+            xz=output.spectral_anchor.xz.cuda(),
+            yz=output.spectral_anchor.yz,
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA AMP")
+def test_frontend_output_accepts_the_real_cuda_amp_anchor_and_evidence_dtypes() -> None:
+    model = _small_model().cuda().train()
+    with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.float16):
+        output = model.forward_frontend(torch.randn(1, 3, 7, 7, 7, device="cuda", dtype=torch.float32))
+
+    assert output.s_coarse.dtype == torch.float32
+    assert output.base_planes.xy.dtype == torch.float32
+    assert output.spectral_anchor.xy.dtype == torch.float16
+    assert output.f_spec.dtype == torch.float32
+    assert output.reliability.dtype == torch.float32
+
+
 def test_frontend_output_fails_closed_for_invalid_point_spectral_evidence() -> None:
     model = _small_model().eval()
     with torch.no_grad():

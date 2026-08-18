@@ -15,6 +15,7 @@ from smagm.features.point_guided.reward_supervision import (
     build_local_support_samples,
     build_spill_samples,
     counterfactual_reward_supervision,
+    pairwise_reward_ranking_loss,
     sample_counterfactual_candidates,
     spill_aware_reward_target,
 )
@@ -116,6 +117,8 @@ def _counterfactual_result(
     target: torch.Tensor,
     *,
     generator: torch.Generator,
+    reward_ranking_weight: float = 0.0,
+    reward_ranking_min_target_gap: float = 0.001,
 ):
     return counterfactual_reward_supervision(
         trajectory,
@@ -136,6 +139,8 @@ def _counterfactual_result(
             random_candidate_count=1,
             spill_weight_beta=0.75,
             spill_sample_count=3,
+            reward_ranking_weight=reward_ranking_weight,
+            reward_ranking_min_target_gap=reward_ranking_min_target_gap,
         ),
         generator=generator,
     )
@@ -359,3 +364,140 @@ def test_measured_reward_target_is_independent_of_gate_c_routing_cost_coefficien
     assert torch.equal(first.spill_before, second.spill_before)
     assert torch.equal(first.spill_after, second.spill_after)
     assert torch.equal(first.reward_target, second.reward_target)
+
+
+def test_pairwise_reward_ranking_perfect_order_and_scale_is_zero() -> None:
+    target = torch.tensor([[0.01, 0.02, 0.04]])
+    prediction = target.clone().requires_grad_()
+    result = pairwise_reward_ranking_loss(prediction, target, torch.ones_like(target, dtype=torch.bool), min_target_gap=0.001)
+
+    assert result.informative_pair_count == 3
+    assert result.violation_count == 0
+    torch.testing.assert_close(result.loss, torch.zeros(()))
+
+
+def test_pairwise_reward_ranking_wrong_order_has_finite_corrective_gradient() -> None:
+    target = torch.tensor([[0.01, 0.02]])
+    prediction = torch.tensor([[0.03, 0.01]], requires_grad=True)
+    result = pairwise_reward_ranking_loss(prediction, target, torch.ones_like(target, dtype=torch.bool), min_target_gap=0.001)
+
+    assert bool(result.loss > 0.0)
+    result.loss.backward()
+    assert prediction.grad is not None
+    assert bool(torch.isfinite(prediction.grad).all())
+    assert prediction.grad[0, 0] > 0.0
+    assert prediction.grad[0, 1] < 0.0
+
+
+def test_pairwise_reward_ranking_penalizes_compressed_but_correct_gap() -> None:
+    target = torch.tensor([[0.00, 0.02]])
+    prediction = torch.tensor([[0.010, 0.015]])
+    result = pairwise_reward_ranking_loss(prediction, target, torch.ones_like(target, dtype=torch.bool), min_target_gap=0.001)
+
+    assert bool(result.loss > 0.0)
+    torch.testing.assert_close(result.loss, torch.tensor(0.015))
+
+
+def test_pairwise_reward_ranking_excludes_target_gaps_below_threshold() -> None:
+    target = torch.tensor([[0.0100, 0.0105]])
+    prediction = torch.tensor([[0.4, 0.1]], requires_grad=True)
+    result = pairwise_reward_ranking_loss(prediction, target, torch.ones_like(target, dtype=torch.bool), min_target_gap=0.001)
+
+    assert result.valid_pair_count == 1
+    assert result.informative_pair_count == 0
+    torch.testing.assert_close(result.loss, prediction.sum() * 0.0)
+    result.loss.backward()
+    assert prediction.grad is not None and bool(torch.isfinite(prediction.grad).all())
+    assert bool((prediction.grad == 0.0).all())
+
+
+def test_pairwise_reward_ranking_honors_invalid_candidates() -> None:
+    target = torch.tensor([[0.00, 0.02, 0.04]])
+    prediction = torch.tensor([[0.04, 0.99, 0.00]])
+    valid = torch.tensor([[True, False, True]])
+    result = pairwise_reward_ranking_loss(prediction, target, valid, min_target_gap=0.001)
+
+    assert result.valid_pair_count == 1
+    assert result.informative_pair_count == 1
+    assert bool(result.loss > 0.0)
+
+
+def test_pairwise_reward_ranking_isolates_subject_rows() -> None:
+    target = torch.tensor([[0.00, 0.02], [0.01, 0.03]])
+    prediction = torch.tensor([[0.02, 0.01], [0.03, 0.01]])
+    valid = torch.ones_like(target, dtype=torch.bool)
+    result = pairwise_reward_ranking_loss(prediction, target, valid, min_target_gap=0.001)
+
+    assert result.valid_pair_count == 2
+    assert result.informative_pair_count == 2
+
+
+def test_pairwise_reward_ranking_all_equal_targets_is_finite_differentiable_zero() -> None:
+    target = torch.full((2, 4), 0.01)
+    prediction = torch.randn(2, 4, requires_grad=True)
+    result = pairwise_reward_ranking_loss(prediction, target, torch.ones_like(target, dtype=torch.bool), min_target_gap=0.001)
+
+    assert result.informative_pair_count == 0
+    assert bool(torch.isfinite(result.loss))
+    result.loss.backward()
+    assert prediction.grad is not None
+    assert bool(torch.isfinite(prediction.grad).all())
+    assert bool((prediction.grad == 0.0).all())
+
+
+def test_ranking_disabled_reproduces_absolute_reward_loss_and_composition() -> None:
+    state, geometry, points, point_semantic, f_spec, descriptors, target = _counterfactual_inputs()
+    trajectory = _trajectory()
+    decoder = ImplicitTriPlaneDecoder().eval()
+    result = _counterfactual_result(
+        trajectory,
+        decoder,
+        state,
+        geometry,
+        points,
+        point_semantic,
+        f_spec,
+        descriptors,
+        target,
+        generator=torch.Generator().manual_seed(101),
+        reward_ranking_weight=0.0,
+    )
+    expected_absolute = torch.where(
+        result.valid_mask,
+        torch.nn.functional.smooth_l1_loss(result.reward_prediction, result.reward_target, reduction="none"),
+        torch.zeros_like(result.reward_prediction),
+    ).sum() / result.valid_mask.sum().to(dtype=result.reward_prediction.dtype)
+
+    torch.testing.assert_close(result.absolute_loss, expected_absolute)
+    torch.testing.assert_close(result.ranking_weighted_loss, result.ranking_loss * 0.0)
+    torch.testing.assert_close(result.loss, expected_absolute)
+
+    enabled = _counterfactual_result(
+        trajectory,
+        decoder,
+        state,
+        geometry,
+        points,
+        point_semantic,
+        f_spec,
+        descriptors,
+        target,
+        generator=torch.Generator().manual_seed(101),
+        reward_ranking_weight=0.1,
+    )
+    torch.testing.assert_close(enabled.loss, enabled.absolute_loss + enabled.ranking_weighted_loss)
+    assert enabled.informative_pair_count >= 0
+    assert 0.0 <= enabled.ranking_violation_fraction <= 1.0
+    assert enabled.mean_target_pair_gap >= 0.0
+
+
+def test_pairwise_reward_ranking_gradient_is_finite_and_nonzero_for_wrong_order() -> None:
+    target = torch.tensor([[0.01, 0.02, 0.03]])
+    prediction = torch.tensor([[0.03, 0.01, 0.02]], requires_grad=True)
+    result = pairwise_reward_ranking_loss(prediction, target, torch.ones_like(target, dtype=torch.bool), min_target_gap=0.001)
+    result.loss.backward()
+
+    assert bool(torch.isfinite(result.loss))
+    assert prediction.grad is not None
+    assert bool(torch.isfinite(prediction.grad).all())
+    assert bool(prediction.grad.abs().sum() > 0.0)

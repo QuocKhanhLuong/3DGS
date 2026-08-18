@@ -89,13 +89,25 @@ class TrajectoryStepDiagnostics:
 
 @dataclass(frozen=True)
 class TrajectoryResult:
-    """Final dynamic state and compact adaptive-route diagnostics only."""
+    """Final state plus target-free aggregate candidate-route diagnostics.
+
+    The aggregate values summarize every dense candidate evaluation, including
+    an initial round which stops at ``K=0``.  They are detached diagnostics:
+    they neither influence the solver nor retain a dense candidate graph.
+    """
 
     final_state: DynamicTriPlanes
     steps: tuple[TrajectoryStepDiagnostics, ...]
     stop_reasons: tuple[str, ...]
     candidate_evaluations: Tensor  # [B], cumulative actual dense RewardNet scores
     eligible_candidate_evaluations: Tensor  # [B], cumulative candidates eligible before masking
+    candidate_reward_sum: Tensor  # [B], detached sum before all route costs
+    candidate_reward_max: Tensor  # [B], detached maximum before all route costs
+    candidate_travel_cost_sum: Tensor  # [B], detached sum across scored candidates
+    candidate_overlap_cost_sum: Tensor  # [B], detached sum across scored candidates
+    candidate_utility_sum: Tensor  # [B], detached U before availability masking
+    candidate_utility_max: Tensor  # [B], detached maximum U before availability masking
+    positive_utility_candidate_count: Tensor  # [B], detached count with U > 0 before availability masking
 
     def __post_init__(self) -> None:
         batch = self.final_state.xy.shape[0]
@@ -113,6 +125,34 @@ class TrajectoryResult:
                 raise ValueError(f"{name} must be a nonnegative device-matched [B] long tensor")
         if bool((self.eligible_candidate_evaluations > self.candidate_evaluations).any()):
             raise ValueError("eligible candidate evaluations cannot exceed actual dense RewardNet scores")
+        for name in (
+            "candidate_reward_sum",
+            "candidate_reward_max",
+            "candidate_travel_cost_sum",
+            "candidate_overlap_cost_sum",
+            "candidate_utility_sum",
+            "candidate_utility_max",
+        ):
+            value = getattr(self, name)
+            if (
+                not isinstance(value, Tensor)
+                or value.shape != (batch,)
+                or not value.is_floating_point()
+                or value.device != self.final_state.xy.device
+                or value.requires_grad
+                or not bool(torch.isfinite(value).all())
+            ):
+                raise ValueError(f"{name} must be finite detached device-matched [B] float diagnostics")
+        positive = self.positive_utility_candidate_count
+        if (
+            not isinstance(positive, Tensor)
+            or positive.shape != (batch,)
+            or positive.dtype != torch.long
+            or positive.device != self.final_state.xy.device
+            or bool((positive < 0).any())
+            or bool((positive > self.candidate_evaluations).any())
+        ):
+            raise ValueError("positive_utility_candidate_count must be a bounded device-matched [B] long tensor")
 
     @property
     def selected_indices(self) -> Tensor:
@@ -228,6 +268,16 @@ class AdaptiveRewardCostTrajectory(nn.Module):
         records: list[TrajectoryStepDiagnostics] = []
         candidate_evaluations = torch.zeros(batch, dtype=torch.long, device=reference.device)
         eligible_candidate_evaluations = torch.zeros(batch, dtype=torch.long, device=reference.device)
+        # Aggregate diagnostics cover evaluated K=0 rows too.  They are
+        # detached and never feed selection, updates, or later route rounds.
+        candidate_reward_sum = torch.zeros(batch, dtype=reference.dtype, device=reference.device)
+        candidate_reward_max = torch.full((batch,), -torch.inf, dtype=reference.dtype, device=reference.device)
+        candidate_travel_cost_sum = torch.zeros_like(candidate_reward_sum)
+        candidate_overlap_cost_sum = torch.zeros_like(candidate_reward_sum)
+        candidate_utility_sum = torch.zeros_like(candidate_reward_sum)
+        candidate_utility_max = torch.full_like(candidate_reward_sum, -torch.inf)
+        positive_utility_candidate_count = torch.zeros(batch, dtype=torch.long, device=reference.device)
+        candidate_telemetry_seen = torch.zeros(batch, dtype=torch.bool, device=reference.device)
         stop_reasons: list[str | None] = [None] * batch
         running = torch.ones(batch, dtype=torch.bool, device=reference.device)
         available = (
@@ -269,6 +319,19 @@ class AdaptiveRewardCostTrajectory(nn.Module):
             running_state = _subset_state(state, running)
             running_points = refined_points_ras_mm[running]
             dynamic_samples = self.dynamic_state_query(running_state, running_points, feature_geometry)
+            updater_input = torch.cat(
+                (
+                    dynamic_samples.packed,
+                    f_spec[running],
+                    point_semantic[running],
+                    reliability[running],
+                ),
+                dim=-1,
+            )
+            candidate_updates = self.update_net.forward_candidates(
+                updater_input,
+                write_scale=active_config.write_scale,
+            )
             descriptor = build_reward_descriptor(
                 dynamic_samples,
                 point_semantic[running],
@@ -278,6 +341,7 @@ class AdaptiveRewardCostTrajectory(nn.Module):
                     q_yz=gate_b_descriptors.q_yz[running],
                 ),
                 reliability[running],
+                candidate_updates.packed,
             )
             running_reward = self.reward_net(descriptor)
             running_travel = travel_cost(
@@ -285,7 +349,31 @@ class AdaptiveRewardCostTrajectory(nn.Module):
                 previous_indices[running],
                 support_radius_mm=active_config.support_radius_mm,
             )
-            running_utility = route_utility(running_reward, running_travel, overlap[running], active_config)
+            running_overlap = overlap[running]
+            # Preserve the raw locked U = R - travel - overlap - step view
+            # separately from any caller-owned availability mask.  This is
+            # target-free evidence for scale diagnosis only.
+            running_utility = route_utility(running_reward, running_travel, running_overlap, active_config)
+            candidate_reward_sum = candidate_reward_sum.index_add(0, running_rows, running_reward.detach().sum(dim=1))
+            candidate_travel_cost_sum = candidate_travel_cost_sum.index_add(0, running_rows, running_travel.detach().sum(dim=1))
+            candidate_overlap_cost_sum = candidate_overlap_cost_sum.index_add(0, running_rows, running_overlap.detach().sum(dim=1))
+            candidate_utility_sum = candidate_utility_sum.index_add(0, running_rows, running_utility.detach().sum(dim=1))
+            candidate_reward_max = candidate_reward_max.index_copy(
+                0,
+                running_rows,
+                torch.maximum(candidate_reward_max[running_rows], running_reward.detach().amax(dim=1)),
+            )
+            candidate_utility_max = candidate_utility_max.index_copy(
+                0,
+                running_rows,
+                torch.maximum(candidate_utility_max[running_rows], running_utility.detach().amax(dim=1)),
+            )
+            positive_utility_candidate_count = positive_utility_candidate_count.index_add(
+                0,
+                running_rows,
+                (running_utility.detach() > 0.0).sum(dim=1, dtype=torch.long),
+            )
+            candidate_telemetry_seen = candidate_telemetry_seen.index_fill(0, running_rows, True)
             if availability_policy is not None:
                 assert available is not None
                 running_utility = availability_policy.mask_utility(running_utility, available[running])
@@ -322,17 +410,8 @@ class AdaptiveRewardCostTrajectory(nn.Module):
             selected_travel = travel.gather(1, safe_indices.unsqueeze(1)).squeeze(1) * selection.active
             selected_overlap = overlap.gather(1, safe_indices.unsqueeze(1)).squeeze(1) * selection.active
             selected_utility = utility.gather(1, safe_indices.unsqueeze(1)).squeeze(1) * selection.active
-            updater_input = torch.cat(
-                (
-                    _select(selection.weights[selection.active], dynamic_samples.packed[selected_within_running]),
-                    _select(selection.weights[selection.active], f_spec[selection.active]),
-                    _select(selection.weights[selection.active], point_semantic[selection.active]),
-                    _select(selection.weights[selection.active], reliability[selection.active]),
-                ),
-                dim=-1,
-            )
-            corrections = self.update_net(updater_input, write_scale=active_config.write_scale)
-            selected_corrections = PlaneCorrections(xy=corrections.xy, xz=corrections.xz, yz=corrections.yz)
+            selected_candidate_updates = candidate_updates.rows(selected_within_running)
+            selected_corrections = selected_candidate_updates.weighted(selection.weights[selection.active])
             update_norm = torch.zeros(batch, dtype=reference.dtype, device=reference.device).index_copy(
                 0,
                 selection.active.nonzero(as_tuple=False).squeeze(1),
@@ -404,6 +483,13 @@ class AdaptiveRewardCostTrajectory(nn.Module):
             stop_reasons=reasons,
             candidate_evaluations=candidate_evaluations,
             eligible_candidate_evaluations=eligible_candidate_evaluations,
+            candidate_reward_sum=candidate_reward_sum,
+            candidate_reward_max=torch.where(candidate_telemetry_seen, candidate_reward_max, torch.zeros_like(candidate_reward_max)),
+            candidate_travel_cost_sum=candidate_travel_cost_sum,
+            candidate_overlap_cost_sum=candidate_overlap_cost_sum,
+            candidate_utility_sum=candidate_utility_sum,
+            candidate_utility_max=torch.where(candidate_telemetry_seen, candidate_utility_max, torch.zeros_like(candidate_utility_max)),
+            positive_utility_candidate_count=positive_utility_candidate_count,
         )
 
     def forward(
