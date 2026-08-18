@@ -58,7 +58,7 @@ def test_gate_f_resolves_the_exact_optimizer_set_including_offset_predictor() ->
         "base_plane_projector": 579,
         "spectral_anchor_builder.band_projector": 520,
         "trajectory.state_initializer": 2080,
-        "trajectory.reward_net": 14337,
+        "trajectory.reward_net": 8193,
         "trajectory.update_net": 47072,
         "decoder": 8321,
     }

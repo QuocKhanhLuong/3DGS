@@ -237,15 +237,3 @@ def test_gate_g_latches_each_batch_subject_and_strict_checkpoint_loader(tmp_path
     torch.save({"metadata": metadata, "state_dict": checkpoint_model.state_dict()}, invalid)
     with pytest.raises(ValueError, match="metadata"):
         load_validated_baseline_checkpoint(clone, invalid)
-
-
-def test_old_126_d_reward_checkpoint_is_rejected_before_state_load(tmp_path) -> None:
-    checkpoint_model = _model()
-    metadata = dict(baseline_checkpoint_metadata(checkpoint_model))
-    metadata["schema"] = "point-guided-gate-f-baseline-v1"
-    metadata["reward_descriptor_channels"] = 126
-    path = tmp_path / "old_reward_descriptor.pt"
-    torch.save({"metadata": metadata, "state_dict": checkpoint_model.state_dict()}, path)
-
-    with pytest.raises(ValueError, match="metadata"):
-        load_validated_baseline_checkpoint(_model(), path)

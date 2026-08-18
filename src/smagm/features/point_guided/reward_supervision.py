@@ -663,18 +663,7 @@ def counterfactual_reward_supervision(
     )
 
     dynamic_samples = trajectory.dynamic_state_query(state, reference, feature_geometry)
-    updater_input = torch.cat((dynamic_samples.packed, f_spec, point_semantic, reliability), dim=-1)
-    candidate_updates = trajectory.update_net.forward_candidates(
-        updater_input,
-        write_scale=trajectory.config.write_scale,
-    )
-    descriptor = build_reward_descriptor(
-        dynamic_samples,
-        point_semantic,
-        gate_b_descriptors,
-        reliability,
-        candidate_updates.packed,
-    )
+    descriptor = build_reward_descriptor(dynamic_samples, point_semantic, gate_b_descriptors, reliability)
     all_reward_prediction = trajectory.reward_net(descriptor.detach())
     candidates = sample_counterfactual_candidates(all_reward_prediction.detach(), selected_indices, config, generator=generator)
     reward_prediction = all_reward_prediction.gather(1, candidates.indices)

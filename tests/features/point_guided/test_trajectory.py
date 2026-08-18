@@ -9,12 +9,9 @@ from smagm.features.point_guided import PointGuidedConfig, PointGuidedMRIModel
 from smagm.features.point_guided.contracts import VolumeGeometry
 from smagm.features.point_guided.reward import GateBDescriptorContext
 from smagm.features.point_guided.spectral_query import FeatureGridGeometry
-from smagm.features.point_guided.state_init import DynamicTriPlanes
 from smagm.features.point_guided.trajectory import AdaptiveRewardCostTrajectory
 from smagm.features.point_guided.trajectory_cost import TrajectoryConfig
 from smagm.features.point_guided.triplane_projection import BaseTriPlanes
-from smagm.features.point_guided.updater import UpdateNet
-from smagm.features.point_guided.writeback import CompactTriPlaneWriteback
 
 
 def _geometry() -> FeatureGridGeometry:
@@ -126,32 +123,6 @@ def test_trajectory_stops_before_update_when_all_utilities_are_nonpositive() -> 
     assert torch.isfinite(result.candidate_utility_max).all()
     assert result.positive_utility_candidate_count.tolist() == [0]
     assert bool(result.candidate_utility_max[0] < 0.0)
-
-
-def test_selected_candidate_update_reuse_preserves_previous_writeback_semantics() -> None:
-    torch.manual_seed(29)
-    geometry = _geometry()
-    state = DynamicTriPlanes(
-        xy=torch.zeros(1, 32, 5, 7),
-        xz=torch.zeros(1, 32, 3, 7),
-        yz=torch.zeros(1, 32, 3, 5),
-    )
-    points = geometry.feature_dhw_to_ras_mm(torch.tensor([[[1.0, 2.0, 3.0], [1.0, 3.0, 4.0], [2.0, 2.0, 5.0]]]))
-    updater = UpdateNet()
-    updater_input = torch.randn(1, 3, 270)
-    bank = updater.forward_candidates(updater_input, write_scale=0.2)
-    selected_index = 1
-    scalar = updater(updater_input[:, selected_index], write_scale=0.2)
-    one_hot = torch.nn.functional.one_hot(torch.tensor([selected_index]), num_classes=3).to(updater_input.dtype)
-    reused = bank.weighted(one_hot)
-    writeback = CompactTriPlaneWriteback(support_radius_mm=4.0)
-    previous = writeback(state, points[:, selected_index], scalar, geometry)
-    current = writeback(state, points[:, selected_index], reused, geometry)
-    torch.testing.assert_close(current.xy, previous.xy)
-    torch.testing.assert_close(current.xz, previous.xz)
-    torch.testing.assert_close(current.yz, previous.yz)
-
-
 def test_model_trajectory_reuses_one_gate_b_pass_and_keeps_full_forward_closed() -> None:
     trajectory_config = TrajectoryConfig(
         lambda_travel=0.01,

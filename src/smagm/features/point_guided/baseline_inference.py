@@ -20,14 +20,14 @@ from torch import Tensor, nn
 from .availability import ExactNoRevisitPolicy
 from .contracts import POINT_SPECTRAL_EVIDENCE_CHANNELS, VolumeGeometry
 from .decoder import ImplicitTriPlaneDecoder
-from .reward import GateBDescriptorContext, REWARD_DESCRIPTOR_CHANNELS
+from .reward import GateBDescriptorContext
 from .spectral_query import FeatureGridGeometry
 from .trajectory import AdaptiveRewardCostTrajectory, TrajectoryResult
 from .trajectory_cost import TrajectoryConfig
 from .triplane_projection import BaseTriPlanes
 
 
-_CHECKPOINT_SCHEMA = "point-guided-gate-f-baseline-v2"
+_CHECKPOINT_SCHEMA = "point-guided-gate-f-baseline-v1"
 
 
 def _positive_finite(name: str, value: float) -> float:
@@ -277,7 +277,6 @@ def baseline_checkpoint_metadata(model: nn.Module) -> Mapping[str, Any]:
         "schema": _CHECKPOINT_SCHEMA,
         "model_config": _canonical_config(model_config),
         "trajectory_config": _canonical_config(trajectory.config),
-        "reward_descriptor_channels": REWARD_DESCRIPTOR_CHANNELS,
         "decoder_architecture": "96->64->32->1",
         "gate_e_architecture": "target-after-inference objective",
     }

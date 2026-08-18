@@ -6,7 +6,6 @@ import pytest
 import torch
 
 from smagm.features.point_guided.updater import (
-    CandidateCorrections,
     UPDATER_INPUT_CHANNELS,
     UPDATER_OUTPUT_CHANNELS,
     UpdateNet,
@@ -31,26 +30,3 @@ def test_updater_uses_full_270_d_input_and_returns_three_bounded_32_d_blocks() -
 def test_updater_fails_closed_for_non_270_input(shape: tuple[int, ...]) -> None:
     with pytest.raises(ValueError, match=r"\[B,270\]"):
         UpdateNet()(torch.randn(*shape), write_scale=0.1)
-
-
-def test_candidate_updates_match_scalar_update_rows_and_are_bounded() -> None:
-    torch.manual_seed(17)
-    updater = UpdateNet()
-    values = torch.randn(2, 4, UPDATER_INPUT_CHANNELS, requires_grad=True)
-    bank = updater.forward_candidates(values, write_scale=0.25)
-
-    assert isinstance(bank, CandidateCorrections)
-    assert bank.packed.shape == (2, 4, UPDATER_OUTPUT_CHANNELS)
-    assert bool((bank.packed.abs() <= 0.25 + 1e-6).all())
-    for batch in range(2):
-        for candidate in range(4):
-            scalar = updater(values[batch, candidate].unsqueeze(0), write_scale=0.25)
-            torch.testing.assert_close(bank.xy[batch, candidate], scalar.xy[0])
-            torch.testing.assert_close(bank.xz[batch, candidate], scalar.xz[0])
-            torch.testing.assert_close(bank.yz[batch, candidate], scalar.yz[0])
-
-    selected = bank.weighted(torch.nn.functional.one_hot(torch.tensor([2, 1]), num_classes=4).to(values.dtype))
-    torch.testing.assert_close(selected.packed[0], bank.packed[0, 2])
-    torch.testing.assert_close(selected.packed[1], bank.packed[1, 1])
-    bank.packed.square().mean().backward()
-    assert values.grad is not None and bool(torch.isfinite(values.grad).all())

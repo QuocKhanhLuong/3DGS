@@ -319,19 +319,6 @@ class AdaptiveRewardCostTrajectory(nn.Module):
             running_state = _subset_state(state, running)
             running_points = refined_points_ras_mm[running]
             dynamic_samples = self.dynamic_state_query(running_state, running_points, feature_geometry)
-            updater_input = torch.cat(
-                (
-                    dynamic_samples.packed,
-                    f_spec[running],
-                    point_semantic[running],
-                    reliability[running],
-                ),
-                dim=-1,
-            )
-            candidate_updates = self.update_net.forward_candidates(
-                updater_input,
-                write_scale=active_config.write_scale,
-            )
             descriptor = build_reward_descriptor(
                 dynamic_samples,
                 point_semantic[running],
@@ -341,7 +328,6 @@ class AdaptiveRewardCostTrajectory(nn.Module):
                     q_yz=gate_b_descriptors.q_yz[running],
                 ),
                 reliability[running],
-                candidate_updates.packed,
             )
             running_reward = self.reward_net(descriptor)
             running_travel = travel_cost(
@@ -410,8 +396,17 @@ class AdaptiveRewardCostTrajectory(nn.Module):
             selected_travel = travel.gather(1, safe_indices.unsqueeze(1)).squeeze(1) * selection.active
             selected_overlap = overlap.gather(1, safe_indices.unsqueeze(1)).squeeze(1) * selection.active
             selected_utility = utility.gather(1, safe_indices.unsqueeze(1)).squeeze(1) * selection.active
-            selected_candidate_updates = candidate_updates.rows(selected_within_running)
-            selected_corrections = selected_candidate_updates.weighted(selection.weights[selection.active])
+            updater_input = torch.cat(
+                (
+                    _select(selection.weights[selection.active], dynamic_samples.packed[selected_within_running]),
+                    _select(selection.weights[selection.active], f_spec[selection.active]),
+                    _select(selection.weights[selection.active], point_semantic[selection.active]),
+                    _select(selection.weights[selection.active], reliability[selection.active]),
+                ),
+                dim=-1,
+            )
+            corrections = self.update_net(updater_input, write_scale=active_config.write_scale)
+            selected_corrections = PlaneCorrections(xy=corrections.xy, xz=corrections.xz, yz=corrections.yz)
             update_norm = torch.zeros(batch, dtype=reference.dtype, device=reference.device).index_copy(
                 0,
                 selection.active.nonzero(as_tuple=False).squeeze(1),
