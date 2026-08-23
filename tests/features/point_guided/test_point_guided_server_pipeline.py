@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import inspect
 import json
+import math
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,12 +27,15 @@ from smagm.features.point_guided.semantic_supervision import build_coarse_semant
 from smagm.features.point_guided.training_objective import SupervisionConfig
 from smagm.features.point_guided.trajectory_cost import TrajectoryConfig
 from smagm.data.brats21_point_guided import PointGuidedBatch
+from smagm.cli.point_guided_train import _parser
 from smagm.cli.point_guided_eval import _load_split, resolve_split_file
 from smagm.training.point_guided import (
     DistributedContext,
     DistributedEvalSampler,
     PointGuidedTrainer,
     PointGuidedTrainingSettings,
+    _assert_finite_optimizer_gradients,
+    _assert_finite_optimizer_state_and_parameters,
     _save_overfit_predictions,
     _TrainingContextModule,
     build_model_from_config,
@@ -56,6 +61,40 @@ def _model() -> PointGuidedMRIModel:
             write_scale=0.1,
         ),
     )
+
+
+@pytest.mark.parametrize("nonfinite", (float("nan"), float("inf")))
+def test_optimizer_gradient_guard_rejects_nonfinite_gradients(nonfinite: float) -> None:
+    parameter = nn.Parameter(torch.tensor([1.0]))
+    optimizer = torch.optim.Adam((parameter,), lr=1e-4)
+    parameter.grad = torch.tensor([nonfinite])
+
+    with pytest.raises(FloatingPointError, match="non-finite gradient before optimizer step"):
+        _assert_finite_optimizer_gradients(optimizer)
+
+
+def test_optimizer_state_guard_rejects_nonfinite_adam_state() -> None:
+    parameter = nn.Parameter(torch.tensor([1.0]))
+    optimizer = torch.optim.Adam((parameter,), lr=1e-4)
+    parameter.grad = torch.tensor([1.0])
+    optimizer.step()
+    optimizer.state[parameter]["exp_avg"].fill_(float("nan"))
+
+    with pytest.raises(FloatingPointError, match="non-finite optimizer state after optimizer step"):
+        _assert_finite_optimizer_state_and_parameters(optimizer)
+
+
+def test_cli_accepts_explicit_single_epoch_fp32_profile_overrides() -> None:
+    args = _parser().parse_args(
+        [
+            "--config", "configs/training/point_guided_brats21_4070.json",
+            "--data-root", "data/preprocessed/BraTS21",
+            "--epochs", "1",
+            "--no-amp",
+        ]
+    )
+    assert args.epochs == 1
+    assert args.amp is False
 
 
 def test_training_context_and_semantic_term_are_target_after_inference_only() -> None:
@@ -121,7 +160,7 @@ def test_optimizer_ownership_and_clean_checkpoint_roundtrip(tmp_path: Path) -> N
     assert state["global_step"] == 11
 
 
-def test_one_synthetic_point_guided_trainer_step_includes_semantic_term() -> None:
+def test_one_synthetic_point_guided_trainer_step_includes_semantic_term(monkeypatch: pytest.MonkeyPatch) -> None:
     torch.manual_seed(92)
     model = _model()
     optimizer, _ = build_baseline_optimizer(model, BaselineTrainingConfig())
@@ -155,10 +194,60 @@ def test_one_synthetic_point_guided_trainer_step_includes_semantic_term() -> Non
     distributed = DistributedContext(rank=0, local_rank=0, world_size=1, device=torch.device("cpu"))
     trainer = PointGuidedTrainer(model, optimizer, settings, supervision, distributed)
     trainer.bind_context_module(_TrainingContextModule(model))
+    import smagm.training.point_guided as point_guided_training
+
+    original_metrics = point_guided_training.compute_reconstruction_metrics
+    metric_grad_modes: list[bool] = []
+
+    def tracked_metrics(*args, **kwargs):
+        metric_grad_modes.append(torch.is_grad_enabled())
+        return original_metrics(*args, **kwargs)
+
+    monkeypatch.setattr(point_guided_training, "compute_reconstruction_metrics", tracked_metrics)
     stats = trainer.run_epoch([batch], training=True)  # type: ignore[arg-type]
     assert torch.isfinite(torch.tensor(stats["total_loss"]))
+    assert torch.isfinite(torch.tensor(stats["grad_norm"]))
     assert stats["semantic_loss"] > 0.0
     assert stats["examples"] == 1.0
+    # Gate-E already evaluates SSIM for the training objective.  The full
+    # reconstruction diagnostic remains validation-only so this path cannot
+    # allocate a duplicate 3-D SSIM pyramid or force per-batch CPU transfers.
+    assert metric_grad_modes == []
+    for stage in (
+        "data_wait",
+        "frontend",
+        "trajectory",
+        "decoder",
+        "gate_e_loss",
+        "diagnostic_metrics",
+        "backward",
+        "optimizer_step",
+    ):
+        assert stats[f"timing_{stage}_seconds"] >= 0.0
+    validation_stats = trainer.run_epoch([batch], training=False)  # type: ignore[arg-type]
+    assert metric_grad_modes == [False]
+    assert all(torch.isfinite(torch.tensor(validation_stats[name])) for name in ("MAE", "PSNR", "SSIM"))
+    assert validation_stats["timing_diagnostic_metrics_seconds"] >= 0.0
+    for stats in (stats, validation_stats):
+        for name in (
+            "fraction_K0",
+            "fraction_positive_utility",
+            "candidate_reward_mean",
+            "candidate_reward_max",
+            "r_star_mean",
+            "r_star_max",
+            "r_star_positive_fraction",
+            "travel_cost_mean",
+            "overlap_cost_mean",
+            "step_cost",
+            "utility_before_cost_mean",
+            "utility_after_cost_mean",
+            "utility_after_cost_max",
+        ):
+            assert math.isfinite(stats[name])
+        assert 0.0 <= stats["fraction_K0"] <= 1.0
+        assert 0.0 <= stats["fraction_positive_utility"] <= 1.0
+        assert 0.0 <= stats["r_star_positive_fraction"] <= 1.0
 
 
 def test_server_configs_keep_locked_constants() -> None:
@@ -187,6 +276,28 @@ def test_server_configs_keep_locked_constants() -> None:
     assert supervision.counterfactual_candidates == 8
     assert settings.lambda_semantic == 0.2
     assert settings.normalization_space == "masked_robust_01_[0,1]"
+
+    _, _, profile_settings = build_model_from_config(
+        json.loads((root / "configs/training/point_guided_brats21_4070.json").read_text(encoding="utf-8")),
+        {"epochs": 1, "amp": False},
+    )
+    assert profile_settings.epochs == 1
+    assert profile_settings.amp is False
+    assert profile_settings.semantic_class_weights == pytest.approx(
+        (0.04799838777997042, 1.098059882075567, 1.8539417301444623)
+    )
+
+    main_payload = json.loads((root / "configs/training/point_guided_brats21_4070.json").read_text(encoding="utf-8"))
+    main_model, main_supervision, _ = build_model_from_config(main_payload)
+    assert main_model.trajectory is not None
+    assert main_supervision.reward_ranking_weight == pytest.approx(0.0)
+    assert main_supervision.reward_ranking_min_target_gap == pytest.approx(0.001)
+    serialized = asdict(main_supervision)
+    assert serialized["reward_ranking_weight"] == pytest.approx(0.0)
+    assert serialized["reward_ranking_min_target_gap"] == pytest.approx(0.001)
+    assert main_model.trajectory.config.lambda_travel == pytest.approx(0.05)
+    assert main_model.trajectory.config.lambda_overlap == pytest.approx(0.20)
+    assert main_model.trajectory.config.lambda_step == pytest.approx(0.05)
 
 
 def test_normalization_policy_controls_metric_range_and_space_label() -> None:

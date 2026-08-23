@@ -38,7 +38,9 @@
     "high_candidate_count": 16,
     "random_candidate_count": 15,
     "spill_weight_beta": 1.0,
-    "spill_sample_count": 12
+    "spill_sample_count": 12,
+    "reward_ranking_weight": 0.0,
+    "reward_ranking_min_target_gap": 0.001
   },
   "training": {
     "learning_rate": 0.0001,
@@ -49,7 +51,14 @@
     "gradient_clip": 1.0,
     "decoder_chunk_size": 16384,
     "lambda_semantic": 0.2,
-    "semantic_class_weights": null,
+    "semantic_class_weights": [0.04799838777997042, 1.098059882075567, 1.8539417301444623],
+    "semantic_class_weight_provenance": {
+      "method": "train_split_inverse_frequency_mean_one",
+      "class_order": ["normal", "edema", "tumor_core_candidate"],
+      "train_subject_count": 965,
+      "split_sha256": "f13679a4a76ce9fea9ef29cee3bf1a4b64f3ecf5abaaae477abd1b09eb042f15",
+      "voxel_counts_within_input_brain_mask": [1338350294, 58501961, 34649771]
+    },
     "num_workers": 2,
     "seed": 20260813,
     "amp": true,

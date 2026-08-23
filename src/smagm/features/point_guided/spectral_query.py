@@ -407,13 +407,19 @@ def _sample_plane(plane: Tensor, *, row: Tensor, column: Tensor) -> Tensor:
     """Bilinearly sample one ``[B,C,H,W]`` plane at ``[B,N]`` coordinates."""
 
     grid = _plane_grid(row, column, rows=plane.shape[-2], columns=plane.shape[-1])
-    sampled = F.grid_sample(
-        plane,
-        grid,
-        mode="bilinear",
-        padding_mode="zeros",
-        align_corners=False,
-    )
+    # ``grid`` derives from physical RAS-mm geometry and deliberately retains
+    # its dtype.  The static neural anchor may be autocast to lower precision,
+    # so align it to the physical query only at the differentiable sampling
+    # boundary rather than reducing physical coordinates to anchor precision.
+    with torch.autocast(device_type=grid.device.type, enabled=False):
+        sampling_plane = plane.to(dtype=grid.dtype)
+        sampled = F.grid_sample(
+            sampling_plane,
+            grid,
+            mode="bilinear",
+            padding_mode="zeros",
+            align_corners=False,
+        )
     return sampled[..., 0].transpose(1, 2)
 
 
@@ -441,8 +447,6 @@ class SpectralPointQuery(nn.Module):
             raise ValueError("points_ras_mm must have shape [B, N, 3] matching the anchor batch")
         if points_ras_mm.device != anchor.xy.device:
             raise ValueError("points_ras_mm and anchor must share one device")
-        if points_ras_mm.dtype != anchor.xy.dtype:
-            raise TypeError("points_ras_mm and anchor must share one floating-point dtype")
 
         depth, height, width = feature_geometry.shape_dhw
         expected_shapes = (

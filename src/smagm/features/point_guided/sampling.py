@@ -48,21 +48,33 @@ def voxel_dhw_to_ras_mm(voxel_dhw: torch.Tensor, geometry: VolumeGeometry) -> to
     """
 
     _require_finite_float_tensor("voxel_dhw", voxel_dhw, final_dimension=3)
-    affine = _affine_tensor(geometry, dtype=voxel_dhw.dtype, device=voxel_dhw.device)
-    whd = voxel_dhw[..., (2, 1, 0)]
-    homogeneous = torch.cat((whd, torch.ones_like(whd[..., :1])), dim=-1)
-    return torch.matmul(homogeneous, affine.transpose(0, 1))[..., :3]
+    # Physical coordinates are an explicit interface boundary, not a neural
+    # activation.  CUDA AMP would otherwise cast this matmul to fp16 even when
+    # its coordinates are fp32, violating the point/refinement dtype contract.
+    # Keep the affine operation in the caller-requested coordinate dtype while
+    # preserving its gradient path.
+    with torch.autocast(device_type=voxel_dhw.device.type, enabled=False):
+        affine = _affine_tensor(geometry, dtype=voxel_dhw.dtype, device=voxel_dhw.device)
+        whd = voxel_dhw[..., (2, 1, 0)]
+        homogeneous = torch.cat((whd, torch.ones_like(whd[..., :1])), dim=-1)
+        ras_mm = torch.matmul(homogeneous, affine.transpose(0, 1))[..., :3]
+    return ras_mm
 
 
 def ras_mm_to_voxel_dhw(ras_mm: torch.Tensor, geometry: VolumeGeometry) -> torch.Tensor:
     """Map canonical RAS ``XYZ`` mm to continuous ``[..., d, h, w]`` indices."""
 
     _require_finite_float_tensor("ras_mm", ras_mm, final_dimension=3)
-    affine = _affine_tensor(geometry, dtype=ras_mm.dtype, device=ras_mm.device)
-    inverse = torch.linalg.inv(affine)
-    homogeneous = torch.cat((ras_mm, torch.ones_like(ras_mm[..., :1])), dim=-1)
-    whd = torch.matmul(homogeneous, inverse.transpose(0, 1))[..., :3]
-    return whd[..., (2, 1, 0)]
+    # Match the forward physical-coordinate boundary.  In particular, do not
+    # feed an fp16 affine to linalg.inv or allow the inverse matmul to narrow
+    # caller-owned fp32/fp64 RAS coordinates under ambient AMP.
+    with torch.autocast(device_type=ras_mm.device.type, enabled=False):
+        affine = _affine_tensor(geometry, dtype=ras_mm.dtype, device=ras_mm.device)
+        inverse = torch.linalg.inv(affine)
+        homogeneous = torch.cat((ras_mm, torch.ones_like(ras_mm[..., :1])), dim=-1)
+        whd = torch.matmul(homogeneous, inverse.transpose(0, 1))[..., :3]
+        voxel_dhw = whd[..., (2, 1, 0)]
+    return voxel_dhw
 
 
 def voxel_dhw_to_grid_sample_coordinates(

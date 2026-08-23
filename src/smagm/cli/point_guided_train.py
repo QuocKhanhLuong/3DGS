@@ -49,6 +49,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--lambda-step", type=float)
     parser.add_argument("--learning-rate", type=float)
     parser.add_argument("--weight-decay", type=float)
+    parser.add_argument("--epochs", type=int)
     parser.add_argument("--medicalnet-checkpoint", type=Path)
     parser.add_argument("--medicalnet-sha256")
     parser.add_argument("--require-pretrained-backbone", action=argparse.BooleanOptionalAction, default=None)
@@ -61,15 +62,27 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     args = _parser().parse_args(argv)
+    raw_config = _load_config(args.config)
     if args.preflight:
+        data_config = raw_config.get("data", {})
+        if not isinstance(data_config, dict):
+            raise ValueError("point-guided data config must be an object")
         result = preflight(
             data_root=args.data_root,
             checkpoint=args.medicalnet_checkpoint,
             expected_sha256=args.medicalnet_sha256,
+            require_segmentation=bool(data_config.get("require_segmentation", True)),
+            split_seed=int(data_config.get("split_seed", 20260813)),
+            split_fractions=tuple(data_config.get("split_fractions", (0.8, 0.1, 0.1))),
+            split_file=args.split_file,
+            max_train_subjects=args.max_train_subjects,
+            max_val_subjects=args.max_val_subjects,
+            max_test_subjects=args.max_test_subjects,
+            overfit=bool(args.overfit),
         )
+        result["config"] = str(args.config.resolve())
         print(json.dumps(result, sort_keys=True, indent=2))
         return
-    raw_config = _load_config(args.config)
     overrides: dict[str, Any] = {
         key: value
         for key, value in {
@@ -88,6 +101,7 @@ def main(argv: list[str] | None = None) -> None:
             "lambda_step": args.lambda_step,
             "learning_rate": args.learning_rate,
             "weight_decay": args.weight_decay,
+            "epochs": args.epochs,
             "medicalnet_checkpoint_path": None if args.medicalnet_checkpoint is None else str(args.medicalnet_checkpoint),
             "medicalnet_checkpoint_sha256": args.medicalnet_sha256,
             "require_pretrained_backbone": args.require_pretrained_backbone,

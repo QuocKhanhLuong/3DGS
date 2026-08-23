@@ -35,7 +35,19 @@ def _sample_plane(plane: Tensor, row: Tensor, column: Tensor) -> Tensor:
         ),
         dim=-1,
     ).unsqueeze(2)
-    sampled = F.grid_sample(plane, grid, mode="bilinear", padding_mode="zeros", align_corners=False)
+    # ``grid`` derives from physical RAS-mm geometry and deliberately retains
+    # its coordinate dtype.  The dynamic state is latent storage and may be
+    # autocast to lower precision, so align it to the physical query only at
+    # the differentiable sampling boundary rather than narrowing geometry.
+    with torch.autocast(device_type=grid.device.type, enabled=False):
+        sampling_plane = plane.to(dtype=grid.dtype)
+        sampled = F.grid_sample(
+            sampling_plane,
+            grid,
+            mode="bilinear",
+            padding_mode="zeros",
+            align_corners=False,
+        )
     return sampled[..., 0].transpose(1, 2)
 
 
@@ -101,8 +113,8 @@ class DynamicStatePointQuery(nn.Module):
         if not isinstance(feature_geometry, FeatureGridGeometry):
             raise TypeError("feature_geometry must be a FeatureGridGeometry instance")
         _float_tensor("points_ras_mm", points_ras_mm, rank=3, last=3)
-        if points_ras_mm.shape[0] != state.xy.shape[0] or points_ras_mm.dtype != state.xy.dtype or points_ras_mm.device != state.xy.device:
-            raise ValueError("points_ras_mm must match dynamic-state batch, dtype, and device")
+        if points_ras_mm.shape[0] != state.xy.shape[0] or points_ras_mm.device != state.xy.device:
+            raise ValueError("points_ras_mm must match dynamic-state batch and device")
         depth, height, width = feature_geometry.shape_dhw
         expected = ((state.xy, (height, width)), (state.xz, (depth, width)), (state.yz, (depth, height)))
         if any(tuple(plane.shape[-2:]) != shape for plane, shape in expected):

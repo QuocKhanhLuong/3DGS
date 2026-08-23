@@ -61,6 +61,8 @@ class SupervisionConfig:
     random_candidate_count: int = 15
     spill_weight_beta: float = 1.0
     spill_sample_count: int = 12
+    reward_ranking_weight: float = 0.0
+    reward_ranking_min_target_gap: float = 0.001
 
     def __post_init__(self) -> None:
         for name in (
@@ -71,6 +73,8 @@ class SupervisionConfig:
             "lambda_monotonic",
             "lambda_delta",
             "spill_weight_beta",
+            "reward_ranking_weight",
+            "reward_ranking_min_target_gap",
         ):
             object.__setattr__(self, name, _finite_nonnegative(name, getattr(self, name)))
         data_range = float(self.ssim_data_range)
@@ -85,12 +89,16 @@ class SupervisionConfig:
             random_candidate_count=self.random_candidate_count,
             spill_weight_beta=self.spill_weight_beta,
             spill_sample_count=self.spill_sample_count,
+            reward_ranking_weight=self.reward_ranking_weight,
+            reward_ranking_min_target_gap=self.reward_ranking_min_target_gap,
         )
         for name in (
             "counterfactual_candidates",
             "high_candidate_count",
             "random_candidate_count",
             "spill_sample_count",
+            "reward_ranking_weight",
+            "reward_ranking_min_target_gap",
         ):
             object.__setattr__(self, name, getattr(counterfactual, name))
 
@@ -110,6 +118,8 @@ class SupervisionConfig:
             random_candidate_count=self.random_candidate_count,
             spill_weight_beta=self.spill_weight_beta,
             spill_sample_count=self.spill_sample_count,
+            reward_ranking_weight=self.reward_ranking_weight,
+            reward_ranking_min_target_gap=self.reward_ranking_min_target_gap,
         )
 
 

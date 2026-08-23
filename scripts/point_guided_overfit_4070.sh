@@ -5,6 +5,7 @@ set -euo pipefail
 : "${MEDICALNET_CKPT:?Set MEDICALNET_CKPT to a local MedicalNet ResNet10 checkpoint}"
 : "${MEDICALNET_SHA256:?Set MEDICALNET_SHA256 to the supplied checkpoint SHA-256 digest}"
 : "${OUTPUT_ROOT:?Set OUTPUT_ROOT to the run-artifact root}"
+RUN_NAME="${RUN_NAME:-point-guided-overfit-4070}"
 
 [[ -d "$BRATS21_ROOT" ]] || { echo "BRATS21_ROOT is not a directory: $BRATS21_ROOT" >&2; exit 2; }
 [[ -f "$MEDICALNET_CKPT" ]] || { echo "MEDICALNET_CKPT is not a file: $MEDICALNET_CKPT" >&2; exit 2; }
@@ -22,13 +23,16 @@ print("PyTorch CUDA version:", torch.version.cuda)
 PY
 echo "Chosen config: configs/training/point_guided_brats21_overfit.json"
 echo "Profile: ENGINEERING / DEBUG PROFILE; not a held-out validation claim"
+echo "Run name: ${RUN_NAME}"
+echo "Precision: FP32; CUDA AMP disabled"
 
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" PYTHONPATH=src python -m smagm.cli.point_guided_train \
   --config configs/training/point_guided_brats21_overfit.json \
   --data-root "$BRATS21_ROOT" \
   --output-root "$OUTPUT_ROOT" \
-  --run-name point-guided-overfit-4070 \
+  --run-name "$RUN_NAME" \
   --device cuda \
+  --no-amp \
   --overfit \
   --max-train-subjects 1 \
   --max-val-subjects 1 \

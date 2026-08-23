@@ -8,15 +8,17 @@ import pytest
 import torch
 
 from smagm.features.point_guided.cross_plane_consistency import CrossPlaneConsistency
+from smagm.features.point_guided.config import PointGuidedConfig
 from smagm.features.point_guided.contracts import VolumeGeometry
 from smagm.features.point_guided.medicalnet_resnet10 import MedicalNetResNet10
 from smagm.features.point_guided.sampling import voxel_dhw_to_ras_mm
-from smagm.features.point_guided.spectral_anchor import SPECTRAL_ANCHOR_CHANNELS, SpectralAnchor
+from smagm.features.point_guided.spectral_anchor import SPECTRAL_ANCHOR_CHANNELS, SpectralAnchor, StaticSpectralAnchor
 from smagm.features.point_guided.spectral_query import (
     FeatureGridGeometry,
     SpectralPointQuery,
     derive_feature_grid_geometry,
 )
+from smagm.features.point_guided.triplane_projection import BaseTriPlanes
 
 
 def _backbone() -> MedicalNetResNet10:
@@ -346,3 +348,59 @@ def test_query_is_parameter_free_and_preserves_float64_dtype() -> None:
     assert sum(parameter.numel() for parameter in module.parameters()) == 0
     samples = module(anchor, points_ras_mm, grid)
     assert samples.xy.dtype == samples.xz.dtype == samples.yz.dtype == torch.float64
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA AMP")
+def test_query_preserves_float32_geometry_and_gradients_with_fp16_anchor_under_cuda_amp() -> None:
+    grid = _derived_geometry()
+    depth, height, width = grid.shape_dhw
+    anchor = SpectralAnchor(
+        xy=torch.randn(1, SPECTRAL_ANCHOR_CHANNELS, height, width, device="cuda", dtype=torch.float16, requires_grad=True),
+        xz=torch.randn(1, SPECTRAL_ANCHOR_CHANNELS, depth, width, device="cuda", dtype=torch.float16, requires_grad=True),
+        yz=torch.randn(1, SPECTRAL_ANCHOR_CHANNELS, depth, height, device="cuda", dtype=torch.float16, requires_grad=True),
+    )
+    points_ras_mm = grid.feature_dhw_to_ras_mm(
+        torch.tensor([[[1.25, 1.5, 2.25]]], device="cuda", dtype=torch.float32)
+    ).detach().requires_grad_(True)
+
+    with torch.autocast(device_type="cuda", dtype=torch.float16):
+        samples = SpectralPointQuery()(anchor, points_ras_mm, grid)
+
+    assert samples.xy.dtype == samples.xz.dtype == samples.yz.dtype == torch.float32
+    assert samples.xy.device == samples.xz.device == samples.yz.device == points_ras_mm.device
+    loss = samples.xy.square().mean() + samples.xz.square().mean() + samples.yz.square().mean()
+    loss.backward()
+    assert points_ras_mm.grad is not None
+    assert bool(torch.isfinite(points_ras_mm.grad).all())
+    assert bool(points_ras_mm.grad.abs().sum() > 0.0)
+    for plane in (anchor.xy, anchor.xz, anchor.yz):
+        assert plane.grad is not None
+        assert bool(torch.isfinite(plane.grad).all())
+        assert bool(plane.grad.abs().sum() > 0.0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA AMP")
+def test_query_preserves_static_anchor_projector_gradients_under_cuda_amp() -> None:
+    grid = _derived_geometry()
+    depth, height, width = grid.shape_dhw
+    builder = StaticSpectralAnchor(PointGuidedConfig(num_semantic_classes=3), input_channels=64).cuda()
+    base_planes = BaseTriPlanes(
+        xy=torch.randn(1, 64, height, width, device="cuda", dtype=torch.float32),
+        xz=torch.randn(1, 64, depth, width, device="cuda", dtype=torch.float32),
+        yz=torch.randn(1, 64, depth, height, device="cuda", dtype=torch.float32),
+    )
+    points_ras_mm = grid.feature_dhw_to_ras_mm(
+        torch.tensor([[[1.25, 1.5, 2.25]]], device="cuda", dtype=torch.float32)
+    ).detach().requires_grad_(True)
+
+    with torch.autocast(device_type="cuda", dtype=torch.float16):
+        anchor = builder(base_planes)
+        samples = SpectralPointQuery()(anchor, points_ras_mm, grid)
+        loss = samples.xy.square().mean() + samples.xz.square().mean() + samples.yz.square().mean()
+    assert anchor.xy.dtype == anchor.xz.dtype == anchor.yz.dtype == torch.float16
+    assert samples.xy.dtype == samples.xz.dtype == samples.yz.dtype == torch.float32
+    loss.backward()
+
+    assert builder.band_projector.weight.grad is not None
+    assert bool(torch.isfinite(builder.band_projector.weight.grad).all())
+    assert bool(builder.band_projector.weight.grad.abs().sum() > 0.0)

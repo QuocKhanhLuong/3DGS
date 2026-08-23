@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import pickle
 
 import numpy as np
 import pytest
@@ -14,11 +15,15 @@ from smagm.data.brats21_point_guided import (
     derive_input_brain_mask,
     deterministic_subject_split,
     discover_point_guided_subject,
+    discover_point_guided_subject_ids,
+    inventory_point_guided_subjects,
     load_point_guided_subject,
     nifti_xyz_to_dhw,
     PointGuidedNormalizationConfig,
+    structural_inventory_point_guided_subjects,
     xyz_shape_to_dhw,
 )
+from smagm.training.point_guided import preflight
 
 
 def _nibabel():
@@ -109,6 +114,10 @@ def test_full_volume_load_keeps_observations_target_and_segmentation_separate(tm
     background = first.observations[:, ~first.brain_mask[0]]
     assert torch.equal(background, torch.zeros_like(background))
     assert all(metadata.metadata_hash == metadata.record_hash for metadata in first.normalization_metadata.values())
+    round_trip = pickle.loads(pickle.dumps(first))
+    assert round_trip.to_metadata() == first.to_metadata()
+    batch = collate_point_guided_samples([first])
+    assert pickle.loads(pickle.dumps(batch)).subject_ids == (first.subject_id,)
 
 
 def test_target_and_segmentation_changes_do_not_change_input_observations_or_mask(tmp_path: Path) -> None:
@@ -298,6 +307,151 @@ def test_invalid_segmentation_label_is_rejected(tmp_path: Path) -> None:
     subject_dir = _write_subject(tmp_path, segmentation_values=labels)
     with pytest.raises(BraTS21PointGuidedValidationError, match="unexpected labels"):
         load_point_guided_subject(subject_dir, require_segmentation=True)
+
+
+def test_partial_cohort_inventory_keeps_only_complete_payload_valid_subjects(tmp_path: Path) -> None:
+    complete = _write_subject(tmp_path, subject_id="BraTS2021_00000")
+    missing_flair = _write_subject(tmp_path, subject_id="BraTS2021_00001")
+    (missing_flair / f"{missing_flair.name}_flair.nii.gz").unlink()
+    shifted = np.diag((2.0, 3.0, 4.0, 1.0))
+    shifted[0, 3] = 1.0
+    _write_subject(tmp_path, subject_id="BraTS2021_00002", target_affine=shifted)
+
+    inventory = inventory_point_guided_subjects(tmp_path, require_segmentation=True)
+
+    assert [subject.subject_id for subject in inventory.complete_subjects] == [complete.name]
+    exclusions = {subject.subject_id: subject for subject in inventory.excluded_subjects}
+    assert exclusions[missing_flair.name].classification == "MISSING_FLAIR"
+    assert exclusions["BraTS2021_00002"].classification == "INVALID_GEOMETRY"
+    assert inventory.to_dict()["complete_subject_ids"] == [complete.name]
+
+
+def test_scoped_inventory_only_validates_selected_subject_payloads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    first = _write_subject(tmp_path, subject_id="BraTS2021_00000")
+    second = _write_subject(tmp_path, subject_id="BraTS2021_00001")
+    assert discover_point_guided_subject_ids(tmp_path) == (first.name, second.name)
+
+    import smagm.data.brats21_point_guided as point_guided_data
+
+    original = point_guided_data.load_point_guided_subject
+    loaded: list[str] = []
+
+    def tracked(subject, **kwargs):
+        loaded.append(subject.subject_id)
+        return original(subject, **kwargs)
+
+    monkeypatch.setattr(point_guided_data, "load_point_guided_subject", tracked)
+    inventory = inventory_point_guided_subjects(
+        tmp_path,
+        require_segmentation=True,
+        subject_ids=(first.name,),
+    )
+
+    assert [subject.subject_id for subject in inventory.complete_subjects] == [first.name]
+    assert loaded == [first.name]
+
+
+def test_preflight_uses_partial_cohort_inventory_without_admitting_exclusions(tmp_path: Path) -> None:
+    _write_subject(tmp_path, subject_id="BraTS2021_00000")
+    incomplete = _write_subject(tmp_path, subject_id="BraTS2021_00001")
+    (incomplete / f"{incomplete.name}_seg.nii.gz").unlink()
+
+    result = preflight(data_root=tmp_path, require_segmentation=True)
+
+    assert result["subject_count"] == 1
+    assert result["structural_inventory"]["eligible_subject_ids"] == ["BraTS2021_00000"]
+    exclusion = result["structural_inventory"]["excluded_subjects"][0]
+    assert exclusion["modality"] == "seg"
+    assert exclusion["reason"] == "missing_file"
+    assert result["test_payload_validation"] == "not_performed"
+
+
+def test_structural_inventory_rejects_required_missing_and_empty_files_without_nifti_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    complete = _write_subject(tmp_path, subject_id="BraTS2021_00000")
+    cases = (
+        ("BraTS2021_00001", "t1", "missing_file"),
+        ("BraTS2021_00002", "t2", "empty_file"),
+        ("BraTS2021_00003", "flair", "empty_file"),
+        ("BraTS2021_00004", "t1ce", "empty_file"),
+        ("BraTS2021_00005", "seg", "empty_file"),
+    )
+    for subject_id, modality, reason in cases:
+        subject = _write_subject(tmp_path, subject_id=subject_id)
+        path = subject / f"{subject_id}_{modality}.nii.gz"
+        if reason == "missing_file":
+            path.unlink()
+        else:
+            path.write_bytes(b"")
+
+    import smagm.data.brats21_point_guided as point_guided_data
+
+    def no_nifti_reader() -> object:
+        raise AssertionError("structural eligibility must not request nibabel")
+
+    monkeypatch.setattr(point_guided_data, "_nibabel", no_nifti_reader)
+    inventory = structural_inventory_point_guided_subjects(tmp_path, require_segmentation=True)
+
+    assert inventory.eligible_subject_ids == (complete.name,)
+    exclusions = {(item.subject_id, item.modality): item.reason for item in inventory.excluded_subjects}
+    assert exclusions == {(subject_id, modality): reason for subject_id, modality, reason in cases}
+    record = inventory.to_dict()
+    assert record["discovered_subject_count"] == 6
+    assert record["eligible_subject_count"] == 1
+    assert record["excluded_subject_count"] == 5
+    assert len(record["inventory_hash"]) == 64
+
+
+def test_structural_eligible_ids_are_the_only_split_inputs(tmp_path: Path) -> None:
+    subjects = [_write_subject(tmp_path, subject_id=f"BraTS2021_{index:05d}") for index in range(10)]
+    blocked = subjects[4]
+    (blocked / f"{blocked.name}_t2.nii.gz").write_bytes(b"")
+
+    inventory = structural_inventory_point_guided_subjects(tmp_path, require_segmentation=True)
+    split = deterministic_subject_split(inventory.eligible_subject_ids, seed=20260813)
+
+    assigned = set(split.train_subject_ids) | set(split.val_subject_ids) | set(split.test_subject_ids)
+    assert blocked.name not in assigned
+    assert assigned == set(inventory.eligible_subject_ids)
+
+
+def test_preflight_never_decodes_test_payloads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for index in range(10):
+        _write_subject(tmp_path, subject_id=f"BraTS2021_{index:05d}")
+
+    import smagm.data.brats21_point_guided as point_guided_data
+
+    original = point_guided_data.load_point_guided_subject
+    loaded: list[str] = []
+
+    def tracked(subject, **kwargs):
+        loaded.append(subject.subject_id)
+        return original(subject, **kwargs)
+
+    monkeypatch.setattr(point_guided_data, "load_point_guided_subject", tracked)
+    result = preflight(data_root=tmp_path, require_segmentation=True, split_seed=20260813)
+
+    test_ids = set(result["split"]["test"])
+    active_ids = set(result["active_payload_inventory"]["requested_subject_ids"])
+    assert test_ids
+    assert not test_ids.intersection(loaded)
+    assert set(loaded) == active_ids
+    assert result["test_payload_validation"] == "not_performed"
+
+
+def test_preflight_fails_closed_when_an_active_payload_is_invalid(tmp_path: Path) -> None:
+    for index in range(10):
+        _write_subject(tmp_path, subject_id=f"BraTS2021_{index:05d}")
+    eligible = structural_inventory_point_guided_subjects(tmp_path, require_segmentation=True)
+    split = deterministic_subject_split(eligible.eligible_subject_ids, seed=20260813)
+    invalid_subject_id = split.train_subject_ids[0]
+    invalid_path = tmp_path / invalid_subject_id / f"{invalid_subject_id}_t1.nii.gz"
+    invalid_path.write_bytes(b"invalid-but-nonempty")
+
+    with pytest.raises(ValueError, match=invalid_subject_id):
+        preflight(data_root=tmp_path, require_segmentation=True, split_seed=20260813)
 
 
 def test_subject_split_is_deterministic_hashed_and_capped() -> None:

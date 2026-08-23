@@ -114,8 +114,15 @@ def test_trajectory_stops_before_update_when_all_utilities_are_nonpositive() -> 
     assert result.steps == ()
     assert result.route_lengths.tolist() == [0]
     assert result.stop_reasons == ("nonpositive_utility",)
-
-
+    # K=0 must still retain target-free raw candidate evidence.  Otherwise a
+    # reward/cost scale mismatch is indistinguishable from no route execution.
+    assert result.candidate_evaluations.tolist() == [3]
+    assert result.candidate_reward_sum.requires_grad is False
+    assert result.candidate_reward_max.requires_grad is False
+    assert torch.isfinite(result.candidate_reward_max).all()
+    assert torch.isfinite(result.candidate_utility_max).all()
+    assert result.positive_utility_candidate_count.tolist() == [0]
+    assert bool(result.candidate_utility_max[0] < 0.0)
 def test_model_trajectory_reuses_one_gate_b_pass_and_keeps_full_forward_closed() -> None:
     trajectory_config = TrajectoryConfig(
         lambda_travel=0.01,
