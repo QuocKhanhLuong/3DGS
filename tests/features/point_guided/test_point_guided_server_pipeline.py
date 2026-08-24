@@ -26,7 +26,7 @@ from smagm.features.point_guided.model import PointGuidedMRIModel
 from smagm.features.point_guided.semantic_supervision import build_coarse_semantic_target, compute_semantic_grounding_loss
 from smagm.features.point_guided.training_objective import SupervisionConfig
 from smagm.features.point_guided.trajectory_cost import TrajectoryConfig
-from smagm.data.brats21_point_guided import PointGuidedBatch
+from smagm.data.brats21_point_guided import PointGuidedBatch, deterministic_subject_split
 from smagm.cli.point_guided_train import _parser
 from smagm.cli.point_guided_eval import _load_split, resolve_split_file
 from smagm.training.point_guided import (
@@ -130,9 +130,10 @@ def test_optimizer_ownership_and_clean_checkpoint_roundtrip(tmp_path: Path) -> N
     assert all(row.optimizer_member for row in ownership if row.module != "semantic_prior.backbone")
     assert all(not parameter.requires_grad for parameter in model.semantic_prior.backbone.parameters())
 
-    clean_path = save_clean_inference_checkpoint(tmp_path / "best_model.pt", model)
+    split_hash = "0123456789abcdef" * 4
+    clean_path = save_clean_inference_checkpoint(tmp_path / "best_model.pt", model, split_hash=split_hash)
     restored = _model()
-    load_validated_baseline_checkpoint(restored, clean_path)
+    load_validated_baseline_checkpoint(restored, clean_path, expected_split_hash=split_hash)
     for left, right in zip(model.state_dict().values(), restored.state_dict().values()):
         torch.testing.assert_close(left, right)
 
@@ -145,7 +146,7 @@ def test_optimizer_ownership_and_clean_checkpoint_roundtrip(tmp_path: Path) -> N
         global_step=11,
         best_validation_reconstruction_loss=0.25,
         training_config={"lambda_semantic": 0.2},
-        split_hash="a" * 64,
+        split_hash=split_hash,
         metadata={"validation_is_held_out": True},
     )
     restored_optimizer, _ = build_baseline_optimizer(restored, BaselineTrainingConfig())
@@ -154,7 +155,7 @@ def test_optimizer_ownership_and_clean_checkpoint_roundtrip(tmp_path: Path) -> N
         model=restored,
         optimizer=restored_optimizer,
         scaler=None,
-        expected_split_hash="a" * 64,
+        expected_split_hash=split_hash,
     )
     assert state["epoch"] == 4
     assert state["global_step"] == 11
@@ -394,23 +395,17 @@ def test_eval_resolves_exact_training_split_from_checkpoint_path(tmp_path: Path)
     checkpoint.parent.mkdir(parents=True)
     checkpoint.touch()
     split_path = run_dir / "split.json"
+    subject_ids = tuple(f"BraTS2021_{index:05d}" for index in range(3))
+    split_obj = deterministic_subject_split(subject_ids, split_fractions=(1/3, 1/3, 1/3))
     split_path.write_text(
-        json.dumps(
-            {
-                "train": ["BraTS2021_00000"],
-                "val": ["BraTS2021_00001"],
-                "test": ["BraTS2021_00002"],
-                "excluded_subject_ids": [],
-                "split_hash": "a" * 64,
-            }
-        ),
+        json.dumps(split_obj.to_dict()),
         encoding="utf-8",
     )
 
     assert resolve_split_file(checkpoint) == split_path.resolve()
-    groups, split_hash = _load_split(split_path, tuple(f"BraTS2021_{index:05d}" for index in range(3)))
-    assert groups["test"] == ("BraTS2021_00002",)
-    assert split_hash == "a" * 64
+    groups, split_hash = _load_split(split_path, subject_ids)
+    assert groups["test"] == split_obj.test_subject_ids
+    assert split_hash == split_obj.split_hash
 
     explicit = tmp_path / "custom-split.json"
     explicit.write_text(split_path.read_text(encoding="utf-8"), encoding="utf-8")

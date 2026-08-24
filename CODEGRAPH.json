@@ -425,10 +425,8 @@
       "purpose": "Maintain Gate F F1/F2 baseline ownership and synthetic smoke helpers. Server F3/F4 execution is owned by server_pipeline; held-out testing, Gate H, and legacy training systems remain denied.",
       "entrypoints": [
         "src/smagm/features/point_guided/baseline_training.py",
-        "src/smagm/features/point_guided/baseline_data.py",
         "src/smagm/features/point_guided/baseline_metrics.py",
-        "src/smagm/features/point_guided/baseline_checkpoint.py",
-        "scripts/point_guided_baseline.py"
+        "src/smagm/features/point_guided/baseline_checkpoint.py"
       ],
       "read_paths": [
         "AGENTS.md",
@@ -459,12 +457,9 @@
         "src/smagm/features/point_guided/swt_haar.py",
         "src/smagm/features/point_guided/spectral_anchor.py",
         "src/smagm/features/point_guided/baseline_training.py",
-        "src/smagm/features/point_guided/baseline_data.py",
         "src/smagm/features/point_guided/baseline_metrics.py",
         "src/smagm/features/point_guided/baseline_checkpoint.py",
-        "scripts/point_guided_baseline.py",
         "tests/features/point_guided/test_baseline_training.py",
-        "tests/features/point_guided/test_baseline_data.py",
         "tests/features/point_guided/test_frontend_boundaries.py",
         "tests/test_codegraph.py"
       ],
@@ -476,13 +471,9 @@
         "src/smagm/features/point_guided/trajectory.py",
         "src/smagm/features/point_guided/trajectory_solver.py",
         "src/smagm/features/point_guided/baseline_training.py",
-        "src/smagm/features/point_guided/baseline_data.py",
         "src/smagm/features/point_guided/baseline_metrics.py",
         "src/smagm/features/point_guided/baseline_checkpoint.py",
-        "scripts/point_guided_baseline.py",
-        "configs/training/point_guided_baseline.json",
         "tests/features/point_guided/test_baseline_training.py",
-        "tests/features/point_guided/test_baseline_data.py",
         "tests/features/point_guided/test_frontend_boundaries.py",
         "tests/test_codegraph.py"
       ],

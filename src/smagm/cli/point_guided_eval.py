@@ -10,12 +10,22 @@ from typing import Any, Mapping
 
 import torch
 
-from ..data.brats21_point_guided import BraTS21PointGuidedDataset, discover_point_guided_subjects
+from ..features.point_guided.artifacts import (
+    atomic_output_path,
+    atomic_write_json,
+    reserve_artifact_directory,
+)
+from ..data.brats21_point_guided import (
+    BraTS21PointGuidedDataset,
+    discover_point_guided_subjects,
+    load_point_guided_split,
+)
 from ..features.point_guided.baseline_inference import (
     GateGInferenceConfig,
     load_validated_baseline_checkpoint,
 )
 from ..features.point_guided.baseline_metrics import compute_reconstruction_metrics, semantic_dice
+from ..features.point_guided.provenance import best_effort_git_head
 from ..features.point_guided.semantic_supervision import build_coarse_semantic_target
 from ..features.point_guided.training_objective import SupervisionConfig
 from ..training.point_guided import (
@@ -26,10 +36,7 @@ from ..training.point_guided import (
 
 
 def _atomic_json(path: Path, payload: object) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(json.dumps(payload, sort_keys=True, indent=2, default=str) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    atomic_write_json(path, payload)
 
 
 def resolve_split_file(checkpoint: Path, split_file: Path | None = None) -> Path:
@@ -52,28 +59,13 @@ def _load_split(
     path: Path,
     subjects: tuple[str, ...],
 ) -> tuple[dict[str, tuple[str, ...]], str]:
-    if not path.is_file():
-        raise FileNotFoundError(f"split file does not exist: {path}")
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, Mapping):
-        raise ValueError("split file must contain a JSON object")
+    split_object = load_point_guided_split(path, subjects=subjects)
     groups = {
-        "train": tuple(payload.get("train_subject_ids", payload.get("train", ()))),
-        "val": tuple(payload.get("val_subject_ids", payload.get("val", payload.get("validation", ())))),
-        "test": tuple(payload.get("test_subject_ids", payload.get("test", ()))),
+        "train": tuple(split_object.train_subject_ids),
+        "val": tuple(split_object.val_subject_ids),
+        "test": tuple(split_object.test_subject_ids),
     }
-    selected = tuple(item for group in groups.values() for item in group)
-    if len(selected) != len(set(selected)) or any(item not in subjects for item in selected):
-        raise ValueError("split file contains unknown or overlapping subject IDs")
-    excluded = tuple(payload.get("excluded_subject_ids", ()))
-    if any(item not in subjects for item in excluded) or len(excluded) != len(set(excluded)):
-        raise ValueError("split file contains unknown or overlapping excluded subject IDs")
-    if set(selected).intersection(excluded) or set(selected).union(excluded) != set(subjects):
-        raise ValueError("split file must partition every discovered subject exactly once")
-    split_hash = payload.get("split_hash")
-    if not isinstance(split_hash, str) or len(split_hash) != 64:
-        raise ValueError("split file must contain a 64-character split_hash")
-    return groups, split_hash
+    return groups, split_object.split_hash
 
 
 def _save_nifti(prediction: torch.Tensor, path: Path, affine: tuple[tuple[float, ...], ...]) -> None:
@@ -84,10 +76,12 @@ def _save_nifti(prediction: torch.Tensor, path: Path, affine: tuple[tuple[float,
     # Model tensor order is [D,H,W]; NIfTI source order is [X,Y,Z].
     array_xyz = prediction.detach().cpu().numpy().transpose(2, 1, 0)
     path.parent.mkdir(parents=True, exist_ok=True)
-    nib.save(nib.Nifti1Image(array_xyz, affine), str(path))
+    suffix = ".nii.gz" if path.name.endswith(".nii.gz") else (path.suffix or ".nii")
+    with atomic_output_path(path, suffix=suffix) as temporary:
+        nib.save(nib.Nifti1Image(array_xyz, affine), str(temporary))
 
 
-def evaluate(
+def _evaluate_reserved(
     *,
     checkpoint: Path,
     config_path: Path,
@@ -118,13 +112,13 @@ def evaluate(
         "medicalnet_checkpoint_sha256": medicalnet_sha256,
         "require_pretrained_backbone": require_pretrained_backbone,
     }
-    model, _, _ = build_model_from_config(raw_config, overrides)
-    load_validated_baseline_checkpoint(model, checkpoint)
-    model.to(device).eval()
     subjects = discover_point_guided_subjects(data_root)
     subject_ids = tuple(subject.subject_id for subject in subjects)
     resolved_split_file = resolve_split_file(checkpoint, split_file)
     groups, split_hash = _load_split(resolved_split_file, subject_ids)
+    model, _, _ = build_model_from_config(raw_config, overrides)
+    load_validated_baseline_checkpoint(model, checkpoint, expected_split_hash=split_hash)
+    model.to(device).eval()
     selected_ids = list(groups[split_name])
     if max_subjects is not None:
         if max_subjects <= 0:
@@ -227,7 +221,7 @@ def evaluate(
     _atomic_json(output_dir / "trajectory_diagnostics.json", [item["trajectory"] for item in per_subject])
     _atomic_json(output_dir / "evaluation_metadata.json", {
         "checkpoint": str(checkpoint.resolve()),
-        "git_head": None,
+        "git_head": best_effort_git_head(),
         "split_file": str(resolved_split_file),
         "split_hash": split_hash,
         "split": split_name,
@@ -237,6 +231,53 @@ def evaluate(
         "segmentation_used_after_inference_only": True,
     })
     return aggregate
+
+
+def evaluate(
+    *,
+    checkpoint: Path,
+    config_path: Path,
+    data_root: Path,
+    output_dir: Path,
+    split_file: Path | None,
+    split_name: str,
+    device_name: str,
+    save_predictions: bool,
+    max_subjects: int | None = None,
+    medicalnet_checkpoint: Path | None = None,
+    medicalnet_sha256: str | None = None,
+    require_pretrained_backbone: bool | None = None,
+    reuse_output: bool = False,
+) -> dict[str, Any]:
+    """Reserve an evaluation destination before producing any artifacts.
+
+    Existing output directories are rejected by default.  ``reuse_output`` is
+    an explicit operator choice and never clears stale files; the reservation
+    lock prevents another evaluator from writing the same directory at once.
+    """
+
+    reservation = reserve_artifact_directory(
+        output_dir,
+        reuse=reuse_output,
+        purpose="evaluation output",
+    )
+    try:
+        return _evaluate_reserved(
+            checkpoint=checkpoint,
+            config_path=config_path,
+            data_root=data_root,
+            output_dir=reservation.path,
+            split_file=split_file,
+            split_name=split_name,
+            device_name=device_name,
+            save_predictions=save_predictions,
+            max_subjects=max_subjects,
+            medicalnet_checkpoint=medicalnet_checkpoint,
+            medicalnet_sha256=medicalnet_sha256,
+            require_pretrained_backbone=require_pretrained_backbone,
+        )
+    finally:
+        reservation.release()
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -249,6 +290,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--split", choices=("train", "val", "test"), default="test")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--save-predictions", action="store_true")
+    parser.add_argument(
+        "--reuse-output",
+        action="store_true",
+        help="explicitly reuse an existing evaluation directory (never clears stale files)",
+    )
     parser.add_argument("--max-subjects", type=int)
     parser.add_argument("--medicalnet-checkpoint", type=Path)
     parser.add_argument("--medicalnet-sha256")
@@ -263,6 +309,7 @@ def main(argv: list[str] | None = None) -> None:
         split_name=args.split,
         device_name=args.device,
         save_predictions=args.save_predictions,
+        reuse_output=args.reuse_output,
         max_subjects=args.max_subjects,
         medicalnet_checkpoint=args.medicalnet_checkpoint,
         medicalnet_sha256=args.medicalnet_sha256,

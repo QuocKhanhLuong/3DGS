@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass
 import json
 import math
 from pathlib import Path
+import re
 from typing import Any, Mapping
 
 import torch
@@ -28,6 +29,7 @@ from .triplane_projection import BaseTriPlanes
 
 
 _CHECKPOINT_SCHEMA = "point-guided-gate-f-baseline-v1"
+SPLIT_HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _positive_finite(name: str, value: float) -> float:
@@ -266,28 +268,40 @@ def _canonical_config(value: object) -> Mapping[str, Any]:
     return json.loads(json.dumps(asdict(value), sort_keys=True, default=str))
 
 
-def baseline_checkpoint_metadata(model: nn.Module) -> Mapping[str, Any]:
-    """Return the strict architecture metadata required by a future F4 checkpoint."""
+def baseline_checkpoint_metadata(
+    model: nn.Module,
+    *,
+    split_hash: str,
+) -> Mapping[str, Any]:
+    """Return the strict architecture and split metadata required by an F4 checkpoint."""
 
     trajectory = getattr(model, "trajectory", None)
     model_config = getattr(model, "config", None)
     if not isinstance(trajectory, AdaptiveRewardCostTrajectory) or model_config is None:
         raise TypeError("checkpoint metadata requires a PointGuidedMRIModel with an explicit trajectory")
+    if not isinstance(split_hash, str) or SPLIT_HASH_PATTERN.fullmatch(split_hash) is None:
+        raise ValueError("split_hash must be a 64-character lowercase hexadecimal SHA-256 digest")
     return {
         "schema": _CHECKPOINT_SCHEMA,
         "model_config": _canonical_config(model_config),
         "trajectory_config": _canonical_config(trajectory.config),
         "decoder_architecture": "96->64->32->1",
         "gate_e_architecture": "target-after-inference objective",
+        "split_hash": split_hash,
     }
 
 
-def load_validated_baseline_checkpoint(model: nn.Module, checkpoint_path: str | Path) -> None:
-    """Strictly load a later F4 checkpoint after exact metadata validation.
+def load_validated_baseline_checkpoint(
+    model: nn.Module,
+    checkpoint_path: str | Path,
+    *,
+    expected_split_hash: str | None = None,
+) -> Mapping[str, Any]:
+    """Strictly load an F4 checkpoint after exact metadata and split validation.
 
     It accepts no partial state dict and does not create, label, or imply a
-    trained checkpoint.  It exists so later operational inference can reject
-    architecture/configuration mismatches deterministically.
+    trained checkpoint.  It exists so operational inference can reject
+    architecture/configuration and split mismatches deterministically.
     """
 
     path = Path(checkpoint_path)
@@ -296,12 +310,30 @@ def load_validated_baseline_checkpoint(model: nn.Module, checkpoint_path: str | 
     payload = torch.load(path, map_location="cpu", weights_only=True)
     if not isinstance(payload, Mapping) or set(payload) != {"metadata", "state_dict"}:
         raise ValueError("baseline checkpoint must contain exactly metadata and state_dict")
-    if payload["metadata"] != baseline_checkpoint_metadata(model):
+    metadata = payload["metadata"]
+    if not isinstance(metadata, Mapping):
+        raise ValueError("baseline checkpoint metadata must be a mapping")
+    split_hash = metadata.get("split_hash")
+    if not isinstance(split_hash, str) or SPLIT_HASH_PATTERN.fullmatch(split_hash) is None:
+        raise ValueError("baseline checkpoint metadata must contain a 64-character lowercase hexadecimal split_hash")
+    expected_metadata = baseline_checkpoint_metadata(model, split_hash=split_hash)
+    if metadata != expected_metadata:
         raise ValueError("baseline checkpoint metadata does not match the current model architecture/configuration")
+    if expected_split_hash is not None:
+        if not isinstance(expected_split_hash, str) or SPLIT_HASH_PATTERN.fullmatch(expected_split_hash) is None:
+            raise ValueError("expected_split_hash must be a 64-character lowercase hexadecimal SHA-256 digest")
+        if split_hash != expected_split_hash:
+            raise ValueError(
+                f"baseline checkpoint split hash mismatch: expected {expected_split_hash}, got {split_hash}"
+            )
     state_dict = payload["state_dict"]
-    if not isinstance(state_dict, Mapping) or not all(isinstance(name, str) and isinstance(value, Tensor) for name, value in state_dict.items()):
-        raise ValueError("baseline checkpoint state_dict must map parameter names to tensors")
+    # Import lazily because baseline_checkpoint owns serialization helpers and
+    # imports this module for the architecture metadata used when saving.
+    from .baseline_checkpoint import validate_clean_inference_state_dict
+
+    validate_clean_inference_state_dict(model, state_dict)
     model.load_state_dict(state_dict, strict=True)
+    return metadata
 
 
 __all__ = [

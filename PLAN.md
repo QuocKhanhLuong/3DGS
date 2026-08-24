@@ -1195,8 +1195,10 @@ the immutable dedicated `PLAN_GATE_F_G.md` baseline plan (blob
 `1c9b01569126309eada53ce0a90309353875a9c6`); Gate F F1/F2 are complete and
 the additive F3/F4 server software is ready, but neither experiment has been
 executed here. Gate G G1-G4 software is complete; trained-checkpoint and
-held-out results remain pending server execution. Gate H has no locked local
-plan and remains default deny.
+held-out results remain pending server execution. No real trained checkpoint,
+GPU/server evidence, reconstruction result, or clinical claim is available
+from local software checks. Gate H has no locked local plan and remains
+default deny.
 
 ---
 

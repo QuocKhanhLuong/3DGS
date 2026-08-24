@@ -181,7 +181,7 @@ def test_codegraph_activates_only_gate_f_baseline_training_paths() -> None:
             "baseline_training",
             "--check",
             "src/smagm/features/point_guided/baseline_training.py",
-            "src/smagm/features/point_guided/baseline_data.py",
+            "src/smagm/features/point_guided/baseline_metrics.py",
             "src/smagm/features/point_guided/baseline_checkpoint.py",
             "tests/features/point_guided/test_baseline_training.py",
         ],
@@ -210,6 +210,18 @@ def test_codegraph_activates_only_gate_f_baseline_training_paths() -> None:
     assert denied.returncode == 2
     assert "denied read paths" in denied.stderr
     assert all(path in denied.stderr for path in inactive)
+
+
+def test_codegraph_declared_entrypoints_and_read_paths_exist() -> None:
+    validated = subprocess.run(
+        [sys.executable, str(SCRIPT), "--validate-paths"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert validated.returncode == 0, validated.stderr
+    assert "validated declared entrypoints and read paths" in validated.stdout
 
 
 def test_codegraph_activates_only_gate_g_baseline_inference_paths() -> None:

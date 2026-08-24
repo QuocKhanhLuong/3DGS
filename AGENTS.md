@@ -27,7 +27,8 @@ Repository authority is deliberately staged:
   complete and F3/F4 software is ready for server execution; no tiny-overfit
   or full-train result is claimed yet. Gate G G1-G4 software is complete;
   trained-checkpoint and held-out evaluation evidence remains pending server
-  execution.
+  execution. No real trained checkpoint, GPU/server evidence, reconstruction
+  result, or clinical claim is available from local software checks.
   Gate H is default deny and has no locked local plan.
 
 Completion of a phase does not authorize later work. A task must explicitly

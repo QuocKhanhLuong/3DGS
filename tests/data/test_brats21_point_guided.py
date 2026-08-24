@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 import pickle
 
@@ -10,7 +11,9 @@ import torch
 from smagm.data.brats21_point_guided import (
     BRATS21_POINT_GUIDED_LABELS,
     BraTS21PointGuidedDataset,
+    BraTS21PointGuidedSample,
     BraTS21PointGuidedValidationError,
+    PointGuidedBatch,
     collate_point_guided_samples,
     derive_input_brain_mask,
     deterministic_subject_split,
@@ -18,6 +21,8 @@ from smagm.data.brats21_point_guided import (
     discover_point_guided_subject_ids,
     inventory_point_guided_subjects,
     load_point_guided_subject,
+    ModalityNormalizationMetadata,
+    NiftiGeometryMetadata,
     nifti_xyz_to_dhw,
     PointGuidedNormalizationConfig,
     structural_inventory_point_guided_subjects,
@@ -62,6 +67,48 @@ def _write_subject(
     return subject
 
 
+def _synthetic_sample() -> BraTS21PointGuidedSample:
+    shape_dhw = (2, 3, 4)
+    geometry = NiftiGeometryMetadata(
+        shape_xyz=(4, 3, 2),
+        shape_dhw=shape_dhw,
+        affine_xyz_to_ras_mm=(
+            (1.0, 0.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0, 0.0),
+            (0.0, 0.0, 1.0, 0.0),
+            (0.0, 0.0, 0.0, 1.0),
+        ),
+        spacing_xyz_mm=(1.0, 1.0, 1.0),
+        orientation=("R", "A", "S"),
+    )
+    metadata = {
+        modality: ModalityNormalizationMetadata(
+            modality=modality,
+            voxel_count=int(np.prod(shape_dhw)),
+            mean=0.0,
+            std=1.0,
+            scale=1.0,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        for modality in ("t1", "t2", "flair", "t1ce")
+    }
+    source_paths = {
+        modality: Path(f"{modality}.nii.gz")
+        for modality in ("t1", "t2", "flair", "t1ce", "seg")
+    }
+    return BraTS21PointGuidedSample(
+        subject_id="BraTS2021_00000",
+        observations=torch.ones((3, *shape_dhw), dtype=torch.float32),
+        target=torch.ones((1, *shape_dhw), dtype=torch.float32),
+        segmentation=torch.zeros(shape_dhw, dtype=torch.int64),
+        brain_mask=torch.ones((1, *shape_dhw), dtype=torch.bool),
+        geometry=geometry,
+        normalization_metadata=metadata,
+        source_paths=source_paths,
+    )
+
+
 def test_xyz_to_dhw_mapping_is_explicit_and_contiguous() -> None:
     source = np.arange(4 * 3 * 2, dtype=np.float32).reshape(4, 3, 2)
     converted = nifti_xyz_to_dhw(source)
@@ -69,6 +116,33 @@ def test_xyz_to_dhw_mapping_is_explicit_and_contiguous() -> None:
     assert converted.shape == (2, 3, 4)
     np.testing.assert_array_equal(converted, source.transpose(2, 1, 0))
     assert converted.flags.c_contiguous
+
+
+def test_brain_mask_copy_removal_preserves_old_tensor_contract() -> None:
+    source = np.zeros((4, 3, 2), dtype=np.bool_)
+    source[1, 2, 0] = True
+    source[3, 0, 1] = True
+
+    converted = nifti_xyz_to_dhw(source)
+    old_tensor = torch.from_numpy(converted.copy())
+    new_tensor = torch.from_numpy(converted)
+    expected = old_tensor.clone()
+
+    # The conversion boundary already owns a contiguous independent buffer;
+    # therefore removing the second copy cannot change the tensor contract.
+    assert not np.shares_memory(converted, source)
+    assert converted.flags.c_contiguous
+    assert old_tensor.dtype == new_tensor.dtype == torch.bool
+    assert old_tensor.shape == new_tensor.shape == (2, 3, 4)
+    assert old_tensor.stride() == new_tensor.stride()
+    assert old_tensor.is_contiguous() and new_tensor.is_contiguous()
+    assert old_tensor.numpy().flags.c_contiguous and new_tensor.numpy().flags.c_contiguous
+    torch.testing.assert_close(old_tensor, new_tensor, rtol=0.0, atol=0.0)
+
+    # The new tensor may share the conversion buffer, but not the NIfTI source
+    # that was transformed into it.
+    source[...] = False
+    torch.testing.assert_close(new_tensor, expected, rtol=0.0, atol=0.0)
 
 
 def test_input_mask_is_raw_observation_union_and_rejects_empty_input() -> None:
@@ -118,6 +192,41 @@ def test_full_volume_load_keeps_observations_target_and_segmentation_separate(tm
     assert round_trip.to_metadata() == first.to_metadata()
     batch = collate_point_guided_samples([first])
     assert pickle.loads(pickle.dumps(batch)).subject_ids == (first.subject_id,)
+
+
+def test_perf002_keeps_public_batch_label_rejection_and_collate_equivalence() -> None:
+    sample = _synthetic_sample()
+    reference = collate_point_guided_samples([sample])
+
+    invalid_segmentation = sample.segmentation.clone()
+    invalid_segmentation[0, 0, 0] = 3
+    with pytest.raises(BraTS21PointGuidedValidationError, match="unexpected labels"):
+        replace(sample, segmentation=invalid_segmentation)
+
+    invalid_batch_segmentation = reference.segmentation.clone()
+    invalid_batch_segmentation[0, 0, 0, 0] = 3
+    with pytest.raises(BraTS21PointGuidedValidationError, match="batch segmentation contains unexpected labels"):
+        PointGuidedBatch(
+            observations=reference.observations,
+            target_t1ce=reference.target_t1ce,
+            segmentation=invalid_batch_segmentation,
+            brain_mask=reference.brain_mask,
+            spacing_xyz_mm=reference.spacing_xyz_mm,
+            voxel_to_ras_mm=reference.voxel_to_ras_mm,
+            subject_ids=reference.subject_ids,
+            normalization_metadata=reference.normalization_metadata,
+        )
+
+    actual = collate_point_guided_samples([sample])
+    torch.testing.assert_close(actual.observations, reference.observations, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(actual.target_t1ce, reference.target_t1ce, rtol=0.0, atol=0.0)
+    assert actual.segmentation is not None and reference.segmentation is not None
+    torch.testing.assert_close(actual.segmentation, reference.segmentation, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(actual.brain_mask, reference.brain_mask, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(actual.spacing_xyz_mm, reference.spacing_xyz_mm, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(actual.voxel_to_ras_mm, reference.voxel_to_ras_mm, rtol=0.0, atol=0.0)
+    assert actual.subject_ids == reference.subject_ids
+    assert actual.normalization_metadata == reference.normalization_metadata
 
 
 def test_target_and_segmentation_changes_do_not_change_input_observations_or_mask(tmp_path: Path) -> None:
