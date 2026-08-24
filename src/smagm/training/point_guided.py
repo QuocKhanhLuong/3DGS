@@ -11,7 +11,6 @@ from __future__ import annotations
 from collections import Counter
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime, timezone
 import csv
 import json
 import math
@@ -20,7 +19,7 @@ from pathlib import Path
 import platform
 import random
 import socket
-import subprocess
+import sys
 import time
 from typing import Any, Mapping, Sequence
 
@@ -31,6 +30,7 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler, RandomSampler, Sampler
 
 from ..features.point_guided.baseline_checkpoint import (
+    build_training_resume_protocol,
     load_training_resume_checkpoint,
     save_clean_inference_checkpoint,
     save_training_resume_checkpoint,
@@ -47,9 +47,17 @@ from ..features.point_guided.baseline_training import (
     BaselineTrainingConfig,
     build_baseline_optimizer,
 )
+from ..features.point_guided.artifacts import (
+    ArtifactReservation,
+    atomic_torch_save,
+    atomic_write_json,
+    reserve_artifact_directory,
+    reserve_run_directory,
+)
 from ..features.point_guided.config import PointGuidedConfig
 from ..features.point_guided.model import PointGuidedMRIModel
 from ..features.point_guided.medicalnet_resnet10 import sha256_file
+from ..features.point_guided.provenance import best_effort_git_head
 from ..features.point_guided.semantic_supervision import (
     build_coarse_semantic_target,
     compute_semantic_grounding_loss,
@@ -58,10 +66,13 @@ from ..features.point_guided.training_objective import SupervisionConfig
 from ..features.point_guided.trajectory_cost import TrajectoryConfig
 from ..data.brats21_point_guided import (
     BraTS21PointGuidedDataset,
+    BraTS21PointGuidedSplit,
+    BraTS21PointGuidedValidationError,
     PointGuidedBatch,
     collate_point_guided_samples,
     deterministic_subject_split,
     inventory_point_guided_subjects,
+    load_point_guided_split,
     structural_inventory_point_guided_subjects,
 )
 
@@ -215,17 +226,10 @@ def _canonical_json(value: object) -> str:
 
 
 def _atomic_json(path: Path, payload: object) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(json.dumps(payload, sort_keys=True, indent=2, default=str) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    atomic_write_json(path, payload)
 
 
-def _git_head() -> str | None:
-    try:
-        return subprocess.check_output(("git", "rev-parse", "HEAD"), text=True, stderr=subprocess.DEVNULL).strip()
-    except (OSError, subprocess.CalledProcessError):
-        return None
+_git_head = best_effort_git_head
 
 
 def _set_seed(seed: int, rank: int) -> None:
@@ -237,6 +241,15 @@ def _set_seed(seed: int, rank: int) -> None:
         torch.cuda.manual_seed_all(value)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+
+
+def _seed_point_guided_worker(worker_id: int) -> None:
+    """Seed Python/NumPy worker streams from PyTorch's rank-local worker seed."""
+
+    del worker_id
+    worker_seed = torch.initial_seed() % (2**32)
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
 
 
 def initialize_distributed(device_name: str) -> DistributedContext:
@@ -763,6 +776,20 @@ class PointGuidedTrainer:
         return module
 
     def run_epoch(self, loader: DataLoader[PointGuidedBatch], *, training: bool) -> dict[str, Any]:
+        """Run one epoch and discard partial training gradients on failure."""
+
+        try:
+            return self._run_epoch(loader, training=training)
+        except BaseException:
+            if training:
+                try:
+                    self.optimizer.zero_grad(set_to_none=True)
+                except BaseException:
+                    # Cleanup must never replace the original training error.
+                    pass
+            raise
+
+    def _run_epoch(self, loader: DataLoader[PointGuidedBatch], *, training: bool) -> dict[str, Any]:
         self.model.train(training)
         self._context_module(training).train(training)
         if training:
@@ -1033,6 +1060,11 @@ def _make_loader(
         pin_memory=context.device.type == "cuda",
         collate_fn=collate_point_guided_samples,
         persistent_workers=settings.num_workers > 0,
+        # Leave ``generator`` unset deliberately: DataLoader draws worker
+        # base seeds from the rank-local CPU Torch stream, which is captured
+        # and restored in the resume checkpoint.  The worker hook then makes
+        # Python/NumPy streams deterministic from that same seed.
+        worker_init_fn=_seed_point_guided_worker if settings.num_workers > 0 else None,
     )
     return loader, sampler
 
@@ -1071,40 +1103,16 @@ def _resolve_split(
     """Use an existing split exactly, otherwise create the declared split."""
 
     if split_file is not None:
-        path = Path(split_file)
-        if not path.is_file():
-            raise FileNotFoundError(f"split file does not exist: {path}")
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(payload, Mapping):
-            raise ValueError("split file must contain a JSON object")
-        groups = {
-            "train": tuple(payload.get("train_subject_ids", payload.get("train", ()))),
-            "val": tuple(payload.get("val_subject_ids", payload.get("val", payload.get("validation", ())))),
-            "test": tuple(payload.get("test_subject_ids", payload.get("test", ()))),
-        }
-        all_ids = tuple(sorted(str(item) for item in subject_ids))
-        selected = tuple(item for group in groups.values() for item in group)
-        if any(item not in all_ids for item in selected) or len(selected) != len(set(selected)):
-            raise ValueError("split file contains unknown or overlapping subject IDs")
-        excluded = tuple(payload.get("excluded_subject_ids", ()))
-        if any(item not in all_ids for item in excluded) or len(excluded) != len(set(excluded)):
-            raise ValueError("split file contains unknown or overlapping excluded subject IDs")
-        if set(selected).intersection(excluded) or set(selected).union(excluded) != set(all_ids):
-            raise ValueError("split file must partition every discovered subject exactly once")
-        split_hash = payload.get("split_hash")
-        if not isinstance(split_hash, str) or len(split_hash) != 64:
-            raise ValueError("split file must contain a 64-character split_hash")
-        normalized = dict(payload)
-        normalized.update(
-            {
-                "train": groups["train"],
-                "val": groups["val"],
-                "test": groups["test"],
-                "excluded_subject_ids": excluded,
-                "split_hash": split_hash,
-            }
-        )
-        return normalized, split_hash
+        split_object = load_point_guided_split(split_file, subjects=subject_ids)
+        payload = split_object.to_dict()
+        payload.update({
+            "train": tuple(split_object.train_subject_ids),
+            "val": tuple(split_object.val_subject_ids),
+            "test": tuple(split_object.test_subject_ids),
+            "excluded": tuple(split_object.excluded_subject_ids),
+            "all": tuple(split_object.all_subject_ids),
+        })
+        return payload, split_object.split_hash
     split_object = deterministic_subject_split(
         subject_ids,
         seed=seed,
@@ -1118,6 +1126,8 @@ def _resolve_split(
         "train": tuple(split_object.train_subject_ids),
         "val": tuple(split_object.val_subject_ids),
         "test": tuple(split_object.test_subject_ids),
+        "excluded": tuple(split_object.excluded_subject_ids),
+        "all": tuple(split_object.all_subject_ids),
     })
     return payload, split_object.split_hash
 
@@ -1146,6 +1156,10 @@ def _prepare_structurally_eligible_split(
         require_target=True,
         require_segmentation=require_segmentation,
     )
+    if not structural_inventory.eligible_subject_ids:
+        raise BraTS21PointGuidedValidationError(
+            "no structurally eligible BraTS21 subjects are available for training/preflight"
+        )
     split, split_hash = _resolve_split(
         structural_inventory.eligible_subject_ids,
         seed=seed,
@@ -1175,13 +1189,26 @@ def _prepare_structurally_eligible_split(
 
 
 def _write_epoch_logs(run_dir: Path, record: Mapping[str, Any], *, header_written: bool) -> None:
-    with (run_dir / "train.jsonl").open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
     path = run_dir / "metrics.csv"
     fields = tuple(record.keys())
+    existing = path.is_file()
+    if existing:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.reader(handle)
+            try:
+                existing_fields = tuple(next(reader))
+            except StopIteration as error:
+                raise ValueError("existing metrics.csv has no header; migration is not supported") from error
+        if existing_fields != fields:
+            raise ValueError(
+                "existing metrics.csv header does not match current metric fields; "
+                "migration is not supported"
+            )
+    with (run_dir / "train.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
     with path.open("a", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
-        if not header_written:
+        if not existing:
             writer.writeheader()
         writer.writerow({key: record[key] for key in fields})
 
@@ -1223,7 +1250,7 @@ def _save_overfit_predictions(
                 voxel_to_ras_mm=sample.voxel_to_ras_mm,
                 inference_config=inference_config,
             )
-        torch.save(
+        atomic_torch_save(
             {
                 "epoch": epoch,
                 "subject_id": sample.subject_id,
@@ -1254,6 +1281,8 @@ def run_training(
     overrides = dict(overrides or {})
     device_name = str(overrides.pop("device", raw_config.get("training", {}).get("device", "cpu")))
     context = initialize_distributed(device_name)
+    reservation: ArtifactReservation | None = None
+    wandb_run: Any | None = None
     try:
         _set_seed(int(raw_config.get("training", {}).get("seed", 20260813)), context.rank)
         model, supervision, settings = build_model_from_config(raw_config, overrides)
@@ -1286,15 +1315,60 @@ def run_training(
         )
         train_ids = tuple(split["train"])
         val_ids = train_ids if overfit else tuple(split["val"])
+        model_config = getattr(model, "config", {})
+        model_config = asdict(model_config) if hasattr(model_config, "__dataclass_fields__") else model_config
+        trajectory_object = getattr(model, "trajectory", None)
+        trajectory_config = getattr(trajectory_object, "config", {})
+        trajectory_config = asdict(trajectory_config) if hasattr(trajectory_config, "__dataclass_fields__") else trajectory_config
+        resume_protocol = build_training_resume_protocol(
+            model_config=model_config if isinstance(model_config, Mapping) else {"repr": str(model_config)},
+            trajectory_config=trajectory_config if isinstance(trajectory_config, Mapping) else {"repr": str(trajectory_config)},
+            supervision_config=asdict(supervision),
+            training_settings=asdict(settings),
+            normalization_config=normalization_config,
+            split_hash=split_hash,
+            overfit=overfit,
+            require_segmentation=require_segmentation,
+            device=device_name,
+        )
         root = Path(output_root)
-        if resume is not None:
-            run_dir = Path(resume).resolve().parent.parent
-        else:
-            name = run_name or datetime.now(timezone.utc).strftime("point-guided-%Y%m%dT%H%M%SZ")
-            run_dir = root / name
-        run_dir = _broadcast_run_dir(context, run_dir)
+        reservation_error: str | None = None
+        reservation_exception: Exception | None = None
         if context.is_main:
-            run_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                if resume is not None:
+                    run_dir = Path(resume).resolve().parent.parent
+                    reservation = reserve_artifact_directory(
+                        run_dir,
+                        reuse=True,
+                        purpose="training resume run",
+                    )
+                else:
+                    reservation = reserve_run_directory(root, run_name)
+                run_dir = reservation.path
+            except Exception as error:
+                run_dir = root
+                reservation_error = f"{type(error).__name__}: {error}"
+                reservation_exception = error
+        else:
+            run_dir = root
+        if context.is_distributed:
+            values: list[str | None] = [str(run_dir) if context.is_main and reservation_error is None else None, reservation_error]
+            torch.distributed.broadcast_object_list(values, src=0)
+            if values[1] is not None:
+                raise RuntimeError(f"training run reservation failed: {values[1]}")
+            if not values[0]:
+                raise RuntimeError("distributed training run reservation returned no path")
+            run_dir = Path(values[0])
+        elif reservation_error is not None:
+            if reservation_exception is not None:
+                raise reservation_exception
+            raise RuntimeError(f"training run reservation failed: {reservation_error}")
+        if reservation is None and context.is_main:
+            raise RuntimeError("training run reservation returned no owner on rank 0")
+        def persist_run_metadata(*, preserve_historical_config: bool = False) -> None:
+            if not context.is_main:
+                return
             (run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
             resolved_config = json.loads(_canonical_json(raw_config))
             resolved_config.setdefault("training", {})["device"] = device_name
@@ -1322,15 +1396,29 @@ def run_training(
             ):
                 if key in overrides:
                     resolved_config.setdefault("training", {})[key] = overrides[key]
-            _atomic_json(
-                run_dir / "config.json",
-                {
-                    "resolved": resolved_config,
-                    "training_settings": asdict(settings),
-                    "supervision": asdict(supervision),
-                    "overfit": overfit,
-                },
-            )
+            if preserve_historical_config:
+                _atomic_json(
+                    run_dir / "resume_attempt.json",
+                    {
+                        "schema": "point-guided-resume-attempt-v1",
+                        "checkpoint": str(Path(resume).resolve()) if resume is not None else None,
+                        "saved_protocol": None if resume_run_state is None else state["protocol"],
+                        "current_protocol": resume_protocol,
+                        "current_resolved_config": resolved_config,
+                        "current_training_settings": asdict(settings),
+                    },
+                )
+            else:
+                _atomic_json(
+                    run_dir / "config.json",
+                    {
+                        "resolved": resolved_config,
+                        "training_settings": asdict(settings),
+                        "supervision": asdict(supervision),
+                        "overfit": overfit,
+                        "resume_protocol": resume_protocol,
+                    },
+                )
             _atomic_json(run_dir / "split.json", split)
             _atomic_json(run_dir / "structural_inventory.json", structural_inventory.to_dict())
             active_payload_payload = inventory.to_dict() | {
@@ -1348,6 +1436,11 @@ def run_training(
                 },
             )
             _atomic_json(run_dir / "environment.json", _environment(context, model, settings))
+
+        # On resume, config.json is historical evidence.  Do not overwrite it
+        # until the checkpoint protocol has been validated against this run.
+        if resume is None:
+            persist_run_metadata()
         if context.is_distributed:
             torch.distributed.barrier()
 
@@ -1377,6 +1470,7 @@ def run_training(
 
         start_epoch = 1
         best_metric = math.inf
+        resume_run_state: Mapping[str, Any] | None = None
         if resume is not None:
             state = load_training_resume_checkpoint(
                 resume,
@@ -1384,10 +1478,15 @@ def run_training(
                 optimizer=optimizer,
                 scaler=trainer.scaler,
                 expected_split_hash=split_hash,
+                expected_protocol=resume_protocol,
             )
             start_epoch = int(state["epoch"]) + 1
             trainer.global_step = int(state["global_step"])
             best_metric = float(state["best_validation_reconstruction_loss"])
+            resume_run_state = state["run_state"]
+            if context.is_distributed:
+                torch.distributed.barrier()
+            persist_run_metadata(preserve_historical_config=True)
             if context.is_distributed:
                 torch.distributed.barrier()
 
@@ -1406,11 +1505,16 @@ def run_training(
         train_loader, train_sampler = _make_loader(train_dataset, context=context, settings=settings, training=True)
         val_loader, val_sampler = _make_loader(val_dataset, context=context, settings=settings, training=False)
         header_written = (run_dir / "metrics.csv").is_file()
-        patience_count = 0
-        first_train_reconstruction_loss: float | None = None
-        overfit_prediction_epochs: list[int] = []
+        patience_count = 0 if resume_run_state is None else int(resume_run_state["patience_count"])
+        first_train_reconstruction_loss: float | None = (
+            None
+            if resume_run_state is None
+            else resume_run_state["first_train_reconstruction_loss"]
+        )
+        overfit_prediction_epochs: list[int] = list(
+            () if resume_run_state is None else resume_run_state["overfit_prediction_epochs"]
+        )
         summary: dict[str, Any] = {}
-        wandb_run = None
         wandb_config = raw_config.get("_wandb", {})
         if context.is_main and isinstance(wandb_config, Mapping) and bool(wandb_config.get("enabled", False)):
             try:
@@ -1529,7 +1633,9 @@ def run_training(
                         math.nan,
                     )
             if first_train_reconstruction_loss is None:
-                first_train_reconstruction_loss = float(train_stats.get("reconstruction_loss", math.nan))
+                first_loss = float(train_stats.get("reconstruction_loss", math.nan))
+                if math.isfinite(first_loss):
+                    first_train_reconstruction_loss = first_loss
             stop_training = False
             if context.is_main:
                 if overfit and epoch % settings.prediction_interval == 0:
@@ -1549,21 +1655,13 @@ def run_training(
                 if metric < best_metric:
                     best_metric = metric
                     patience_count = 0
-                    save_clean_inference_checkpoint(run_dir / "checkpoints" / "best_model.pt", model)
+                    save_clean_inference_checkpoint(
+                        run_dir / "checkpoints" / "best_model.pt",
+                        model,
+                        split_hash=split_hash,
+                    )
                 else:
                     patience_count += 1
-                save_training_resume_checkpoint(
-                    run_dir / "checkpoints" / "last_train.pt",
-                    model=model,
-                    optimizer=optimizer,
-                    scaler=trainer.scaler,
-                    epoch=epoch,
-                    global_step=trainer.global_step,
-                    best_validation_reconstruction_loss=best_metric,
-                    training_config={"settings": asdict(settings), "supervision": asdict(supervision)},
-                    split_hash=split_hash,
-                    metadata={"git_head": _git_head(), "overfit": overfit, "validation_is_held_out": not overfit},
-                )
                 summary = {
                     "status": "completed_software_run",
                     "overfit": overfit,
@@ -1587,6 +1685,34 @@ def run_training(
                 _atomic_json(run_dir / "summary.json", summary)
                 stop_training = patience_count >= settings.early_stopping_patience
             if context.is_distributed:
+                # Keep progress fields identical before the all-rank RNG
+                # gather; rank 0 remains the sole checkpoint writer.
+                progress: list[object | None] = [
+                    float(best_metric) if context.is_main else None,
+                    int(patience_count) if context.is_main else None,
+                ]
+                torch.distributed.broadcast_object_list(progress, src=0)
+                best_metric = float(progress[0])
+                patience_count = int(progress[1])
+            save_training_resume_checkpoint(
+                run_dir / "checkpoints" / "last_train.pt",
+                model=model,
+                optimizer=optimizer,
+                scaler=trainer.scaler,
+                epoch=epoch,
+                global_step=trainer.global_step,
+                best_validation_reconstruction_loss=best_metric,
+                training_config={"settings": asdict(settings), "supervision": asdict(supervision)},
+                split_hash=split_hash,
+                protocol=resume_protocol,
+                patience_count=patience_count,
+                first_train_reconstruction_loss=first_train_reconstruction_loss,
+                overfit_prediction_epochs=overfit_prediction_epochs,
+                metadata={"git_head": _git_head(), "overfit": overfit, "validation_is_held_out": not overfit},
+            )
+            if context.is_distributed:
+                torch.distributed.barrier()
+            if context.is_distributed:
                 stop_flag = torch.tensor(
                     [1 if stop_training else 0],
                     dtype=torch.int64,
@@ -1597,13 +1723,27 @@ def run_training(
                 stop_training = bool(int(stop_flag.item()))
             if stop_training:
                 break
-        if wandb_run is not None:
-            wandb_run.finish()
         if context.is_main:
             return summary
         return None
     finally:
-        destroy_distributed(context)
+        original_exception_active = sys.exc_info()[0] is not None
+        finish_error: BaseException | None = None
+        try:
+            if wandb_run is not None:
+                try:
+                    wandb_run.finish()
+                except BaseException as error:
+                    if not original_exception_active:
+                        finish_error = error
+        finally:
+            try:
+                destroy_distributed(context)
+            finally:
+                if reservation is not None:
+                    reservation.release()
+        if finish_error is not None:
+            raise finish_error
 
 
 def preflight(

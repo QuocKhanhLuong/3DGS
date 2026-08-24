@@ -226,14 +226,67 @@ def test_gate_g_latches_each_batch_subject_and_strict_checkpoint_loader(tmp_path
     assert result.eligible_candidate_evaluations.tolist() == [6, 3]
 
     checkpoint_model = _model()
+    split_hash = "0123456789abcdef" * 4
     path = tmp_path / "synthetic_gate_f_state.pt"
-    torch.save({"metadata": baseline_checkpoint_metadata(checkpoint_model), "state_dict": checkpoint_model.state_dict()}, path)
+    torch.save({"metadata": baseline_checkpoint_metadata(checkpoint_model, split_hash=split_hash), "state_dict": checkpoint_model.state_dict()}, path)
     clone = _model()
-    load_validated_baseline_checkpoint(clone, path)
+    load_validated_baseline_checkpoint(clone, path, expected_split_hash=split_hash)
     assert all(torch.equal(value, clone.state_dict()[name]) for name, value in checkpoint_model.state_dict().items())
+
+    # Rejection on mismatched expected_split_hash
+    with pytest.raises(ValueError, match="split hash mismatch"):
+        load_validated_baseline_checkpoint(clone, path, expected_split_hash="f" * 64)
+
     invalid = tmp_path / "mismatch.pt"
-    metadata = dict(baseline_checkpoint_metadata(checkpoint_model))
+    metadata = dict(baseline_checkpoint_metadata(checkpoint_model, split_hash=split_hash))
     metadata["decoder_architecture"] = "wrong"
     torch.save({"metadata": metadata, "state_dict": checkpoint_model.state_dict()}, invalid)
     with pytest.raises(ValueError, match="metadata"):
         load_validated_baseline_checkpoint(clone, invalid)
+
+
+def test_failed_clean_checkpoint_load_is_transactional_for_shape_dtype_and_keys(tmp_path) -> None:
+    source = _model()
+    split_hash = "0123456789abcdef" * 4
+    source_state = {name: value.detach().clone() for name, value in source.state_dict().items()}
+    state_names = list(source_state)
+    changed_name = next(
+        name
+        for name in state_names
+        if source_state[name].is_floating_point() and source_state[name].numel() > 0
+    )
+    malformed_name = next(
+        name
+        for name in state_names[state_names.index(changed_name) + 1 :]
+        if source_state[name].ndim > 0 and source_state[name].numel() > 1
+    )
+
+    shape_state = {name: value.clone() for name, value in source_state.items()}
+    changed = shape_state[changed_name].reshape(-1)
+    changed[0] = changed[0] + 1
+    shape_state[malformed_name] = shape_state[malformed_name].reshape(-1)[:-1]
+
+    dtype_state = {name: value.clone() for name, value in source_state.items()}
+    dtype_state[changed_name] = dtype_state[changed_name].double()
+
+    key_state = {name: value.clone() for name, value in source_state.items()}
+    key_state.pop(changed_name)
+
+    metadata = baseline_checkpoint_metadata(source, split_hash=split_hash)
+    cases = (
+        ("shape", shape_state, "shape mismatch"),
+        ("dtype", dtype_state, "dtype mismatch"),
+        ("keys", key_state, "key mismatch"),
+    )
+    for label, state_dict, message in cases:
+        path = tmp_path / f"malformed_{label}.pt"
+        torch.save({"metadata": metadata, "state_dict": state_dict}, path)
+        live = _model()
+        before = {name: value.detach().clone() for name, value in live.state_dict().items()}
+
+        with pytest.raises(ValueError, match=message):
+            load_validated_baseline_checkpoint(live, path, expected_split_hash=split_hash)
+
+        after = live.state_dict()
+        assert set(after) == set(before)
+        assert all(torch.equal(before[name], after[name]) for name in before)

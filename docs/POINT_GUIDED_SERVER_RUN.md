@@ -6,6 +6,15 @@ PoU -> B -> fixed SWT-Haar A -> f_spec -> bounded Gate-C trajectory -> final-Z
 Gate-D decoder`. It does not introduce a new architecture or claim a trained
 checkpoint. The commands below are ready for a server checkout of `main`.
 
+## Evidence boundary
+
+Gate F F1/F2 software and synthetic engineering checks are complete, and Gate G
+G1-G4 target-free inference/evaluation software is present. F3/F4 experiment
+execution remains pending actual server evidence; no real trained checkpoint,
+held-out evaluation, GPU/server evidence, reconstruction result, or clinical
+claim is available from local software checks. This runbook records executable
+commands and does not turn software readiness into experimental evidence.
+
 The full-volume adapter is separate from the legacy sparse-plane
 `smagm.data.brats21` contract. The model input is always exactly three
 modalities in `[3,D,H,W]` tensor order: T1, T2, FLAIR. T1ce and segmentation
@@ -17,7 +26,8 @@ context creation.
 From the repository root, use the Python environment intended for the GPU:
 
 ```bash
-python -m pip install -e '.[test,real-data,wandb]'
+export POINT_GUIDED_PYTHON=/path/to/gpu-env/bin/python
+"$POINT_GUIDED_PYTHON" -m pip install -e '.[test,real-data,wandb]'
 ```
 
 The normal trainer does not require W&B. The `wandb` extra is only needed when
@@ -33,6 +43,14 @@ export MEDICALNET_CKPT=/path/to/resnet_10_23dataset.pth
 export MEDICALNET_SHA256=<actual_sha256>
 export OUTPUT_ROOT=/path/to/point_guided_runs
 ```
+
+All supported point-guided launchers use `POINT_GUIDED_PYTHON` for their
+PyTorch probe and module entrypoint. The 2xA4000 launcher also starts DDP with
+`-m torch.distributed.run` from that same interpreter; it does not resolve a
+separate ambient `python` or `torchrun` executable.
+The wrappers retain the existing `/home/aidev/miniconda3/envs/smagm-a4000/bin/python`
+server fallback for compatibility; on another host, override it explicitly.
+They fail closed when the selected interpreter is not executable.
 
 Do not replace `<actual_sha256>` with a guessed value. The loader never
 downloads weights. It validates the local tensor checkpoint and records its
@@ -140,7 +158,7 @@ cleanup.
 The trainer writes a resumable checkpoint after each completed epoch:
 
 ```bash
-PYTHONPATH=src python -m smagm.cli.point_guided_train \
+PYTHONPATH=src "$POINT_GUIDED_PYTHON" -m smagm.cli.point_guided_train \
   --config configs/training/point_guided_brats21_4070.json \
   --data-root "$BRATS21_ROOT" \
   --output-root "$OUTPUT_ROOT" \
@@ -154,6 +172,12 @@ PYTHONPATH=src python -m smagm.cli.point_guided_train \
 Resume checks the schema, exact model state, optimizer state, optional
 GradScaler state, split hash, counters, and RNG state. A mismatched split is
 rejected rather than silently continuing on different subjects.
+
+New training runs reserve their directory with an exclusive filesystem create;
+an existing `--run-name` fails rather than mixing logs or checkpoints. Reuse
+is allowed only through the explicit `--resume` checkpoint path, which holds a
+run lock for the duration of the resumed writer. A stale
+`.point-guided.lock` must be investigated and removed manually before reuse.
 
 ## 8. Evaluation
 
@@ -175,7 +199,7 @@ The default evaluation split is `test`. It is never used for checkpoint
 selection or hyperparameter tuning. To evaluate another split directly:
 
 ```bash
-PYTHONPATH=src python -m smagm.cli.point_guided_eval \
+PYTHONPATH=src "$POINT_GUIDED_PYTHON" -m smagm.cli.point_guided_eval \
   "$OUTPUT_ROOT/<run>/checkpoints/best_model.pt" \
   --config configs/evaluation/point_guided_brats21_eval.json \
   --data-root "$BRATS21_ROOT" \
@@ -186,6 +210,13 @@ PYTHONPATH=src python -m smagm.cli.point_guided_eval \
   --medicalnet-sha256 "$MEDICALNET_SHA256" \
   --save-predictions
 ```
+
+Evaluation reserves `--output-dir` before inference and rejects an existing
+directory by default. To intentionally replace artifacts in an existing
+directory, pass `--reuse-output` (or set `POINT_GUIDED_REUSE_OUTPUT=1` for the
+shell wrapper); this never clears stale files and cannot run concurrently with
+another writer. JSON, checkpoint, debug-prediction, and NIfTI artifacts use
+unique sibling temporary files followed by atomic replacement.
 
 If predictions are saved, they are transposed from tensor `[D,H,W]` back to
 NIfTI `[X,Y,Z]` and written with the source affine. Output metrics explicitly

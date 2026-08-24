@@ -36,11 +36,12 @@ def _sample_plane(plane: Tensor, row: Tensor, column: Tensor) -> Tensor:
         dim=-1,
     ).unsqueeze(2)
     # ``grid`` derives from physical RAS-mm geometry and deliberately retains
-    # its coordinate dtype.  The dynamic state is latent storage and may be
-    # autocast to lower precision, so align it to the physical query only at
-    # the differentiable sampling boundary rather than narrowing geometry.
+    # its coordinate dtype.  Autocast may store the latent state in fp16 or
+    # bf16 while physical coordinates remain fp32.  Make that state-to-grid
+    # sampling cast explicit at this differentiable boundary; gradients still
+    # flow through ``Tensor.to`` to the original state planes.
+    sampling_plane = plane if plane.dtype == grid.dtype else plane.to(dtype=grid.dtype)
     with torch.autocast(device_type=grid.device.type, enabled=False):
-        sampling_plane = plane.to(dtype=grid.dtype)
         sampled = F.grid_sample(
             sampling_plane,
             grid,
@@ -100,7 +101,14 @@ class GateBDescriptorContext:
 
 
 class DynamicStatePointQuery(nn.Module):
-    """Parameter-free, pointwise bilinear query of the current dynamic state."""
+    """Parameter-free, pointwise bilinear query of the current dynamic state.
+
+    The public dtype contract is intentionally narrow: fp32/fp64 state planes
+    require matching fp32/fp64 RAS-mm points, while autocast fp16/bfloat16
+    state planes require fp32 physical points.  In the latter case the state
+    is explicitly promoted to the fp32 coordinate dtype only for sampling;
+    the cast remains differentiable and physical geometry is not narrowed.
+    """
 
     def forward(
         self,
@@ -115,6 +123,17 @@ class DynamicStatePointQuery(nn.Module):
         _float_tensor("points_ras_mm", points_ras_mm, rank=3, last=3)
         if points_ras_mm.shape[0] != state.xy.shape[0] or points_ras_mm.device != state.xy.device:
             raise ValueError("points_ras_mm must match dynamic-state batch and device")
+        state_dtype = state.xy.dtype
+        coordinate_dtype = points_ras_mm.dtype
+        allowed = (state_dtype == coordinate_dtype and state_dtype in (torch.float32, torch.float64)) or (
+            state_dtype in (torch.float16, torch.bfloat16) and coordinate_dtype == torch.float32
+        )
+        if not allowed:
+            raise ValueError(
+                "unsupported dynamic-state/point dtype pair: "
+                f"state={state_dtype}, points={coordinate_dtype}; expected matching fp32/fp64 "
+                "or fp16/bfloat16 state with fp32 points"
+            )
         depth, height, width = feature_geometry.shape_dhw
         expected = ((state.xy, (height, width)), (state.xz, (depth, width)), (state.yz, (depth, height)))
         if any(tuple(plane.shape[-2:]) != shape for plane, shape in expected):

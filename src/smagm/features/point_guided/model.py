@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from typing import Any, Sequence
 
 import torch
@@ -308,8 +308,7 @@ class PointGuidedMRIModel(nn.Module):
         config = GateGInferenceConfig() if inference_config is None else inference_config
         if not isinstance(config, GateGInferenceConfig):
             raise TypeError("inference_config must be a GateGInferenceConfig")
-        was_training = self.training
-        try:
+        with self._preserve_module_training_modes():
             self.eval()
             with torch.no_grad():
                 output, gate_b_descriptors, feature_grid_geometry = self._forward_frontend_with_gate_b_context(
@@ -332,8 +331,24 @@ class PointGuidedMRIModel(nn.Module):
                     config=config,
                     semantic_probabilities=output.s_coarse,
                 )
+
+    @contextmanager
+    def _preserve_module_training_modes(self):
+        """Temporarily change mode without losing module-local flags.
+
+        ``Module.train`` and ``Module.eval`` recurse into descendants.  A
+        caller may nevertheless intentionally keep a mixed mode, for example
+        a parent in training mode with one child in evaluation mode.  Capture
+        every module's local flag and restore the flags directly so the
+        recursive temporary ``eval`` above cannot flatten that state.
+        """
+
+        modes = tuple((module, module.training) for module in self.modules())
+        try:
+            yield
         finally:
-            self.train(was_training)
+            for module, training in modes:
+                module.training = training
 
     def forward_training_context(
         self,
@@ -429,6 +444,11 @@ class PointGuidedMRIModel(nn.Module):
 
         if self.trajectory is None or self.decoder is None:
             raise RuntimeError("compute_training_objective requires an explicit TrajectoryConfig at model construction")
+        if context._trajectory is not self.trajectory or context._decoder is not self.decoder:
+            raise ValueError(
+                "Gate-E context was produced by a different PointGuidedMRIModel; "
+                "use the context only with its producing model"
+            )
         return _compute_training_objective(
             context,
             target_t1ce,

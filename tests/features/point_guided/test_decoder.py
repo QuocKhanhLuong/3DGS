@@ -16,6 +16,7 @@ from smagm.features.point_guided.decoder import (
     DynamicTriPlaneVoxelQuery,
     ImplicitTriPlaneDecoder,
 )
+from smagm.features.point_guided.reward import DynamicStatePointQuery
 from smagm.features.point_guided.sampling import voxel_dhw_to_ras_mm
 from smagm.features.point_guided.spectral_query import FeatureGridGeometry
 from smagm.features.point_guided.state_init import DynamicTriPlanes
@@ -195,6 +196,37 @@ def test_target_free_point_ras_decode_matches_the_exact_gate_d_query_and_mlp_wit
         assert plane.grad is not None
         assert bool(torch.isfinite(plane.grad).all())
         assert bool(plane.grad.abs().sum() > 0.0)
+
+
+def test_point_state_dtype_mismatch_fails_before_sampling_and_decoder_mlp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    geometry = _feature_geometry()
+    state = _random_state(geometry, dtype=torch.float32)
+    points = geometry.feature_dhw_to_ras_mm(
+        torch.tensor([[[1.0, 2.0, 3.0]]], dtype=torch.float64)
+    )
+    sampled = False
+
+    def unexpected_grid_sample(*args: object, **kwargs: object) -> torch.Tensor:
+        nonlocal sampled
+        sampled = True
+        raise AssertionError("grid_sample must not run for a point/state dtype mismatch")
+
+    monkeypatch.setattr("smagm.features.point_guided.reward.F.grid_sample", unexpected_grid_sample)
+    with pytest.raises(ValueError, match="^unsupported dynamic-state/point dtype pair:"):
+        DynamicStatePointQuery()(state, points, geometry)
+    assert sampled is False
+
+    decoder = ImplicitTriPlaneDecoder()
+    mlp_calls: list[bool] = []
+    hook = decoder.mlp.register_forward_hook(lambda *_args: mlp_calls.append(True))
+    try:
+        with pytest.raises(ValueError, match="^unsupported dynamic-state/point dtype pair:"):
+            decoder.decode_points(state, points, geometry)
+    finally:
+        hook.remove()
+    assert mlp_calls == []
 
 
 def test_full_volume_decode_delegates_to_point_ras_api_and_preserves_pointwise_values(

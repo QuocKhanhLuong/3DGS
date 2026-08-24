@@ -48,6 +48,7 @@ MASKED_ZSCORE_POLICY = "masked_zscore"
 MASKED_ROBUST_01_POLICY = "masked_robust_01"
 SUPPORTED_NORMALIZATION_POLICIES = frozenset({MASKED_ZSCORE_POLICY, MASKED_ROBUST_01_POLICY})
 SPLIT_VERSION = "brats21_point_guided_split_v1"
+SPLIT_HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 class BraTS21PointGuidedDependencyError(RuntimeError):
@@ -726,10 +727,15 @@ def structural_inventory_point_guided_subjects(
     if not isinstance(require_target, bool) or not isinstance(require_segmentation, bool):
         raise TypeError("require_target and require_segmentation must be bool")
 
+    # Keep the immediate source ledger complete before applying the subject-ID
+    # contract.  In particular, malformed directory names are source evidence,
+    # not candidates to silently filter out.  Sorting by the immediate entry
+    # name preserves the existing canonical source order.
     directories = tuple(
-        directory
-        for directory in sorted(item for item in source_root.iterdir() if item.is_dir())
-        if BRATS21_POINT_GUIDED_SUBJECT_PATTERN.fullmatch(directory.name) is not None
+        sorted(
+            (item for item in source_root.iterdir() if item.is_dir()),
+            key=lambda item: item.name,
+        )
     )
     if not directories:
         raise BraTS21PointGuidedValidationError("no BraTS2021 subject directories were found")
@@ -738,6 +744,16 @@ def structural_inventory_point_guided_subjects(
     excluded: list[BraTS21PointGuidedStructuralExclusion] = []
     for directory in directories:
         subject_id = directory.name
+        if BRATS21_POINT_GUIDED_SUBJECT_PATTERN.fullmatch(subject_id) is None:
+            excluded.append(
+                BraTS21PointGuidedStructuralExclusion(
+                    subject_id=subject_id,
+                    modality="subject_directory",
+                    reason="OTHER_INVALID",
+                    path=directory,
+                )
+            )
+            continue
         for modality in _required_modalities(
             require_target=require_target,
             require_segmentation=require_segmentation,
@@ -755,8 +771,11 @@ def structural_inventory_point_guided_subjects(
                 break
         else:
             eligible.append(subject_id)
-    if not eligible:
-        raise BraTS21PointGuidedValidationError("no structurally eligible BraTS21 subjects are available")
+    ledger_subject_ids = tuple(eligible) + tuple(item.subject_id for item in excluded)
+    if len(ledger_subject_ids) != len(discovered) or set(ledger_subject_ids) != set(discovered):
+        raise BraTS21PointGuidedValidationError(
+            "structural inventory ledger must account for every immediate source directory exactly once"
+        )
     return BraTS21PointGuidedStructuralInventory(
         root=source_root,
         discovered_subject_ids=discovered,
@@ -1211,6 +1230,9 @@ class PointGuidedBatch:
         if self.segmentation is not None:
             if self.segmentation.shape != (batch_size, *shape_dhw) or self.segmentation.dtype is not torch.int64:
                 raise BraTS21PointGuidedValidationError("segmentation must have shape [B,D,H,W] and be int64")
+            # PointGuidedBatch is also a public dataclass and may be
+            # constructed directly, so sample-level validation cannot be
+            # assumed at this boundary.
             labels = set(int(value) for value in torch.unique(self.segmentation).tolist())
             if not labels.issubset(BRATS21_POINT_GUIDED_LABELS):
                 raise BraTS21PointGuidedValidationError(f"batch segmentation contains unexpected labels: {sorted(labels)}")
@@ -1332,7 +1354,12 @@ def load_point_guided_subject(
         observations_xyz,
         threshold=normalization_config.brain_mask_threshold,
     )
-    brain_mask_dhw = torch.from_numpy(nifti_xyz_to_dhw(brain_mask_xyz).copy())
+    # PERF-001: ``nifti_xyz_to_dhw`` already returns an independent,
+    # C-contiguous array via ``np.ascontiguousarray``.  ``torch.from_numpy``
+    # can safely consume that immutable-boundary result; the former ``.copy``
+    # duplicated the whole brain mask without changing its content, dtype,
+    # shape, or layout.
+    brain_mask_dhw = torch.from_numpy(nifti_xyz_to_dhw(brain_mask_xyz))
     normalized_observations: list[torch.Tensor] = []
     normalization: dict[str, ModalityNormalizationMetadata] = {}
     for index, modality in enumerate(POINT_GUIDED_OBSERVATION_MODALITIES):
@@ -1516,11 +1543,11 @@ def _subject_id_from_item(item: object) -> str:
 
 
 def _normalize_caps(
-    max_subjects: Mapping[str, int | None] | int | None,
+    max_subjects: Mapping[str, int | None] | int | None = None,
     *,
-    max_train_subjects: int | None,
-    max_val_subjects: int | None,
-    max_test_subjects: int | None,
+    max_train_subjects: int | None = None,
+    max_val_subjects: int | None = None,
+    max_test_subjects: int | None = None,
 ) -> dict[str, int | None]:
     caps: dict[str, int | None] = {"train": None, "val": None, "test": None}
     if isinstance(max_subjects, bool):
@@ -1567,6 +1594,74 @@ def _validate_fractions(
     return values  # type: ignore[return-value]
 
 
+def _validate_split_hash(value: object, name: str = "split_hash") -> str:
+    if isinstance(value, str) and SPLIT_HASH_PATTERN.fullmatch(value) is not None:
+        return value
+    raise BraTS21PointGuidedValidationError(
+        f"{name} must be a 64-character lowercase hexadecimal SHA-256 digest"
+    )
+
+
+def compute_canonical_split_digest(
+    *,
+    all_subject_ids: Sequence[str],
+    assignments: Mapping[str, str],
+    caps: Mapping[str, int | None] | int | None = None,
+    max_train_subjects: int | None = None,
+    max_val_subjects: int | None = None,
+    max_test_subjects: int | None = None,
+    fractions: Sequence[float] | None = None,
+    train_fraction: float = 0.8,
+    val_fraction: float = 0.1,
+    test_fraction: float = 0.1,
+    seed: int = 0,
+    version: str = SPLIT_VERSION,
+) -> str:
+    """Compute the deterministic SHA-256 digest from actual split membership and fields."""
+
+    if version != SPLIT_VERSION:
+        raise BraTS21PointGuidedValidationError(
+            f"unsupported split version: {version!r}, expected {SPLIT_VERSION!r}"
+        )
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise BraTS21PointGuidedValidationError("split seed must be an integer")
+    validated_fractions = _validate_fractions(fractions, train_fraction, val_fraction, test_fraction)
+    normalized_caps = _normalize_caps(
+        caps,
+        max_train_subjects=max_train_subjects,
+        max_val_subjects=max_val_subjects,
+        max_test_subjects=max_test_subjects,
+    )
+    all_ids = tuple(_validate_subject_id(subject_id) for subject_id in all_subject_ids)
+    if len(set(all_ids)) != len(all_ids):
+        raise BraTS21PointGuidedValidationError("all_subject_ids must contain unique subjects")
+    sorted_all_ids = tuple(sorted(all_ids))
+    if set(assignments.keys()) != set(sorted_all_ids):
+        raise BraTS21PointGuidedValidationError("assignments must cover exactly all_subject_ids")
+    allowed_splits = {"train", "val", "test", "excluded"}
+    canonical_assignments: dict[str, str] = {}
+    for subject_id in sorted_all_ids:
+        target_group = assignments[subject_id]
+        if target_group not in allowed_splits:
+            raise BraTS21PointGuidedValidationError(
+                f"invalid assignment {target_group!r} for subject {subject_id!r}"
+            )
+        canonical_assignments[subject_id] = target_group
+    payload = {
+        "all_subject_ids": sorted_all_ids,
+        "assignments": canonical_assignments,
+        "caps": {key: normalized_caps[key] for key in ("train", "val", "test")},
+        "fractions": validated_fractions,
+        "seed": seed,
+        "version": version,
+    }
+    return _canonical_hash(payload)
+
+
+canonical_split_digest = compute_canonical_split_digest
+canonical_split_hash = compute_canonical_split_digest
+
+
 @dataclass(frozen=True)
 class BraTS21PointGuidedSplit:
     """A deterministic subject-level split and its provenance hash."""
@@ -1586,9 +1681,9 @@ class BraTS21PointGuidedSplit:
         if len(set(all_ids)) != len(all_ids) or all_ids != tuple(sorted(all_ids)):
             raise BraTS21PointGuidedValidationError("all_subject_ids must be unique and sorted")
         groups = {
-            "train": tuple(self.train_subject_ids),
-            "val": tuple(self.val_subject_ids),
-            "test": tuple(self.test_subject_ids),
+            "train": tuple(_validate_subject_id(v) for v in self.train_subject_ids),
+            "val": tuple(_validate_subject_id(v) for v in self.val_subject_ids),
+            "test": tuple(_validate_subject_id(v) for v in self.test_subject_ids),
         }
         selected = [subject_id for group in groups.values() for subject_id in group]
         if len(selected) != len(set(selected)) or any(subject_id not in all_ids for subject_id in selected):
@@ -1599,11 +1694,24 @@ class BraTS21PointGuidedSplit:
         fractions = _validate_fractions(self.split_fractions, 0.8, 0.1, 0.1)
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
             raise BraTS21PointGuidedValidationError("split seed must be an integer")
-        caps = {str(key): value for key, value in self.max_subjects.items()}
-        if set(caps) != {"train", "val", "test"}:
-            raise BraTS21PointGuidedValidationError("max_subjects must contain train, val, and test")
-        if not isinstance(self.split_hash, str) or len(self.split_hash) != 64:
-            raise BraTS21PointGuidedValidationError("split_hash must be a SHA-256 digest")
+        caps = _normalize_caps(self.max_subjects)
+        validated_hash = _validate_split_hash(self.split_hash, "split_hash")
+        assignments = {subject_id: "train" for subject_id in groups["train"]}
+        assignments.update({subject_id: "val" for subject_id in groups["val"]})
+        assignments.update({subject_id: "test" for subject_id in groups["test"]})
+        assignments.update({subject_id: "excluded" for subject_id in excluded})
+        expected_hash = compute_canonical_split_digest(
+            all_subject_ids=all_ids,
+            assignments=assignments,
+            caps=caps,
+            fractions=fractions,
+            seed=self.seed,
+            version=SPLIT_VERSION,
+        )
+        if validated_hash != expected_hash:
+            raise BraTS21PointGuidedValidationError(
+                f"split_hash mismatch: expected canonical {expected_hash}, got {validated_hash}"
+            )
         object.__setattr__(self, "all_subject_ids", all_ids)
         object.__setattr__(self, "train_subject_ids", tuple(groups["train"]))
         object.__setattr__(self, "val_subject_ids", tuple(groups["val"]))
@@ -1611,6 +1719,7 @@ class BraTS21PointGuidedSplit:
         object.__setattr__(self, "split_fractions", fractions)
         object.__setattr__(self, "max_subjects", MappingProxyType(caps))
         object.__setattr__(self, "excluded_subject_ids", tuple(sorted(excluded)))
+        object.__setattr__(self, "split_hash", validated_hash)
 
     @property
     def validation_subject_ids(self) -> tuple[str, ...]:
@@ -1636,6 +1745,7 @@ class BraTS21PointGuidedSplit:
             "test_subject_ids": self.test_subject_ids,
             "train_subject_ids": self.train_subject_ids,
             "val_subject_ids": self.val_subject_ids,
+            "version": SPLIT_VERSION,
         }
 
 
@@ -1710,15 +1820,14 @@ def deterministic_subject_split(
         for subject_id in group
     }
     assignments.update({subject_id: "excluded" for subject_id in excluded})
-    payload = {
-        "all_subject_ids": ids,
-        "assignments": dict(sorted(assignments.items())),
-        "caps": caps,
-        "fractions": fractions,
-        "seed": seed,
-        "version": SPLIT_VERSION,
-    }
-    split_hash = _canonical_hash(payload)
+    split_hash = compute_canonical_split_digest(
+        all_subject_ids=ids,
+        assignments=assignments,
+        caps=caps,
+        fractions=fractions,
+        seed=seed,
+        version=SPLIT_VERSION,
+    )
     return BraTS21PointGuidedSplit(
         all_subject_ids=ids,
         train_subject_ids=groups[0],
@@ -1734,6 +1843,68 @@ def deterministic_subject_split(
 
 build_subject_split = deterministic_subject_split
 make_subject_split = deterministic_subject_split
+
+
+def load_point_guided_split(
+    path: str | Path,
+    *,
+    subjects: Sequence[str] | None = None,
+) -> BraTS21PointGuidedSplit:
+    """Load and validate a split artifact, strictly recomputing its canonical digest."""
+
+    split_path = Path(path)
+    if not split_path.is_file():
+        raise FileNotFoundError(f"split file does not exist: {split_path}")
+    payload = json.loads(split_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping):
+        raise BraTS21PointGuidedValidationError("split file must contain a JSON object")
+    raw_hash = payload.get("split_hash")
+    validated_hash = _validate_split_hash(raw_hash, "split_hash")
+
+    train_ids = tuple(_validate_subject_id(s) for s in payload.get("train_subject_ids", payload.get("train", ())))
+    val_ids = tuple(_validate_subject_id(s) for s in payload.get("val_subject_ids", payload.get("val", payload.get("validation", ()))))
+    test_ids = tuple(_validate_subject_id(s) for s in payload.get("test_subject_ids", payload.get("test", ())))
+    excluded_ids = tuple(_validate_subject_id(s) for s in payload.get("excluded_subject_ids", payload.get("excluded", ())))
+
+    selected = train_ids + val_ids + test_ids
+    if len(selected) != len(set(selected)):
+        raise BraTS21PointGuidedValidationError("split file contains unknown or overlapping subject IDs")
+    if len(excluded_ids) != len(set(excluded_ids)) or set(selected).intersection(excluded_ids):
+        raise BraTS21PointGuidedValidationError("split file contains unknown or overlapping excluded subject IDs")
+
+    raw_all = payload.get("all_subject_ids")
+    if raw_all is not None:
+        all_ids = tuple(_validate_subject_id(s) for s in raw_all)
+        if set(all_ids) != set(selected).union(excluded_ids):
+            raise BraTS21PointGuidedValidationError("split file subject groups do not partition all_subject_ids")
+    else:
+        all_ids = tuple(sorted(set(selected).union(excluded_ids)))
+
+    if subjects is not None:
+        discovered_ids = tuple(_validate_subject_id(s) for s in subjects)
+        if len(set(discovered_ids)) != len(discovered_ids):
+            raise BraTS21PointGuidedValidationError("subjects sequence contains duplicates")
+        if set(all_ids) != set(discovered_ids):
+            raise BraTS21PointGuidedValidationError("split file must partition every discovered subject exactly once")
+
+    seed = payload.get("seed", 0)
+    fractions = payload.get("split_fractions", payload.get("fractions", (0.8, 0.1, 0.1)))
+    caps = payload.get("max_subjects", payload.get("caps", {"train": None, "val": None, "test": None}))
+    version = payload.get("version", SPLIT_VERSION)
+    if version != SPLIT_VERSION:
+        raise BraTS21PointGuidedValidationError(f"unsupported split version: {version!r}, expected {SPLIT_VERSION!r}")
+
+    return BraTS21PointGuidedSplit(
+        all_subject_ids=tuple(sorted(all_ids)),
+        train_subject_ids=train_ids,
+        val_subject_ids=val_ids,
+        test_subject_ids=test_ids,
+        split_fractions=tuple(fractions),
+        seed=seed,
+        max_subjects=caps,
+        excluded_subject_ids=excluded_ids,
+        split_hash=validated_hash,
+    )
 
 
 class BraTS21PointGuidedAdapter:
@@ -1871,15 +2042,20 @@ __all__ = [
     "PointGuidedVolume",
     "PointGuidedBatch",
     "PointGuidedNormalizationConfig",
+    "SPLIT_HASH_PATTERN",
     "SPLIT_VERSION",
     "build_subject_split",
+    "canonical_split_digest",
+    "canonical_split_hash",
     "collate_point_guided_samples",
+    "compute_canonical_split_digest",
     "derive_input_brain_mask",
     "deterministic_subject_split",
     "discover_point_guided_subject",
     "discover_point_guided_subject_ids",
     "discover_point_guided_subjects",
     "inventory_point_guided_subjects",
+    "load_point_guided_split",
     "structural_inventory_point_guided_subjects",
     "discover_subject",
     "discover_subjects",

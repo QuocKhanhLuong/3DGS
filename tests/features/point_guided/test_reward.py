@@ -123,6 +123,37 @@ def test_dynamic_query_preserves_fp32_geometry_and_gradients_with_fp16_state_und
         assert plane.grad is not None and bool(torch.isfinite(plane.grad).all()) and bool(plane.grad.abs().sum() > 0.0)
 
 
+def test_dynamic_query_preserves_fp32_geometry_with_bfloat16_state_under_cpu_autocast() -> None:
+    geometry = _geometry()
+    state = DynamicTriPlanes(
+        xy=torch.arange(32 * 5 * 7, dtype=torch.bfloat16).reshape(1, 32, 5, 7).requires_grad_(),
+        xz=torch.arange(32 * 3 * 7, dtype=torch.bfloat16).reshape(1, 32, 3, 7).requires_grad_(),
+        yz=torch.arange(32 * 3 * 5, dtype=torch.bfloat16).reshape(1, 32, 3, 5).requires_grad_(),
+    )
+    points = torch.tensor(
+        [[[3.25, 2.25, 1.25], [4.50, 3.50, 1.50]]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        samples = DynamicStatePointQuery()(state, points, geometry)
+
+    assert samples.xy.dtype == samples.xz.dtype == samples.yz.dtype == torch.float32
+    samples.packed.square().mean().backward()
+    assert points.grad is not None and bool(torch.isfinite(points.grad).all())
+    for plane in (state.xy, state.xz, state.yz):
+        assert plane.grad is not None and bool(torch.isfinite(plane.grad).all())
+
+
+def test_dynamic_query_rejects_unsupported_state_point_dtype_pair_before_sampling() -> None:
+    geometry = _geometry()
+    state = _state()
+    points = geometry.feature_dhw_to_ras_mm(torch.tensor([[[1.0, 2.0, 3.0]]], dtype=torch.float64))
+    with pytest.raises(ValueError, match="^unsupported dynamic-state/point dtype pair:"):
+        DynamicStatePointQuery()(state, points, geometry)
+
+
 def test_reward_descriptor_is_exact_126_d_and_reliability_weighted_q_bar() -> None:
     geometry = _geometry()
     points = geometry.feature_dhw_to_ras_mm(torch.tensor([[[1.0, 2.0, 3.0], [1.0, 3.0, 4.0]]]))
