@@ -19,7 +19,7 @@ from torch import Tensor
 from .contracts import FrontendOutput, VolumeGeometry
 from .decoder import ImplicitTriPlaneDecoder, ReconstructionOutput
 from .losses import ReconstructionLossConfig, ReconstructionLossResult, pointwise_charbonnier_by_subject, reconstruction_loss
-from .reward import GateBDescriptorContext
+from .reward import GateBDescriptorContext, build_reward_descriptor
 from .reward_supervision import (
     CounterfactualConfig,
     CounterfactualRewardResult,
@@ -63,6 +63,7 @@ class SupervisionConfig:
     spill_sample_count: int = 12
     reward_ranking_weight: float = 0.0
     reward_ranking_min_target_gap: float = 0.001
+    supervise_terminal_state: bool = False
 
     def __post_init__(self) -> None:
         for name in (
@@ -81,6 +82,8 @@ class SupervisionConfig:
         if not math.isfinite(data_range) or data_range <= 0.0:
             raise ValueError("ssim_data_range must be positive and finite")
         object.__setattr__(self, "ssim_data_range", data_range)
+        if not isinstance(self.supervise_terminal_state, bool):
+            raise ValueError("supervise_terminal_state must be a bool")
         # Delegate bounded candidate validation to the exact E2 config rather
         # than silently duplicating a second policy here.
         counterfactual = CounterfactualConfig(
@@ -440,6 +443,48 @@ def _compute_training_objective(
         update_norm = step.selected_update_norm[active]
         delta_values.append(update_norm.square().mean())
         delta_counts.append(int(active.sum().detach().cpu()))
+
+    if config.supervise_terminal_state:
+        # The historical objective supervised RewardNet only at states that
+        # had already executed a transition.  A K=0 stop therefore produced no
+        # reward gradient at all.  Probe the final reached state as well using
+        # a target-free RewardNet argmax; the T1ce target remains confined to
+        # the counterfactual measurement after that selection is fixed.
+        terminal_state = trace.states[-1]
+        with torch.no_grad():
+            terminal_samples = trajectory.dynamic_state_query(
+                terminal_state,
+                frontend.refined_points_ras_mm,
+                context.feature_geometry,
+            )
+            terminal_descriptor = build_reward_descriptor(
+                terminal_samples,
+                frontend.point_semantic,
+                context.gate_b_descriptors,
+                frontend.reliability,
+            )
+            terminal_selected = trajectory.reward_net(terminal_descriptor.detach()).argmax(dim=1)
+        terminal_reward = counterfactual_reward_supervision(
+            trajectory,
+            decoder,
+            terminal_state,
+            frontend.refined_points_ras_mm,
+            frontend.point_semantic,
+            frontend.f_spec,
+            frontend.reliability,
+            context.gate_b_descriptors,
+            context.feature_geometry,
+            context.reconstruction.geometry,
+            safe_target,
+            selected_indices=terminal_selected,
+            valid_mask=support_mask,
+            config=config.counterfactual_config,
+            generator=generator,
+        )
+        reward_results.append(terminal_reward)
+        if terminal_reward.valid_count:
+            reward_values.append(terminal_reward.loss)
+            reward_counts.append(terminal_reward.valid_count)
 
     reward = _weighted_scalar_mean(reward_values, reward_counts, zero)
     local = _weighted_scalar_mean(local_values, local_counts, zero)
