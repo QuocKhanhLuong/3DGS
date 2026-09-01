@@ -293,7 +293,7 @@ class AdaptiveRewardCostTrajectory(nn.Module):
         ):
             raise ValueError("availability policy must return a device-matched bool tensor [B,N]")
 
-        for _ in range(active_config.k_max):
+        for step_index in range(active_config.k_max):
             if availability_policy is not None:
                 assert available is not None
                 exhausted = running & ~available.any(dim=1)
@@ -334,11 +334,11 @@ class AdaptiveRewardCostTrajectory(nn.Module):
                 running_points,
                 previous_indices[running],
                 support_radius_mm=active_config.support_radius_mm,
+                bounded=active_config.bounded_travel_cost,
             )
             running_overlap = overlap[running]
-            # Preserve the raw locked U = R - travel - overlap - step view
-            # separately from any caller-owned availability mask.  This is
-            # target-free evidence for scale diagnosis only.
+            # The corrected mode uses a bounded locality prior for candidate
+            # ranking and keeps raw RewardNet gain separate for halting.
             running_utility = route_utility(running_reward, running_travel, running_overlap, active_config)
             candidate_reward_sum = candidate_reward_sum.index_add(0, running_rows, running_reward.detach().sum(dim=1))
             candidate_travel_cost_sum = candidate_travel_cost_sum.index_add(0, running_rows, running_travel.detach().sum(dim=1))
@@ -360,8 +360,16 @@ class AdaptiveRewardCostTrajectory(nn.Module):
                 (running_utility.detach() > 0.0).sum(dim=1, dtype=torch.long),
             )
             candidate_telemetry_seen = candidate_telemetry_seen.index_fill(0, running_rows, True)
+
+            # Halting uses raw expected gain in corrected mode.  A one-step
+            # training exploration floor keeps UpdateNet from being permanently
+            # starved before RewardNet is calibrated; inference never forces it.
+            running_halt_score = running_reward
+            if self.training and step_index < active_config.training_exploration_steps:
+                running_halt_score = torch.full_like(running_reward, active_config.halt_reward_threshold + 1.0)
             if availability_policy is not None:
                 assert available is not None
+                running_halt_score = torch.where(available[running], running_halt_score, torch.zeros_like(running_halt_score))
                 running_utility = availability_policy.mask_utility(running_utility, available[running])
                 if (
                     not isinstance(running_utility, Tensor)
@@ -371,20 +379,23 @@ class AdaptiveRewardCostTrajectory(nn.Module):
                     or not bool(torch.isfinite(running_utility).all())
                 ):
                     raise ValueError("availability policy must return finite utility aligned with running candidates")
-            reward = torch.zeros(batch, point_count, dtype=reference.dtype, device=reference.device).index_copy(0, running.nonzero(as_tuple=False).squeeze(1), running_reward)
-            travel = torch.zeros_like(reward).index_copy(0, running.nonzero(as_tuple=False).squeeze(1), running_travel)
-            utility = torch.zeros_like(reward).index_copy(0, running.nonzero(as_tuple=False).squeeze(1), running_utility)
+            reward = torch.zeros(batch, point_count, dtype=reference.dtype, device=reference.device).index_copy(0, running_rows, running_reward)
+            travel = torch.zeros_like(reward).index_copy(0, running_rows, running_travel)
+            utility = torch.zeros_like(reward).index_copy(0, running_rows, running_utility)
+            halt_score = torch.zeros_like(reward).index_copy(0, running_rows, running_halt_score)
             selection = self.route_solver(
                 utility,
                 running,
                 training=self.training,
                 temperature=active_config.selection_temperature,
+                halt_score=halt_score if active_config.separate_halt_from_utility else None,
+                halt_threshold=active_config.halt_reward_threshold if active_config.separate_halt_from_utility else 0.0,
             )
-            # This latch is irreversible for the current batch execution.
-            # A nonpositive subject never receives another update or choice.
-            nonpositive = running_before_selection & ~selection.active
-            if bool(nonpositive.any()):
-                for index in nonpositive.nonzero(as_tuple=False).squeeze(1).tolist():
+            # Keep the legacy serialized reason string for downstream schema
+            # compatibility; in corrected mode it now means low expected gain.
+            halted = running_before_selection & ~selection.active
+            if bool(halted.any()):
+                for index in halted.nonzero(as_tuple=False).squeeze(1).tolist():
                     stop_reasons[index] = "nonpositive_utility"
             running = selection.active
             if not bool(selection.active.any()):
