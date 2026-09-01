@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 import torch
 from torch import Tensor, nn
@@ -33,7 +34,14 @@ class SelectionResult:
 
 
 class AdaptiveRouteSolver(nn.Module):
-    """Parameter-free receding-horizon utility solver, never a global route planner."""
+    """Parameter-free receding-horizon selector with optional separate halting.
+
+    Ranking and stopping are distinct questions.  ``utility`` always chooses
+    the candidate.  When ``halt_score`` is supplied, continuation is decided
+    from its row maximum and ``halt_threshold`` instead of from whether the
+    best ranking utility happens to be positive.  Omitting ``halt_score``
+    preserves the historical Gate-C behavior for older callers.
+    """
 
     def forward(
         self,
@@ -42,6 +50,8 @@ class AdaptiveRouteSolver(nn.Module):
         *,
         training: bool,
         temperature: float,
+        halt_score: Tensor | None = None,
+        halt_threshold: float = 0.0,
     ) -> SelectionResult:
         if not isinstance(utility, Tensor) or utility.ndim != 2 or not utility.is_floating_point() or not bool(torch.isfinite(utility).all()):
             raise ValueError("utility must be a finite floating tensor [B,N]")
@@ -49,11 +59,26 @@ class AdaptiveRouteSolver(nn.Module):
             raise ValueError("running must be a device-matched bool tensor [B]")
         if not isinstance(temperature, float) or not torch.isfinite(torch.tensor(temperature)) or temperature <= 0.0:
             raise ValueError("temperature must be positive and finite")
-        # Gate C deliberately permits revisiting a point.  Explicit travel,
-        # overlap, and step costs discourage redundant choices economically;
-        # a structural no-revisit mask belongs to the later Gate-G policy.
+        threshold = float(halt_threshold)
+        if not math.isfinite(threshold) or threshold < 0.0:
+            raise ValueError("halt_threshold must be finite and non-negative")
+        if halt_score is not None:
+            if (
+                not isinstance(halt_score, Tensor)
+                or halt_score.shape != utility.shape
+                or halt_score.dtype != utility.dtype
+                or halt_score.device != utility.device
+                or not halt_score.is_floating_point()
+                or not bool(torch.isfinite(halt_score).all())
+            ):
+                raise ValueError("halt_score must be a finite floating tensor aligned with utility")
+
+        # Gate C deliberately permits revisiting a point.  Explicit travel and
+        # overlap scores discourage redundant choices economically; a
+        # structural no-revisit mask belongs to the later Gate-G policy.
         max_utility, raw_indices = utility.max(dim=-1)
-        active = running & (max_utility > 0.0)
+        continuation_score = max_utility if halt_score is None else halt_score.max(dim=-1).values
+        active = running & (continuation_score > threshold)
         indices = torch.where(active, raw_indices, torch.full_like(raw_indices, -1))
         hard = torch.zeros_like(utility)
         if bool(active.any()):
