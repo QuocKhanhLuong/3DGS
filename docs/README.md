@@ -7,6 +7,7 @@ volumes and prepares a point field for later T1ce reconstruction research.
 - [Frontend contract](architecture/POINT_GUIDED_FRONTEND.md)
 - [Point-guided server runbook](POINT_GUIDED_SERVER_RUN.md)
 - [Trajectory collapse diagnostic runbook](TRAJECTORY_COLLAPSE_DEBUG_RUN.md)
+- [Reward-logic smoke rerun playbook](POINT_GUIDED_REWARD_LOGIC_SMOKE_RUN.md)
 - [Codegraph and access policy](../CODEGRAPH.json)
 - [Software ownership](../CODEBASE.md)
 
