@@ -21,7 +21,15 @@ def _positive_finite(name: str, value: float) -> float:
 
 @dataclass(frozen=True)
 class TrajectoryConfig:
-    """Explicit Gate-C runtime choices; no Gate-F/G tuned defaults are implied."""
+    """Explicit Gate-C runtime choices; no Gate-F/G tuned defaults are implied.
+
+    ``bounded_travel_cost`` and ``separate_halt_from_utility`` are opt-in so
+    older Gate-F/G configurations keep their historical behavior.  In the
+    corrected point-guided training configuration, physical travel is mapped
+    to ``[0, 1)`` before weighting and ``lambda_step`` is retained as the
+    serialized minimum raw RewardNet gain required to continue rather than a
+    constant subtracted from every candidate ranking score.
+    """
 
     lambda_travel: float
     lambda_overlap: float
@@ -30,6 +38,9 @@ class TrajectoryConfig:
     selection_temperature: float
     write_scale: float
     support_radius_mm: float = LOCKED_SUPPORT_RADIUS_MM
+    bounded_travel_cost: bool = False
+    separate_halt_from_utility: bool = False
+    training_exploration_steps: int = 0
 
     def __post_init__(self) -> None:
         for name in ("lambda_travel", "lambda_overlap", "lambda_step", "selection_temperature", "write_scale"):
@@ -40,6 +51,22 @@ class TrajectoryConfig:
         if radius != LOCKED_SUPPORT_RADIUS_MM:
             raise ValueError("support_radius_mm must be exactly 4.0 mm in Gate-C MAIN")
         object.__setattr__(self, "support_radius_mm", radius)
+        for name in ("bounded_travel_cost", "separate_halt_from_utility"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be a bool")
+        if (
+            not isinstance(self.training_exploration_steps, int)
+            or isinstance(self.training_exploration_steps, bool)
+            or self.training_exploration_steps < 0
+            or self.training_exploration_steps > self.k_max
+        ):
+            raise ValueError("training_exploration_steps must be an integer in [0, k_max]")
+
+    @property
+    def halt_reward_threshold(self) -> float:
+        """Minimum raw expected gain used when halt and ranking are separated."""
+
+        return self.lambda_step
 
 
 def _points(name: str, value: Tensor, *, rank: int) -> None:
@@ -49,12 +76,27 @@ def _points(name: str, value: Tensor, *, rank: int) -> None:
         raise ValueError(f"{name} must have positive batch and finite values")
 
 
-def travel_cost(candidate_points_ras_mm: Tensor, previous_indices: Tensor, *, support_radius_mm: float = LOCKED_SUPPORT_RADIUS_MM) -> Tensor:
-    """Physical travel divided by the locked 4-mm support radius; first step is zero."""
+def travel_cost(
+    candidate_points_ras_mm: Tensor,
+    previous_indices: Tensor,
+    *,
+    support_radius_mm: float = LOCKED_SUPPORT_RADIUS_MM,
+    bounded: bool = False,
+) -> Tensor:
+    """Return route locality cost; first step is always zero.
+
+    The legacy form is physical distance divided by the locked 4-mm support
+    radius.  The corrected form additionally maps that non-negative ratio
+    ``d`` to ``d / (1 + d)``, preserving ordering while preventing an
+    unbounded millimetre-scale term from overwhelming RewardNet's ``[0, 1]``
+    score range.
+    """
 
     _points("candidate_points_ras_mm", candidate_points_ras_mm, rank=3)
     if not isinstance(previous_indices, Tensor) or previous_indices.shape != (candidate_points_ras_mm.shape[0],):
         raise ValueError("previous_indices must have shape [B]")
+    if not isinstance(bounded, bool):
+        raise ValueError("bounded must be a bool")
     radius = _positive_finite("support_radius_mm", support_radius_mm)
     if radius != LOCKED_SUPPORT_RADIUS_MM:
         raise ValueError("support_radius_mm must be exactly 4.0 mm")
@@ -66,6 +108,8 @@ def travel_cost(candidate_points_ras_mm: Tensor, previous_indices: Tensor, *, su
     safe_indices = previous_indices.clamp_min(0)
     previous = candidate_points_ras_mm[torch.arange(batch, device=candidate_points_ras_mm.device), safe_indices]
     distances = torch.linalg.vector_norm(candidate_points_ras_mm - previous.unsqueeze(1), dim=-1) / radius
+    if bounded:
+        distances = distances / (1.0 + distances)
     return torch.where(previous_indices.unsqueeze(1) < 0, torch.zeros_like(distances), distances)
 
 
@@ -87,7 +131,13 @@ def overlap_cost(candidate_points_ras_mm: Tensor, visited_points_ras_mm: Tensor,
 
 
 def route_utility(reward: Tensor, travel: Tensor, overlap: Tensor, config: TrajectoryConfig) -> Tensor:
-    """Exact explicit reward minus travel, overlap, and positive step expense."""
+    """Return the candidate ranking score used by the route solver.
+
+    Legacy configurations retain ``R - lambda_travel*T - lambda_overlap*O -
+    lambda_step``.  Corrected configurations remove the candidate-independent
+    step term from ranking; stopping is then decided separately from raw
+    expected gain.
+    """
 
     if not isinstance(config, TrajectoryConfig):
         raise TypeError("config must be a TrajectoryConfig")
@@ -98,7 +148,10 @@ def route_utility(reward: Tensor, travel: Tensor, overlap: Tensor, config: Traje
             raise ValueError(f"{name} must match reward shape, dtype, and device")
     if bool((travel < 0.0).any()) or bool((overlap < 0.0).any()):
         raise ValueError("travel and overlap costs must be nonnegative")
-    return reward - config.lambda_travel * travel - config.lambda_overlap * overlap - config.lambda_step
+    utility = reward - config.lambda_travel * travel - config.lambda_overlap * overlap
+    if not config.separate_halt_from_utility:
+        utility = utility - config.lambda_step
+    return utility
 
 
 __all__ = [
