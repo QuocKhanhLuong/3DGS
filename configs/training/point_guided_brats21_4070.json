@@ -20,11 +20,14 @@
   "trajectory": {
     "lambda_travel": 0.05,
     "lambda_overlap": 0.2,
-    "lambda_step": 0.05,
+    "lambda_step": 0.025,
     "k_max": 64,
     "selection_temperature": 1.0,
     "write_scale": 0.1,
-    "support_radius_mm": 4.0
+    "support_radius_mm": 4.0,
+    "bounded_travel_cost": true,
+    "separate_halt_from_utility": true,
+    "training_exploration_steps": 1
   },
   "supervision": {
     "lambda_ssim": 0.2,
@@ -40,7 +43,8 @@
     "spill_weight_beta": 1.0,
     "spill_sample_count": 12,
     "reward_ranking_weight": 0.0,
-    "reward_ranking_min_target_gap": 0.001
+    "reward_ranking_min_target_gap": 0.001,
+    "supervise_terminal_state": true
   },
   "training": {
     "learning_rate": 0.0001,
