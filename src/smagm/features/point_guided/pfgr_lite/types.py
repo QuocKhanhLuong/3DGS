@@ -743,6 +743,13 @@ class Decision:
     """Target-free route decision; labels/targets are intentionally absent."""
 
     selected_point_id: int = -1
+    # These identities bind the decision to the exact dense scoring pass.  A
+    # stopping decision may leave ``action_digest`` empty because no action is
+    # executed, but it must still identify the proposal batch whenever one was
+    # scored.  A continuing decision must carry both fields and the action
+    # digest must match the selected stored proposal row.
+    proposal_digest: str = ""
+    action_digest: str = ""
     active: bool = True
     raw_value: float = 0.0
     calibrated_value: float = 0.0
@@ -759,6 +766,10 @@ class Decision:
             raise ValueError("selected_point_id must be -1 or nonnegative")
         if not isinstance(self.active, bool):
             raise TypeError("active must be bool")
+        if self.proposal_digest:
+            _nonempty_text("proposal_digest", self.proposal_digest)
+        if self.action_digest:
+            _nonempty_text("action_digest", self.action_digest)
         for name in ("raw_value", "calibrated_value", "conservative_value", "allowance", "quality_margin", "compute_cost"):
             value = float(getattr(self, name))
             if not math.isfinite(value):
@@ -818,6 +829,23 @@ class CompletedBehaviorTrace:
                     raise ValueError("continue decision must select a proposal point")
             elif decision.selected_point_id >= 0:
                 raise ValueError("stopping decision cannot carry a selected point")
+            if decision.proposal_digest != proposal.proposal_digest:
+                raise ValueError("decision proposal_digest does not match scored proposal batch")
+            if decision.selected_point_id >= 0:
+                locations = (proposal.point_ids == decision.selected_point_id).nonzero(as_tuple=False)
+                if locations.shape[0] != 1:
+                    raise ValueError("decision selected point is not uniquely present in scored proposals")
+                expected_action = proposal.row(int(locations[0, 0]), int(locations[0, 1])).action_digest
+                if decision.action_digest != expected_action:
+                    raise ValueError("decision action_digest does not match selected stored action")
+            elif decision.action_digest:
+                action_digests = {
+                    proposal.row(batch_index, point_index).action_digest
+                    for batch_index in range(proposal.point_ids.shape[0])
+                    for point_index in range(proposal.point_ids.shape[1])
+                }
+                if decision.action_digest not in action_digests:
+                    raise ValueError("stopping decision action_digest is not from scored proposals")
         digest_payload = {
             "context_id": self.context_id,
             "states": [(state.state_version, state.state_digest, state.producer.digest) for state in self.states],
@@ -825,6 +853,8 @@ class CompletedBehaviorTrace:
             "decisions": [
                 {
                     "selected_point_id": decision.selected_point_id,
+                    "proposal_digest": decision.proposal_digest,
+                    "action_digest": decision.action_digest,
                     "active": decision.active,
                     "raw_value": decision.raw_value,
                     "calibrated_value": decision.calibrated_value,

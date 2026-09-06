@@ -20,6 +20,7 @@ from smagm.features.point_guided.pfgr_lite import (
     ValueFitIdentity,
     PFGRState,
     ProducerCompatibility,
+    clone_dynamic_planes,
     frontend_config_from_dict,
     frontend_config_to_dict,
 )
@@ -235,7 +236,14 @@ def test_k0_trace_is_coherent_and_trace_hash_covers_decisions() -> None:
         CompletedBehaviorTrace(context_id="ctx")
     proposal = _proposal_batch(state_digest=state.state_digest)
     next_state = state.next(DynamicTriPlanes(xy=planes.xy.clone(), xz=planes.xz.clone(), yz=planes.yz.clone()))
-    decision = Decision(selected_point_id=0, policy_hash="policy", step=0)
+    selected_action = proposal.row(0, 0)
+    decision = Decision(
+        selected_point_id=0,
+        proposal_digest=proposal.proposal_digest,
+        action_digest=selected_action.action_digest,
+        policy_hash="policy",
+        step=0,
+    )
     complete = CompletedBehaviorTrace(
         context_id="ctx",
         states=(state, next_state),
@@ -250,6 +258,32 @@ def test_k0_trace_is_coherent_and_trace_hash_covers_decisions() -> None:
             proposals=(proposal,),
             decisions=(decision,),
             route_hash="0" * 64,
+        )
+
+
+def test_decision_binds_scored_batch_and_stored_action() -> None:
+    planes = DynamicTriPlanes(
+        xy=torch.zeros(1, 32, 2, 2, dtype=torch.float64),
+        xz=torch.zeros(1, 32, 2, 2, dtype=torch.float64),
+        yz=torch.zeros(1, 32, 2, 2, dtype=torch.float64),
+    )
+    state = PFGRState(planes=planes, context_id="ctx", producer=_producer(), role="deployment")
+    proposal = _proposal_batch(state_digest=state.state_digest)
+    next_state = state.next(clone_dynamic_planes(planes))
+    action = proposal.row(0, 0)
+    with pytest.raises(ValueError, match="proposal_digest"):
+        CompletedBehaviorTrace(
+            context_id="ctx",
+            states=(state, next_state),
+            proposals=(proposal,),
+            decisions=(Decision(selected_point_id=0, action_digest=action.action_digest, policy_hash="policy"),),
+        )
+    with pytest.raises(ValueError, match="action_digest"):
+        CompletedBehaviorTrace(
+            context_id="ctx",
+            states=(state, next_state),
+            proposals=(proposal,),
+            decisions=(Decision(selected_point_id=0, proposal_digest=proposal.proposal_digest, action_digest="wrong", policy_hash="policy"),),
         )
 
 
