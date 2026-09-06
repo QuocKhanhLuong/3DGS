@@ -8,10 +8,10 @@ or policy semantics.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass
 import json
 import math
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Literal, Mapping
 
 
 PFGR_CONFIG_SCHEMA = "pfgr-lite-config-v1"
@@ -61,11 +61,6 @@ class StaticSynthesisConfig:
         "b2_ordered_multiscale_v1",
         "b_light_ordered_v1",
     ] = "b2_ordered_multiscale_v1"
-    # ``architecture`` and ``base_variant`` are read-only compatibility
-    # aliases accepted by early PFGR manifests; they cannot disagree with
-    # ``variant`` when both are supplied.
-    architecture: str | None = None
-    base_variant: str | None = None
     base_channels: int = 64
     state_channels: int = 32
     source_channels: int = 3
@@ -80,22 +75,12 @@ class StaticSynthesisConfig:
         variant = self.variant
         if variant not in variants:
             raise ValueError(f"unknown static synthesis variant: {variant!r}")
-        for alias in (self.architecture, self.base_variant):
-            if alias is not None:
-                if alias not in variants:
-                    raise ValueError(f"unknown static synthesis variant: {alias!r}")
-                if variant != "b2_ordered_multiscale_v1" and alias != variant:
-                    raise ValueError("architecture/base_variant aliases disagree with variant")
-                variant = alias
-        object.__setattr__(self, "variant", variant)
-        if self.architecture is not None and self.architecture != variant:
-            raise ValueError("architecture alias must match variant")
-        if self.base_variant is not None and self.base_variant != variant:
-            raise ValueError("base_variant alias must match variant")
         if self.base_channels != 64 or self.state_channels != 32 or self.source_channels != 3:
             raise ValueError("PFGR static widths are locked to base=64, state=32, source=3")
         _positive_int("residual_blocks", self.residual_blocks)
         _positive_int("light_residual_blocks", self.light_residual_blocks)
+        if self.light_residual_blocks != 1:
+            raise ValueError("B-light residual depth is locked to exactly one block")
         if self.residual_blocks != 2:
             raise ValueError("B1/B2 residual depth is locked to exactly two blocks")
         if self.normalization != "none":
@@ -131,7 +116,15 @@ class PFGRPolicyConfig:
     candidate_count: int = 2048
     quality_margin: float = 0.0
     compute_cost: float = 0.0
-    mode: str = "adaptive"
+    mode: Literal[
+        "adaptive",
+        "forced_diagnostic",
+        "random",
+        "fixed_learned",
+        "parallel_topk",
+        "static",
+        "noop",
+    ] = "adaptive"
 
     def __post_init__(self) -> None:
         if self.schema_version != POLICY_CONFIG_SCHEMA:
@@ -152,8 +145,16 @@ class PFGRPolicyConfig:
             raise ValueError("quality_margin must be finite and nonnegative")
         if not math.isfinite(float(self.compute_cost)) or float(self.compute_cost) < 0.0:
             raise ValueError("compute_cost must be finite and nonnegative")
-        if not isinstance(self.mode, str) or not self.mode:
-            raise ValueError("mode must be a nonempty string")
+        if self.mode not in {
+            "adaptive",
+            "forced_diagnostic",
+            "random",
+            "fixed_learned",
+            "parallel_topk",
+            "static",
+            "noop",
+        }:
+            raise ValueError(f"unknown policy mode: {self.mode!r}")
 
     def as_dict(self) -> dict[str, Any]:
         return _canonical(self)
@@ -226,10 +227,10 @@ class EffectTeacherConfig:
     """Target-after-trace teacher/effect measurement declaration."""
 
     schema_version: str = TEACHER_CONFIG_SCHEMA
-    mode: Literal["exact_footprint", "iid_fixed_q"] = "exact_footprint"
+    mode: Literal["exact_footprint", "iid_fixed_q"] = "iid_fixed_q"
     rho: Literal["charbonnier"] = "charbonnier"
     epsilon: float = 1e-3
-    q_draws: int = 0
+    q_draws: int = 1024
     mask_definition: str = "observation_derived_binary"
     label_definition: str = "signed_conditional_mean_masked_global_charbonnier"
 
@@ -283,6 +284,11 @@ class PFGRLiteConfig:
     decode_chunk_size: int = 1024
     device: str | None = None
     num_points: int = 2048
+    # Reduced point counts are available only for explicit CPU engineering
+    # fixtures.  Production manifests retain N=2048 and cannot be silently
+    # relabelled as production when this capability is enabled.
+    engineering_only: bool = False
+    observation_normalization: str = "pfgr-observation-normalization-v1"
     point_guided: Any | None = None
 
     def __post_init__(self) -> None:
@@ -314,8 +320,15 @@ class PFGRLiteConfig:
             raise ValueError("max_displacement_mm is locked to 2.0 mm")
         _positive_int("build_chunk_size", self.build_chunk_size)
         _positive_int("decode_chunk_size", self.decode_chunk_size)
-        if self.num_points != 2048:
-            raise ValueError("PFGR num_points is locked to 2048")
+        _positive_int("num_points", self.num_points)
+        if self.num_points > 2048:
+            raise ValueError("PFGR num_points cannot exceed production N=2048")
+        if self.num_points != 2048 and not self.engineering_only:
+            raise ValueError("num_points below 2048 requires explicit engineering_only=True")
+        if not isinstance(self.engineering_only, bool):
+            raise TypeError("engineering_only must be bool")
+        if not isinstance(self.observation_normalization, str) or not self.observation_normalization:
+            raise ValueError("observation_normalization must be a nonempty declared policy")
 
     def as_dict(self) -> dict[str, Any]:
         return _canonical(self)

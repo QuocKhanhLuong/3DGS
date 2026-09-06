@@ -35,11 +35,6 @@ from .static_geometry import (
     sample_source_to_lattice,
 )
 from .static_synthesis import (
-    B0LegacyStaticHead,
-    B1MultiscaleStaticHead,
-    B2OrderedMultiscaleStaticHead,
-    BLiteOrderedStaticHead,
-    PFGRStaticHead,
     StaticSynthesisHead,
 )
 from .types import (
@@ -78,10 +73,6 @@ def __getattr__(name: str):
 __all__ = [
     "ActionProposal",
     "ActionProposalBatch",
-    "B0LegacyStaticHead",
-    "B1MultiscaleStaticHead",
-    "B2OrderedMultiscaleStaticHead",
-    "BLiteOrderedStaticHead",
     "CalibrationIdentity",
     "CompletedBehaviorTrace",
     "Decision",
@@ -99,7 +90,6 @@ __all__ = [
     "PFGRPolicyConfig",
     "PFGRRouteResult",
     "PFGRState",
-    "PFGRStaticHead",
     "ProducerCompatibility",
     "ProducerDependencies",
     "ResumeState",

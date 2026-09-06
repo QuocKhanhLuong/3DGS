@@ -9,7 +9,6 @@ teacher, oracle, data-loader, or value-fitting module is imported here.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import hashlib
 import math
 from typing import Any, Literal, Mapping, Sequence
 
@@ -62,6 +61,27 @@ def _integer(name: str, value: Tensor, rank: int | None = None, final: int | Non
         raise ValueError(f"{name} must have rank {rank}")
     if final is not None and (value.ndim == 0 or value.shape[-1] != final):
         raise ValueError(f"{name} must have final dimension {final}")
+
+
+def _nonempty_text(name: str, value: str) -> None:
+    if not isinstance(value, str) or not value or value.lower() in {"unknown", "unset", "none", "null"}:
+        raise ValueError(f"{name} must be a complete non-sentinel string")
+
+
+def _strict_binary_mask(name: str, value: Tensor) -> Tensor:
+    """Return an owned bool mask after rejecting non-binary floating values."""
+
+    if not isinstance(value, Tensor):
+        raise TypeError(f"{name} must be a tensor")
+    if value.dtype == torch.bool:
+        return value.clone()
+    if not value.is_floating_point() and value.dtype not in (torch.int8, torch.int16, torch.int32, torch.int64, torch.uint8):
+        raise TypeError(f"{name} must be bool or numeric binary mask")
+    if value.numel() == 0 or not bool(torch.isfinite(value).all()):
+        raise ValueError(f"{name} must be finite and nonempty")
+    if not bool(((value == 0) | (value == 1)).all()):
+        raise ValueError(f"{name} must contain only exact binary 0/1 values")
+    return value.to(dtype=torch.bool).clone()
 
 
 def _same_device_dtype(name: str, values: Sequence[Tensor]) -> None:
@@ -163,6 +183,8 @@ class ProducerDependencies:
         for name in ("observation_normalization", "geometry_query_version", "static_architecture", "semantic_architecture", "point_architecture", "updater_architecture", "decoder_architecture", "writer_architecture", "candidate_geometry", "label_definition", "config_version"):
             if not isinstance(getattr(self, name), str) or not getattr(self, name):
                 raise ValueError(f"{name} must be nonempty")
+        if any(token in self.label_definition.lower() for token in ("target", "oracle", "teacher")):
+            raise ValueError("producer label_definition must remain target-free")
 
     @property
     def digest(self) -> str:
@@ -212,27 +234,41 @@ class ObservationContext:
             raise TypeError("producer must be ProducerDependencies")
         if self.descriptor_schema != DESCRIPTOR_SCHEMA or self.version != PFGR_TYPES_SCHEMA:
             raise ValueError("unknown ObservationContext schema/version")
-        if self.observation_mask is not None:
-            if not isinstance(self.observation_mask, Tensor) or self.observation_mask.ndim not in (4, 5):
+        if not isinstance(self.mask_provenance, str) or not self.mask_provenance:
+            raise ValueError("mask_provenance must be a nonempty observation-only declaration")
+        if any(token in self.mask_provenance.lower() for token in ("target", "segmentation", "oracle", "teacher")):
+            raise ValueError("target-derived mask provenance is forbidden in ObservationContext")
+        expected = self.frontend.s_coarse.shape[0:1] + self.frontend.geometry.shape_dhw
+        mask = self.observation_mask
+        if mask is None:
+            # ``None`` means the explicit all-voxel observation mask, not an
+            # absent denominator.  Owning this resolved bool mask keeps later
+            # teacher/bank joins deterministic and prevents a caller from
+            # changing semantics after context construction.
+            mask = torch.ones(expected, dtype=torch.bool, device=self.frontend.s_coarse.device)
+            object.__setattr__(self, "mask_provenance", "all_voxels_observation_default")
+        else:
+            if not isinstance(mask, Tensor) or mask.ndim not in (4, 5):
                 raise ValueError("observation_mask must be [B,D,H,W] or [B,1,D,H,W]")
-            if self.observation_mask.ndim == 5 and self.observation_mask.shape[1] != 1:
+            if mask.ndim == 5 and mask.shape[1] != 1:
                 raise ValueError("observation_mask rank-5 form must have one channel")
-            expected = self.frontend.s_coarse.shape[0:1] + self.frontend.geometry.shape_dhw
-            if tuple(self.observation_mask.shape[0:1] + self.observation_mask.shape[-3:]) != tuple(expected):
+            if tuple(mask.shape[0:1] + mask.shape[-3:]) != tuple(expected):
                 raise ValueError("observation_mask must match observation geometry")
-            if self.observation_mask.dtype != torch.bool and not self.observation_mask.is_floating_point():
-                raise TypeError("observation_mask must be bool or floating")
-            if self.observation_mask.is_floating_point() and not bool(torch.isfinite(self.observation_mask).all()):
-                raise ValueError("observation_mask must be finite")
+            mask = _strict_binary_mask("observation_mask", mask)
+            if mask.ndim == 5:
+                mask = mask[:, 0]
+        if mask.shape != expected:
+            raise ValueError("resolved observation_mask must have shape [B,D,H,W]")
+        if mask.numel() == 0 or not bool(mask.any(dim=(-3, -2, -1)).all()):
+            raise ValueError("observation_mask must contain at least one observed voxel per subject")
+        object.__setattr__(self, "observation_mask", mask)
         owned = [("q_bar", self.q_bar), ("xy", self.initial_planes.xy), ("xz", self.initial_planes.xz), ("yz", self.initial_planes.yz)]
-        if self.observation_mask is not None:
-            owned.append(("observation_mask", self.observation_mask))
+        owned.append(("observation_mask", mask))
         object.__setattr__(self, "_tensor_digest", _digest_tensors(owned))
 
     def validate_integrity(self) -> None:
         owned = [("q_bar", self.q_bar), ("xy", self.initial_planes.xy), ("xz", self.initial_planes.xz), ("yz", self.initial_planes.yz)]
-        if self.observation_mask is not None:
-            owned.append(("observation_mask", self.observation_mask))
+        owned.append(("observation_mask", self.observation_mask))
         current = _digest_tensors(owned)
         if current != self._tensor_digest:
             raise RuntimeError("ObservationContext tensor mutation detected")
@@ -242,10 +278,24 @@ class ObservationContext:
         return self.frontend.geometry
 
     @property
-    def mask(self) -> Tensor | None:
+    def mask(self) -> Tensor:
         """Short alias used by route/teacher adapters for the observation mask."""
 
         return self.observation_mask
+
+    @property
+    def resolved_mask(self) -> Tensor:
+        return self.observation_mask
+
+    @property
+    def resolved_observation_mask(self) -> Tensor:
+        return self.observation_mask
+
+    @property
+    def source_provenance(self) -> SourceProvenance:
+        """Exact checkpoint/adaptation evidence retained for this context."""
+
+        return self.producer.source_provenance
 
     @property
     def z0(self) -> DynamicTriPlanes:
@@ -273,8 +323,12 @@ class PFGRState:
             raise ValueError("state_version must be a nonnegative integer")
         if self.role not in ("deployment", "training_behavior"):
             raise ValueError("state role must be deployment or training_behavior")
-        if self.producer is not None and not isinstance(self.producer, ProducerCompatibility):
-            raise TypeError("producer must be ProducerCompatibility or None")
+        if self.producer is None:
+            raise TypeError("producer is required; unbound state cannot enter PFGR production APIs")
+        if not isinstance(self.producer, ProducerCompatibility):
+            raise TypeError("producer must be ProducerCompatibility")
+        if getattr(self.planes, "_oracle_state", False):
+            raise TypeError("privileged oracle state cannot be laundered into PFGRState")
         digest = dynamic_planes_digest(self.planes)
         if self.state_digest is not None and self.state_digest != digest:
             raise ValueError("state_digest does not match owned plane tensors")
@@ -303,15 +357,39 @@ class PFGRState:
 class ActionProposal:
     """One immutable action row; execution must use its stored ``delta``."""
 
+    context_id: str
+    context_version: str
+    producer_compatibility_hash: str
+    state_version: int
+    state_digest: str
     point_id: int
     point_ras_mm: Tensor
     o270: Tensor
     v126: Tensor
     delta: Tensor
-    legal: bool = True
-    action_id: str = ""
+    legal: bool
+    updater_version: str
+    updater_producer_hash: str
+    writer_version: str
+    writer_hash: str
+    query_version: str
+    query_hash: str
+    geometry_version: str
+    geometry_hash: str
+    point_version: str
+    point_identity_hash: str
+    action_id: str
+    action_digest: str | None = None
+    _tensor_digest: str = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        _nonempty_text("context_id", self.context_id)
+        if self.context_version != PFGR_TYPES_SCHEMA:
+            raise ValueError("unknown context contract version")
+        _nonempty_text("producer_compatibility_hash", self.producer_compatibility_hash)
+        if not isinstance(self.state_version, int) or isinstance(self.state_version, bool) or self.state_version < 0:
+            raise ValueError("state_version must be a nonnegative integer")
+        _nonempty_text("state_digest", self.state_digest)
         if not isinstance(self.point_id, int) or isinstance(self.point_id, bool) or self.point_id < 0:
             raise ValueError("point_id must be a nonnegative integer")
         _finite("point_ras_mm", self.point_ras_mm, rank=1, final=3)
@@ -324,8 +402,110 @@ class ActionProposal:
             raise ValueError("proposal tensors must share dtype")
         if not isinstance(self.legal, bool):
             raise TypeError("legal must be bool")
-        if not self.action_id:
-            object.__setattr__(self, "action_id", f"point-{self.point_id}")
+        for name in (
+            "updater_version",
+            "updater_producer_hash",
+            "writer_version",
+            "writer_hash",
+            "query_version",
+            "query_hash",
+            "geometry_version",
+            "geometry_hash",
+            "point_version",
+            "point_identity_hash",
+            "action_id",
+        ):
+            _nonempty_text(name, getattr(self, name))
+        digest = canonical_digest(
+            {
+                "context_id": self.context_id,
+                "context_version": self.context_version,
+                "producer_compatibility_hash": self.producer_compatibility_hash,
+                "state_version": self.state_version,
+                "state_digest": self.state_digest,
+                "point_id": self.point_id,
+                "point_ras_mm": tensor_digest(self.point_ras_mm, name="point_ras_mm"),
+                "o270": tensor_digest(self.o270, name="o270"),
+                "v126": tensor_digest(self.v126, name="v126"),
+                "delta": tensor_digest(self.delta, name="delta"),
+                "legal": self.legal,
+                "updater_version": self.updater_version,
+                "updater_producer_hash": self.updater_producer_hash,
+                "writer_version": self.writer_version,
+                "writer_hash": self.writer_hash,
+                "query_version": self.query_version,
+                "query_hash": self.query_hash,
+                "geometry_version": self.geometry_version,
+                "geometry_hash": self.geometry_hash,
+                "point_version": self.point_version,
+                "point_identity_hash": self.point_identity_hash,
+                "action_id": self.action_id,
+            },
+            prefix="pfgr-lite-action-v1|",
+        )
+        if self.action_digest is not None and self.action_digest != digest:
+            raise ValueError("action_digest does not match complete action identity")
+        object.__setattr__(self, "action_digest", digest)
+        object.__setattr__(self, "_tensor_digest", digest)
+
+    def validate_integrity(self) -> None:
+        digest = canonical_digest(
+            {
+                "context_id": self.context_id,
+                "context_version": self.context_version,
+                "producer_compatibility_hash": self.producer_compatibility_hash,
+                "state_version": self.state_version,
+                "state_digest": self.state_digest,
+                "point_id": self.point_id,
+                "point_ras_mm": tensor_digest(self.point_ras_mm, name="point_ras_mm"),
+                "o270": tensor_digest(self.o270, name="o270"),
+                "v126": tensor_digest(self.v126, name="v126"),
+                "delta": tensor_digest(self.delta, name="delta"),
+                "legal": self.legal,
+                "updater_version": self.updater_version,
+                "updater_producer_hash": self.updater_producer_hash,
+                "writer_version": self.writer_version,
+                "writer_hash": self.writer_hash,
+                "query_version": self.query_version,
+                "query_hash": self.query_hash,
+                "geometry_version": self.geometry_version,
+                "geometry_hash": self.geometry_hash,
+                "point_version": self.point_version,
+                "point_identity_hash": self.point_identity_hash,
+                "action_id": self.action_id,
+            },
+            prefix="pfgr-lite-action-v1|",
+        )
+        if digest != self._tensor_digest or digest != self.action_digest:
+            raise RuntimeError("ActionProposal mutation detected")
+
+    @property
+    def actual_delta(self) -> Tensor:
+        return self.delta
+
+    @property
+    def stored_delta(self) -> Tensor:
+        return self.delta
+
+    @property
+    def u_producer_hash(self) -> str:
+        return self.updater_producer_hash
+
+    @property
+    def producer_hash(self) -> str:
+        return self.updater_producer_hash
+
+    @property
+    def writer_identity_hash(self) -> str:
+        return self.writer_hash
+
+    @property
+    def query_identity_hash(self) -> str:
+        return self.query_hash
+
+    @property
+    def point_identity(self) -> str:
+        return self.point_identity_hash
 
 
 @dataclass(frozen=True)
@@ -341,10 +521,18 @@ class ActionProposalBatch:
     v126: Tensor
     delta: Tensor
     legal: Tensor
+    context_version: str = PFGR_TYPES_SCHEMA
+    producer_compatibility_hash: str = ""
     updater_version: str = "update-net-270-128-96-v1"
+    updater_producer_hash: str = ""
     writer_version: str = "compact-writeback-4mm-v1"
+    writer_hash: str = ""
+    query_version: str = "pfgr-lite-query-lattice-v1"
+    query_hash: str = ""
     geometry_version: str = "pfgr-lite-static-geometry-v1"
+    geometry_hash: str = ""
     point_version: str = "point-candidate-geometry-v1"
+    point_identity_hash: str = ""
     proposal_digest: str | None = None
     version: str = ACTION_SCHEMA
     _tensor_digest: str = field(init=False, repr=False, compare=False)
@@ -354,7 +542,10 @@ class ActionProposalBatch:
             raise ValueError("unknown ActionProposalBatch schema")
         if not isinstance(self.context_id, str) or not self.context_id:
             raise ValueError("context_id must be nonempty")
-        if not isinstance(self.state_version, int) or self.state_version < 0:
+        if self.context_version != PFGR_TYPES_SCHEMA:
+            raise ValueError("unknown context contract version")
+        _nonempty_text("producer_compatibility_hash", self.producer_compatibility_hash)
+        if not isinstance(self.state_version, int) or isinstance(self.state_version, bool) or self.state_version < 0:
             raise ValueError("state_version must be nonnegative")
         for name, value, final in (("point_ids", self.point_ids, None), ("legal", self.legal, None)):
             _integer(name, value, rank=2)
@@ -367,20 +558,90 @@ class ActionProposalBatch:
             # not performed because proposal identity must not change.
             if self.legal.dtype not in (torch.int8, torch.int16, torch.int32, torch.int64, torch.uint8):
                 raise TypeError("legal must be bool or integer mask")
+            if not bool(((self.legal == 0) | (self.legal == 1)).all()):
+                raise ValueError("legal integer mask must contain only 0/1")
         batch, count = self.point_ids.shape
+        if batch <= 0 or count <= 0:
+            raise ValueError("proposal tensors must have nonempty [B,N] dimensions")
+        if self.point_ids.dtype == torch.bool:
+            raise TypeError("point_ids cannot be bool")
+        if bool((self.point_ids < 0).any()):
+            raise ValueError("point_ids must be nonnegative")
+        flat_ids = self.point_ids.reshape(-1).tolist()
+        if len(set(flat_ids)) != len(flat_ids):
+            raise ValueError("point_ids must be unique within a proposal batch")
         if self.points_ras_mm.shape[:2] != (batch, count) or self.o270.shape[:2] != (batch, count) or self.v126.shape[:2] != (batch, count) or self.delta.shape[:2] != (batch, count) or self.legal.shape != (batch, count):
             raise ValueError("proposal tensors must share [B,N] ordering")
         _same_device_dtype("proposal floating tensors", (self.points_ras_mm, self.o270, self.v126, self.delta))
         if self.point_ids.device != self.delta.device or self.legal.device != self.delta.device:
             raise ValueError("proposal tensors must share device")
-        digest = _digest_tensors((("point_ids", self.point_ids), ("points", self.points_ras_mm), ("o270", self.o270), ("v126", self.v126), ("delta", self.delta), ("legal", self.legal)))
+        for name in ("updater_version", "updater_producer_hash", "writer_version", "writer_hash", "query_version", "query_hash", "geometry_version", "geometry_hash", "point_version", "point_identity_hash"):
+            _nonempty_text(name, getattr(self, name))
+        metadata = {
+            "version": self.version,
+            "context_id": self.context_id,
+            "context_version": self.context_version,
+            "producer_compatibility_hash": self.producer_compatibility_hash,
+            "state_version": self.state_version,
+            "state_digest": self.state_digest,
+            "updater_version": self.updater_version,
+            "updater_producer_hash": self.updater_producer_hash,
+            "writer_version": self.writer_version,
+            "writer_hash": self.writer_hash,
+            "query_version": self.query_version,
+            "query_hash": self.query_hash,
+            "geometry_version": self.geometry_version,
+            "geometry_hash": self.geometry_hash,
+            "point_version": self.point_version,
+            "point_identity_hash": self.point_identity_hash,
+        }
+        digest = canonical_digest(
+            {
+                "metadata": metadata,
+                "point_ids": tensor_digest(self.point_ids, name="point_ids"),
+                "points": tensor_digest(self.points_ras_mm, name="points"),
+                "o270": tensor_digest(self.o270, name="o270"),
+                "v126": tensor_digest(self.v126, name="v126"),
+                "delta": tensor_digest(self.delta, name="delta"),
+                "legal": tensor_digest(self.legal, name="legal"),
+            },
+            prefix="pfgr-lite-action-batch-v1|",
+        )
         if self.proposal_digest is not None and self.proposal_digest != digest:
             raise ValueError("proposal_digest does not match tensors")
         object.__setattr__(self, "proposal_digest", digest)
         object.__setattr__(self, "_tensor_digest", digest)
 
     def validate_integrity(self) -> None:
-        digest = _digest_tensors((("point_ids", self.point_ids), ("points", self.points_ras_mm), ("o270", self.o270), ("v126", self.v126), ("delta", self.delta), ("legal", self.legal)))
+        digest = canonical_digest(
+            {
+                "metadata": {
+                    "version": self.version,
+                    "context_id": self.context_id,
+                    "context_version": self.context_version,
+                    "producer_compatibility_hash": self.producer_compatibility_hash,
+                    "state_version": self.state_version,
+                    "state_digest": self.state_digest,
+                    "updater_version": self.updater_version,
+                    "updater_producer_hash": self.updater_producer_hash,
+                    "writer_version": self.writer_version,
+                    "writer_hash": self.writer_hash,
+                    "query_version": self.query_version,
+                    "query_hash": self.query_hash,
+                    "geometry_version": self.geometry_version,
+                    "geometry_hash": self.geometry_hash,
+                    "point_version": self.point_version,
+                    "point_identity_hash": self.point_identity_hash,
+                },
+                "point_ids": tensor_digest(self.point_ids, name="point_ids"),
+                "points": tensor_digest(self.points_ras_mm, name="points"),
+                "o270": tensor_digest(self.o270, name="o270"),
+                "v126": tensor_digest(self.v126, name="v126"),
+                "delta": tensor_digest(self.delta, name="delta"),
+                "legal": tensor_digest(self.legal, name="legal"),
+            },
+            prefix="pfgr-lite-action-batch-v1|",
+        )
         if digest != self._tensor_digest or digest != self.proposal_digest:
             raise RuntimeError("ActionProposalBatch mutation detected")
 
@@ -389,18 +650,88 @@ class ActionProposalBatch:
         if not (0 <= batch_index < self.point_ids.shape[0] and 0 <= point_index < self.point_ids.shape[1]):
             raise IndexError("proposal row out of bounds")
         return ActionProposal(
+            context_id=self.context_id,
+            context_version=self.context_version,
+            producer_compatibility_hash=self.producer_compatibility_hash,
+            state_version=self.state_version,
+            state_digest=self.state_digest,
             point_id=int(self.point_ids[batch_index, point_index].item()),
             point_ras_mm=self.points_ras_mm[batch_index, point_index],
             o270=self.o270[batch_index, point_index],
             v126=self.v126[batch_index, point_index],
             delta=self.delta[batch_index, point_index],
             legal=bool(self.legal[batch_index, point_index].item()),
-            action_id=f"{self.context_id}:{self.state_version}:{batch_index}:{point_index}",
+            updater_version=self.updater_version,
+            updater_producer_hash=self.updater_producer_hash,
+            writer_version=self.writer_version,
+            writer_hash=self.writer_hash,
+            query_version=self.query_version,
+            query_hash=self.query_hash,
+            geometry_version=self.geometry_version,
+            geometry_hash=self.geometry_hash,
+            point_version=self.point_version,
+            point_identity_hash=canonical_digest(
+                {
+                    "batch_point_identity": self.point_identity_hash,
+                    "point_id": int(self.point_ids[batch_index, point_index].item()),
+                    "point": tensor_digest(self.points_ras_mm[batch_index, point_index], name="point_ras_mm"),
+                },
+                prefix="pfgr-lite-point-identity-v1|",
+            ),
+            action_id=canonical_digest(
+                {
+                    "context_id": self.context_id,
+                    "context_version": self.context_version,
+                    "producer_compatibility_hash": self.producer_compatibility_hash,
+                    "state_version": self.state_version,
+                    "state_digest": self.state_digest,
+                    "point_id": int(self.point_ids[batch_index, point_index].item()),
+                    "point": tensor_digest(self.points_ras_mm[batch_index, point_index], name="point_ras_mm"),
+                    "o270": tensor_digest(self.o270[batch_index, point_index], name="o270"),
+                    "v126": tensor_digest(self.v126[batch_index, point_index], name="v126"),
+                    "delta": tensor_digest(self.delta[batch_index, point_index], name="delta"),
+                    "updater": self.updater_producer_hash,
+                    "updater_version": self.updater_version,
+                    "writer": self.writer_hash,
+                    "writer_version": self.writer_version,
+                    "query": self.query_hash,
+                    "query_version": self.query_version,
+                    "geometry": self.geometry_hash,
+                    "geometry_version": self.geometry_version,
+                    "point_version": self.point_version,
+                    "point_identity": self.point_identity_hash,
+                },
+                prefix="pfgr-lite-action-id-v1|",
+            ),
         )
 
     @property
     def actual_delta(self) -> Tensor:
         return self.delta
+
+    @property
+    def stored_delta(self) -> Tensor:
+        return self.delta
+
+    @property
+    def u_producer_hash(self) -> str:
+        return self.updater_producer_hash
+
+    @property
+    def producer_hash(self) -> str:
+        return self.updater_producer_hash
+
+    @property
+    def writer_identity_hash(self) -> str:
+        return self.writer_hash
+
+    @property
+    def query_identity_hash(self) -> str:
+        return self.query_hash
+
+    @property
+    def point_identity(self) -> str:
+        return self.point_identity_hash
 
     @property
     def point_positions_ras_mm(self) -> Tensor:
@@ -434,6 +765,7 @@ class Decision:
                 raise ValueError(f"{name} must be finite")
         if self.allowance < 0.0 or self.quality_margin < 0.0 or self.compute_cost < 0.0:
             raise ValueError("allowance, quality_margin, and compute_cost must be nonnegative")
+        _nonempty_text("policy_hash", self.policy_hash)
         if self.stop_code not in ("continue", "budget", "low_gain", "no_legal_action"):
             raise ValueError("unknown stop_code")
         if not isinstance(self.step, int) or self.step < 0:
@@ -459,17 +791,58 @@ class CompletedBehaviorTrace:
             raise ValueError("context_id must be nonempty")
         if not self.sealed:
             raise ValueError("only sealed target-free traces may be shared")
-        if len(self.proposals) != len(self.decisions) and self.proposals and self.decisions:
+        if not self.states:
+            raise ValueError("behavior trace must contain its initial PFGRState")
+        if len(self.proposals) != len(self.decisions):
             raise ValueError("proposal/decision trace lengths must match")
-        for state in self.states:
+        for index, state in enumerate(self.states):
             if not isinstance(state, PFGRState) or state.context_id != self.context_id:
                 raise ValueError("trace states must be PFGRState rows for its context")
-        for proposal in self.proposals:
+            if state.state_version != index:
+                raise ValueError("trace state versions must form a contiguous chain beginning at version 0")
+            state.validate_integrity()
+            if index and state.producer.digest != self.states[0].producer.digest:
+                raise ValueError("trace state producer identities must remain constant")
+        if len(self.states) != len(self.proposals) + 1:
+            raise ValueError("trace requires one initial state plus one state per proposal batch")
+        for index, proposal in enumerate(self.proposals):
             if not isinstance(proposal, ActionProposalBatch) or proposal.context_id != self.context_id:
                 raise ValueError("trace proposals must be ActionProposalBatch rows for its context")
-        if not self.route_hash:
-            digest_payload = [(state.state_version, state.state_digest) for state in self.states] + [proposal.proposal_digest for proposal in self.proposals]
-            object.__setattr__(self, "route_hash", canonical_digest(digest_payload, prefix="pfgr-lite-trace-v1|"))
+            proposal.validate_integrity()
+            state = self.states[index]
+            if proposal.state_version != state.state_version or proposal.state_digest != state.state_digest:
+                raise ValueError("proposal state identity does not match trace state chain")
+            decision = self.decisions[index]
+            if decision.stop_code == "continue":
+                if decision.selected_point_id < 0 or decision.selected_point_id not in proposal.point_ids.reshape(-1).tolist():
+                    raise ValueError("continue decision must select a proposal point")
+            elif decision.selected_point_id >= 0:
+                raise ValueError("stopping decision cannot carry a selected point")
+        digest_payload = {
+            "context_id": self.context_id,
+            "states": [(state.state_version, state.state_digest, state.producer.digest) for state in self.states],
+            "proposals": [proposal.proposal_digest for proposal in self.proposals],
+            "decisions": [
+                {
+                    "selected_point_id": decision.selected_point_id,
+                    "active": decision.active,
+                    "raw_value": decision.raw_value,
+                    "calibrated_value": decision.calibrated_value,
+                    "conservative_value": decision.conservative_value,
+                    "allowance": decision.allowance,
+                    "quality_margin": decision.quality_margin,
+                    "compute_cost": decision.compute_cost,
+                    "policy_hash": decision.policy_hash,
+                    "stop_code": decision.stop_code,
+                    "step": decision.step,
+                }
+                for decision in self.decisions
+            ],
+        }
+        expected_hash = canonical_digest(digest_payload, prefix="pfgr-lite-trace-v1|")
+        if self.route_hash and self.route_hash != expected_hash:
+            raise ValueError("route_hash does not match complete behavior trace identity")
+        object.__setattr__(self, "route_hash", expected_hash)
 
 
 @dataclass(frozen=True)
@@ -586,6 +959,9 @@ class GainCalibration:
             raise ValueError("calibration counts must be nonnegative")
         if self.capability not in ("diagnostic", "adaptive"):
             raise ValueError("unknown calibration capability")
+        if self.capability == "adaptive":
+            for name in ("producer_compatibility_hash", "value_fit_identity_hash", "gain_scale_hash"):
+                _nonempty_text(name, getattr(self, name))
 
 
 @dataclass
@@ -692,6 +1068,13 @@ class InferenceBundle:
                 raise ValueError("state_dict tensors must be finite")
         if any(name.lower().find("target") >= 0 or name.lower().find("oracle") >= 0 for name in self.state_dict):
             raise ValueError("inference bundle cannot contain target/oracle state")
+        if self.capability == "adaptive":
+            if self.calibration is None or any(
+                not isinstance(getattr(self.calibration, name), str)
+                or getattr(self.calibration, name).lower() in {"unknown", "unset", "none", "null"}
+                for name in ("producer_compatibility_hash", "value_fit_identity_hash", "gain_scale_hash")
+            ):
+                raise ValueError("adaptive inference requires complete calibration identities")
 
 
 @dataclass(frozen=True)
@@ -727,8 +1110,7 @@ class ValueBankManifest:
         if self.version != VALUE_BANK_SCHEMA:
             raise ValueError("unknown value-bank schema")
         for name in ("producer_compatibility_hash", "label_definition_hash", "split_role_hash", "gain_scale_hash"):
-            if not isinstance(getattr(self, name), str) or not getattr(self, name):
-                raise ValueError(f"{name} must be nonempty")
+            _nonempty_text(name, getattr(self, name))
         if not math.isfinite(float(self.gain_scale)) or self.gain_scale <= 0.0:
             raise ValueError("gain_scale must be positive and finite")
         if self.row_count < 0 or self.subject_count < 0:
@@ -751,7 +1133,7 @@ class PFGRRouteResult:
     def __post_init__(self) -> None:
         if not isinstance(self.final_state, PFGRState) or not isinstance(self.counters, OperationCounters):
             raise TypeError("PFGRRouteResult requires final state and counters")
-        if self.k < 0 or self.k > 4:
+        if not isinstance(self.k, int) or isinstance(self.k, bool) or self.k < 0 or self.k > 4:
             raise ValueError("PFGR route K must lie in 0..4")
         if not self.context_id:
             object.__setattr__(self, "context_id", self.final_state.context_id)

@@ -102,14 +102,23 @@ editing code with `python scripts/codegraph.py --task <name>`.
 ## Additive PFGR-Lite frontend
 
 `src/smagm/features/point_guided/pfgr_lite/` is the separately versioned
-PFGR-Lite W1 package. Its typed declarations/configuration/provenance are
-target-free and lazy; `PFGRLiteModel` wraps the legacy frontend without a
+PFGR-Lite W1-W5 package. W1's typed declarations/configuration/provenance are
+target-free and lazy; its `PFGRLiteModel` wraps the legacy frontend without a
 trajectory or RewardNet, consumes one private four-result MedicalNet seam, and
 produces graph-preserving static B0/B1/B2/B-light `Z0` planes from true
 shallow/Layer1/deep feature-cell lattices. `initialize_state` clones Z0
 without detach. `decode_final` requires W2's canonical query-lattice
-injection and never falls back to the legacy query path.
+injection and never falls back to the legacy query path. W2 owns query,
+footprint, sparse writer, and teacher; W3 owns stages/bank/value; W4 owns
+proposals/policy/calibration/checkpoints/inference; W5 owns services,
+diagnostics, CLI, and runbook. W1 fix-round software is pending review and
+the W2-W5 ledger remains pending implementation/evidence.
 
-Run `python scripts/codegraph.py --task pfgr_lite` for the additive read/write
-scope. W2-W5 modules are intentionally absent from that task and remain
-owned by later workers; passing W1 CPU tests is software evidence only.
+Run `python scripts/codegraph.py --task pfgr_lite` for the package navigation
+scope; future package paths are not permanently blocked and per-worker
+dispatch controls write ownership. W1 fixtures may explicitly set
+`engineering_only=True` and a smaller N, while production declares N=2048 and
+processes subject batches serially at B=1. Global producer hashes cover frozen
+algorithm/component identities; subject affine/shape, resolved observation
+mask, and values are context/action/replay identity fields. Passing W1 CPU
+tests is software evidence only.

@@ -214,17 +214,31 @@ smallest affected test file first, then the frontend smoke test, `compileall`,
 and `git diff --check`. A pass is software evidence only, not reconstruction,
 clinical, or novelty validation.
 
-## PFGR-Lite additive W1 navigation
+## PFGR-Lite additive W1-W5 navigation and completion ledger
 
-PFGR-Lite W1 is scoped to `src/smagm/features/point_guided/pfgr_lite/` plus
-the bounded lazy-export/private shared-feature seam and its three focused CPU
-test files. The package is additive: legacy E0/E1/E2 frontend, Gate-C/D/E
-modules, and existing public outputs/state dictionaries remain unchanged.
-`PFGRLiteModel` constructs the legacy frontend without `TrajectoryConfig`,
-uses one shared MedicalNet traversal, computes B0/B1/B2/B-light static Z0 on
-live multi-scale centre lattices, and fails closed in `decode_final` until W2
+PFGR-Lite is authorized across W1-W5 under one additive package scope;
+per-worker dispatches enforce exclusive write ownership. W1 owns the package
+contracts/config/provenance/static geometry/static heads/model seam and the
+bounded parent/lazy legacy seam plus the three focused CPU test files. W2 owns
+the canonical query lattice/footprint/sparse writer/teacher, W3 owns stages,
+bank and value fitting, W4 owns proposals/policy/calibration/checkpoints and
+inference, and W5 owns CLI/metrics/benchmark/oracle/runbook services. Current
+ledger: W1 implementation is present with this fix round pending principal
+re-review; W2-W5 implementations/evidence remain pending and are not implied
+by this navigation entry.
+
+The package remains additive: legacy E0/E1/E2 frontend, Gate-C/D/E modules,
+and existing public outputs/state dictionaries remain unchanged.
+`PFGRLiteModel` constructs the legacy frontend without `TrajectoryConfig`, uses
+one shared MedicalNet traversal, computes B0/B1/B2/B-light static Z0 on live
+multi-scale centre lattices, and fails closed in `decode_final` until W2
 injects the canonical `PFGRQueryLattice` (`build(...)` plus
-`query(state, voxel_ids_dhw, chunk_size=...)`).
+`query(state, voxel_ids_dhw, chunk_size=...)`). W1's CPU fixture mode may use
+an explicit `engineering_only=True` reduced point count, but production
+provenance always declares N=2048 and one subject at a time (B=1); bank and
+query producer hashes are global frozen algorithm/component identities while
+subject affine, shape, mask, and observations remain context/action/replay
+identities.
 
 Use `python scripts/codegraph.py --task pfgr_lite` before PFGR work. The task
 declares only W1 paths as writable and blocks W2 footprint/sparse-write/

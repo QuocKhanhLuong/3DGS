@@ -102,7 +102,7 @@
       ]
     },
     "pfgr_lite": {
-      "purpose": "Additive PFGR-Lite W1 static composition, typed contracts, provenance, and geometry seam; canonical W2 query/teacher and later stages remain separately owned.",
+      "purpose": "Additive PFGR-Lite W1-W5 package scope with a serialized completion ledger: W1 static/contracts/provenance seam is the current implementation owner, while W2 query/teacher, W3 bank/value, W4 policy/checkpoint, and W5 services remain explicitly authorized future owners. Per-worker dispatch, not this navigation task, enforces exclusive write ownership.",
       "entrypoints": [
         "src/smagm/features/point_guided/pfgr_lite/__init__.py",
         "src/smagm/features/point_guided/pfgr_lite/types.py",
@@ -126,6 +126,7 @@
         "src/smagm/features/point_guided/updater.py",
         "src/smagm/features/point_guided/decoder.py",
         "src/smagm/features/point_guided/spectral_query.py",
+        "src/smagm/features/point_guided/pfgr_lite/**",
         "tests/features/point_guided/test_frontend_forward.py",
         "tests/test_codegraph.py"
       ],
@@ -147,18 +148,7 @@
         "tests/features/point_guided/pfgr_lite/test_base.py",
         "tests/features/point_guided/pfgr_lite/test_provenance.py"
       ],
-      "blocked_paths": [
-        "src/smagm/features/point_guided/pfgr_lite/footprint.py",
-        "src/smagm/features/point_guided/pfgr_lite/sparse_write.py",
-        "src/smagm/features/point_guided/pfgr_lite/teacher.py",
-        "src/smagm/features/point_guided/pfgr_lite/stages.py",
-        "src/smagm/features/point_guided/pfgr_lite/value_bank.py",
-        "src/smagm/features/point_guided/pfgr_lite/value_net.py",
-        "src/smagm/features/point_guided/pfgr_lite/action_proposal.py",
-        "src/smagm/features/point_guided/pfgr_lite/policy.py",
-        "src/smagm/features/point_guided/pfgr_lite/checkpoint.py",
-        "src/smagm/features/point_guided/pfgr_lite/inference.py"
-      ]
+      "blocked_paths": []
     },
     "trajectory": {
       "purpose": "Maintain or audit completed Gate C C1-C7: dynamic tri-plane state, state-dependent reward, explicit reward-cost utility, adaptive selection, local updates, compact physical write-back, and trajectory composition. Gate D D1 and Gate E are complete; Gate-F ownership is separate and Gate-G G1-G4 is separately active.",

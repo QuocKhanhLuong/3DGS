@@ -282,7 +282,7 @@ before opening files. The policy grants the smallest task-specific read/write
 set and explicitly blocks legacy routing, training, anchor, field, memory, and
 evaluation packages from frontend work.
 
-## Additive PFGR-Lite W1 boundary
+## Additive PFGR-Lite W1-W5 boundary and ledger
 
 PFGR-Lite is an additive, separately versioned implementation under
 `src/smagm/features/point_guided/pfgr_lite/`. Its W1 composition wraps a
@@ -318,3 +318,22 @@ budgets 0/1/2/4. `ProducerCompatibility` excludes V architecture/weights,
 fit settings, calibration, CLI/metrics, and a bare Git SHA; `ValueFitIdentity`
 and `CalibrationIdentity` bind those separately. Synthetic/untrained
 MedicalNet provenance is reported honestly and never mints a real-data claim.
+
+The user-authorized PFGR implementation spans W1-W5 under this package. W1
+owns the declarations/static seam described above; W2 owns the canonical
+query lattice, footprint, sparse writer, and teacher; W3 owns stages, bank,
+and value fitting; W4 owns immutable proposals, policy, calibration,
+checkpoint, and inference; W5 owns CLI, metrics, benchmark, oracle
+diagnostics, and the runbook. The completion ledger is intentionally
+additive: W1 fix-round software is pending independent re-review, while W2-W5
+implementation and experimental evidence remain pending. Navigation does not
+permanently block those future package paths; each dispatch still enforces its
+exclusive file ownership.
+
+W1 CPU fixtures may opt into `PFGRLiteConfig(engineering_only=True)` with a
+reduced point count to keep tests bounded. Production manifests reject reduced
+N and declare N=2048. The first implementation processes one subject at a time
+(B=1), serializing subjects when full batch metadata is unavailable; producer
+compatibility hashes describe frozen global algorithms/components, whereas
+subject affine/shape, resolved observation mask, and observed values remain in
+context/action/replay identities.

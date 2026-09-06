@@ -10,12 +10,12 @@ make a stale bank appear compatible.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 import hashlib
 import json
 from pathlib import Path
 import subprocess
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 import torch
 from torch import Tensor, nn
@@ -152,6 +152,10 @@ class SourceProvenance:
     input_conv_adapted: bool = False
     checkpoint_path: str | None = None
     checkpoint_sha256: str | None = None
+    checkpoint_integrity_verified: bool = False
+    source_state_dict_key_count: int = 0
+    loaded_backbone_key_count: int = 0
+    adaptation_digest: str | None = None
     parameter_hash: str | None = None
     frozen_bn_hash: str | None = None
     official_pretrained_verified: bool = False
@@ -170,8 +174,16 @@ class SourceProvenance:
             raise ValueError("input_conv_adapted requires a one-channel source adapted to three channels")
         if not isinstance(self.input_conv_adapted, bool) or not isinstance(self.official_pretrained_verified, bool):
             raise TypeError("input_conv_adapted and official_pretrained_verified must be bool")
+        if not isinstance(self.checkpoint_integrity_verified, bool):
+            raise TypeError("checkpoint_integrity_verified must be bool")
         if not isinstance(self.synthetic_untrained, bool):
             raise TypeError("synthetic_untrained must be bool")
+        for name in ("source_state_dict_key_count", "loaded_backbone_key_count"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{name} must be a nonnegative integer")
+        if self.adaptation_digest is not None and (not isinstance(self.adaptation_digest, str) or not self.adaptation_digest):
+            raise ValueError("adaptation_digest must be a nonempty string or None")
         if not isinstance(self.traversal_count, int) or isinstance(self.traversal_count, bool) or self.traversal_count < 0:
             raise ValueError("traversal_count must be a nonnegative integer")
         if self.official_pretrained_verified and self.synthetic_untrained:
@@ -181,8 +193,23 @@ class SourceProvenance:
     def digest(self) -> str:
         return canonical_digest(self, prefix="pfgr-lite-source-provenance-v1|")
 
+    @property
+    def sha256(self) -> str | None:
+        """Checkpoint field name used by ``MedicalNetCheckpointProvenance``."""
+
+        return self.checkpoint_sha256
+
+    @property
+    def integrity_verified(self) -> bool:
+        """Whether the configured checkpoint digest was actually verified."""
+
+        return self.checkpoint_integrity_verified
+
     def as_dict(self) -> dict[str, Any]:
-        return _jsonable(self)
+        payload = _jsonable(self)
+        payload["sha256"] = self.checkpoint_sha256
+        payload["integrity_verified"] = self.checkpoint_integrity_verified
+        return payload
 
 
 @dataclass(frozen=True)
@@ -216,12 +243,54 @@ class ProducerCompatibility:
         if self.schema_version != "pfgr-lite-producer-compat-v1":
             raise ValueError("unknown ProducerCompatibility schema_version")
         for name, value in self.__dict__.items():
-            if name.endswith("_hash") and (not isinstance(value, str) or not value):
-                raise ValueError(f"{name} must be a nonempty string")
+            if name.endswith("_hash"):
+                if not isinstance(value, str) or not value or value.lower() in {"unknown", "unset", "none", "null"}:
+                    raise ValueError(f"{name} must be a complete non-sentinel hash")
+        if not isinstance(self.source_version, str) or not self.source_version:
+            raise ValueError("source_version must be a nonempty string")
+        if any(not isinstance(k, str) or not k or not isinstance(v, str) or not v for k, v in self.component_versions):
+            raise ValueError("component_versions must contain nonempty string pairs")
 
     @property
     def digest(self) -> str:
-        return canonical_digest(self, prefix="pfgr-lite-producer-compat-v1|")
+        # Keep this identity strictly scoped to state/proposal/label
+        # producers.  Diagnostic component metadata may mention source or V
+        # settings, but repository Git SHA and value-fit identities belong to
+        # their separate provenance envelopes and must not stale a bank.
+        scoped_versions = tuple(
+            (key, value)
+            for key, value in self.component_versions
+            if key.lower() not in {
+                "git",
+                "git_sha",
+                "source_sha",
+                "config_sha",
+                "repository",
+                "value",
+                "value_model",
+                "v",
+            }
+        )
+        payload = {
+            "schema_version": self.schema_version,
+            "observation_normalization_hash": self.observation_normalization_hash,
+            "geometry_query_version_hash": self.geometry_query_version_hash,
+            "medicalnet_provenance_hash": self.medicalnet_provenance_hash,
+            "frozen_bn_hash": self.frozen_bn_hash,
+            "static_head_hash": self.static_head_hash,
+            "semantic_head_hash": self.semantic_head_hash,
+            "point_refiner_hash": self.point_refiner_hash,
+            "spectral_projector_hash": self.spectral_projector_hash,
+            "state_initializer_hash": self.state_initializer_hash,
+            "updater_hash": self.updater_hash,
+            "decoder_hash": self.decoder_hash,
+            "writer_hash": self.writer_hash,
+            "candidate_geometry_hash": self.candidate_geometry_hash,
+            "label_definition_hash": self.label_definition_hash,
+            "source_version": self.source_version,
+            "component_versions": scoped_versions,
+        }
+        return canonical_digest(payload, prefix="pfgr-lite-producer-compat-v1|")
 
     def matches(self, other: "ProducerCompatibility") -> bool:
         return isinstance(other, ProducerCompatibility) and self.digest == other.digest
@@ -248,8 +317,9 @@ class ValueFitIdentity:
         if self.input_variant not in (126, 222, 270, 366):
             raise ValueError("input_variant must be one of 126, 222, 270, 366")
         for name in ("architecture_hash", "weights_hash", "fit_config_hash", "bank_manifest_hash", "gain_scale_hash"):
-            if not isinstance(getattr(self, name), str) or not getattr(self, name):
-                raise ValueError(f"{name} must be nonempty")
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value or value.lower() in {"unknown", "unset", "none", "null"}:
+                raise ValueError(f"{name} must be a complete non-sentinel hash")
 
     @property
     def digest(self) -> str:
@@ -267,8 +337,10 @@ class CalibrationIdentity:
     def __post_init__(self) -> None:
         if self.version != "pfgr-lite-calibration-identity-v1":
             raise ValueError("unknown calibration identity version")
-        if not self.producer_compatibility_hash or not self.value_fit_identity_hash:
-            raise ValueError("calibration identity hashes must be nonempty")
+        for name in ("producer_compatibility_hash", "value_fit_identity_hash"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value or value.lower() in {"unknown", "unset", "none", "null"}:
+                raise ValueError("calibration identity hashes must be complete non-sentinel hashes")
 
     @property
     def digest(self) -> str:
@@ -279,18 +351,40 @@ def source_provenance_from_semantic_prior(prior: nn.Module, *, source_sha: str |
     """Build an honest provenance record from the existing semantic prior."""
 
     checkpoint = getattr(prior, "backbone_provenance", None)
+    backbone = getattr(prior, "backbone", None)
+    source_channels = int(getattr(checkpoint, "source_input_channels", getattr(backbone, "in_channels", 3))) if checkpoint is not None else int(getattr(backbone, "in_channels", 3))
+    adapted_channels = int(getattr(checkpoint, "adapted_input_channels", getattr(backbone, "in_channels", 3))) if checkpoint is not None else int(getattr(backbone, "in_channels", 3))
+    adapted = bool(getattr(checkpoint, "input_conv_adapted", False)) if checkpoint is not None else False
+    official = bool(getattr(checkpoint, "official_pretrained_verified", False)) if checkpoint is not None else False
+    adaptation_digest = canonical_digest(
+        {
+            "algorithm": "repeat_divide_mean_stem_v1" if adapted else "identity_stem_v1",
+            "source_input_channels": source_channels,
+            "adapted_input_channels": adapted_channels,
+            "input_conv_adapted": adapted,
+            "checkpoint_sha256": getattr(checkpoint, "sha256", None),
+        },
+        prefix="pfgr-lite-input-conv-adaptation-v1|",
+    )
     return SourceProvenance(
         source_sha=source_sha,
         config_sha=config_sha,
-        source_input_channels=int(getattr(getattr(prior, "backbone", None), "in_channels", 3)),
-        adapted_input_channels=int(getattr(checkpoint, "adapted_input_channels", getattr(getattr(prior, "backbone", None), "in_channels", 3))) if checkpoint is not None else int(getattr(getattr(prior, "backbone", None), "in_channels", 3)),
-        input_conv_adapted=bool(getattr(checkpoint, "input_conv_adapted", False)) if checkpoint is not None else False,
+        source_input_channels=source_channels,
+        adapted_input_channels=adapted_channels,
+        input_conv_adapted=adapted,
         checkpoint_path=getattr(checkpoint, "checkpoint_path", None),
         checkpoint_sha256=getattr(checkpoint, "sha256", None),
-        parameter_hash=module_parameter_digest(prior.backbone) if isinstance(getattr(prior, "backbone", None), nn.Module) else None,
-        frozen_bn_hash=batchnorm_state_digest(prior.backbone) if isinstance(getattr(prior, "backbone", None), nn.Module) else None,
-        official_pretrained_verified=bool(getattr(prior, "pretrained_loaded", False)),
-        synthetic_untrained=checkpoint is None,
+        checkpoint_integrity_verified=bool(getattr(checkpoint, "integrity_verified", False)) if checkpoint is not None else False,
+        source_state_dict_key_count=int(getattr(checkpoint, "source_state_dict_key_count", 0)) if checkpoint is not None else 0,
+        loaded_backbone_key_count=int(getattr(checkpoint, "loaded_backbone_key_count", 0)) if checkpoint is not None else 0,
+        adaptation_digest=adaptation_digest,
+        parameter_hash=module_parameter_digest(backbone) if isinstance(backbone, nn.Module) else None,
+        frozen_bn_hash=batchnorm_state_digest(backbone) if isinstance(backbone, nn.Module) else None,
+        official_pretrained_verified=official,
+        # An arbitrary local/synthetic checkpoint is not official pretrained
+        # evidence.  Keep it labelled synthetic/untrained unless an approved
+        # official digest was actually verified.
+        synthetic_untrained=not official,
         traversal_count=0,
     )
 

@@ -9,11 +9,10 @@ planes consumed by the bounded PFGR updater/decoder.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping
+from typing import ClassVar
 
 import torch
 from torch import Tensor, nn
-from torch.nn import functional as F
 
 from ..medicalnet_resnet10 import MedicalNetFeatures
 from ..state_init import DYNAMIC_STATE_CHANNELS, DynamicStateInitializer, DynamicTriPlanes
@@ -97,7 +96,7 @@ class _ScalePlanes:
 class StaticSynthesisHead(nn.Module):
     """Produce graph-preserving 32-channel Z0 planes for one PFGR variant."""
 
-    _SCALE_CHANNELS = {"shallow": 64, "layer1": 64, "deep": 512}
+    _SCALE_CHANNELS: ClassVar[dict[str, int]] = {"shallow": 64, "layer1": 64, "deep": 512}
 
     def __init__(self, config: StaticSynthesisConfig | None = None) -> None:
         super().__init__()
@@ -196,6 +195,12 @@ class StaticSynthesisHead(nn.Module):
 
     @staticmethod
     def _resample_base(base_planes: BaseTriPlanes, selected: FeatureLattice, target: FeatureLattice) -> BaseTriPlanes:
+        # B0 is the legacy control.  When the source and target are already
+        # the same lattice, return the original tensors exactly: an avoidable
+        # grid_sample round trip would change values (and gradients) even
+        # though no geometry conversion is required.
+        if selected.feature_shape_dhw == target.feature_shape_dhw and selected.feature_geometry == target.feature_geometry:
+            return base_planes
         return BaseTriPlanes(
             xy=resample_plane_between_lattices(base_planes.xy, selected, target, plane_name="xy"),
             xz=resample_plane_between_lattices(base_planes.xz, selected, target, plane_name="xz"),
@@ -303,19 +308,7 @@ class StaticSynthesisHead(nn.Module):
     initial_planes = forward
 
 
-PFGRStaticHead = StaticSynthesisHead
-B0LegacyStaticHead = StaticSynthesisHead
-B1MultiscaleStaticHead = StaticSynthesisHead
-B2OrderedMultiscaleStaticHead = StaticSynthesisHead
-BLiteOrderedStaticHead = StaticSynthesisHead
-
-
 __all__ = [
-    "B0LegacyStaticHead",
-    "B1MultiscaleStaticHead",
-    "B2OrderedMultiscaleStaticHead",
-    "BLiteOrderedStaticHead",
-    "PFGRStaticHead",
     "STATE_CHANNELS",
     "StaticSynthesisHead",
 ]
