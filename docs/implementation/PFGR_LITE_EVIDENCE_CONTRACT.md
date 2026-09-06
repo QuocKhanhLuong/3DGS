@@ -154,3 +154,25 @@ Both prior fields are null for a direct U-plus-spectral stage. Engineering
 fixtures may omit this receipt and remain engineering-only. Static-only
 checkpoints carry explicit static-stage provenance and cannot supply a MAIN
 ValueBank until useful spectral producer training is documented as above.
+
+## Completed calibration rollouts and terminal assessments
+
+The calibration rollout has a forced compute budget of four. Completion
+does not require four executed writes when no legal action remains. Such
+short completed traces retain their measured winners and actual stop reason;
+the independent-group and unique-winner minimums remain unchanged. An
+arbitrarily truncated trace is not complete evidence.
+
+W4 may add optional typed `PFGRRouteResult.terminal_proposals` containing the
+actual final assessed `ActionProposalBatch` when stopping early. It is bound
+to the final state and terminal decision, without inventing a next state or
+sequential write. A local calibration collection receipt may wrap that route
+result to validate forced policy, budget, all executed actions and a genuine
+no-legal-action terminal assessment. This is preferable to mutable undeclared
+attributes. Sequential transition traces retain their existing meaning.
+
+The already-authorized synthetic harness uses the same selector/STOP code
+with explicit engineering-only policy and diagnostic affine parameters.
+Every derived receipt retains that status, and adaptive deployment artifact
+save/load/promotion remains forbidden. Synthetic tests must not fabricate
+production training provenance to exercise this harness.
