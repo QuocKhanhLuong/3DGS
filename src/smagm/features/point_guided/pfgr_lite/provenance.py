@@ -352,17 +352,48 @@ def source_provenance_from_semantic_prior(prior: nn.Module, *, source_sha: str |
 
     checkpoint = getattr(prior, "backbone_provenance", None)
     backbone = getattr(prior, "backbone", None)
-    source_channels = int(getattr(checkpoint, "source_input_channels", getattr(backbone, "in_channels", 3))) if checkpoint is not None else int(getattr(backbone, "in_channels", 3))
-    adapted_channels = int(getattr(checkpoint, "adapted_input_channels", getattr(backbone, "in_channels", 3))) if checkpoint is not None else int(getattr(backbone, "in_channels", 3))
-    adapted = bool(getattr(checkpoint, "input_conv_adapted", False)) if checkpoint is not None else False
-    official = bool(getattr(checkpoint, "official_pretrained_verified", False)) if checkpoint is not None else False
+    if checkpoint is None:
+        # Checkpoint-less construction is an explicitly synthetic arm.  The
+        # live backbone channel count is useful only to describe that local
+        # initialization; it must never be presented as checkpoint evidence.
+        source_channels = int(getattr(backbone, "in_channels", 3))
+        adapted_channels = source_channels
+        adapted = False
+        official = False
+        integrity_verified = False
+    else:
+        # A configured checkpoint is the sole authority for source/adaptation
+        # channel provenance.  Do not silently substitute the instantiated
+        # three-channel stem when a malformed checkpoint receipt omits fields.
+        required_fields = (
+            "source_input_channels",
+            "adapted_input_channels",
+            "input_conv_adapted",
+            "official_pretrained_verified",
+            "integrity_verified",
+            "sha256",
+        )
+        missing = [name for name in required_fields if not hasattr(checkpoint, name)]
+        if missing:
+            raise ValueError(
+                "checkpoint provenance is incomplete; missing " + ", ".join(missing)
+            )
+        source_channels = int(checkpoint.source_input_channels)
+        adapted_channels = int(checkpoint.adapted_input_channels)
+        adapted = checkpoint.input_conv_adapted
+        official = checkpoint.official_pretrained_verified
+        integrity_verified = checkpoint.integrity_verified
+        if not isinstance(adapted, bool) or not isinstance(official, bool) or not isinstance(integrity_verified, bool):
+            raise TypeError("checkpoint provenance boolean fields must be bool")
+        if not isinstance(checkpoint.sha256, str) or not checkpoint.sha256:
+            raise ValueError("checkpoint provenance sha256 must be complete")
     adaptation_digest = canonical_digest(
         {
             "algorithm": "repeat_divide_mean_stem_v1" if adapted else "identity_stem_v1",
             "source_input_channels": source_channels,
             "adapted_input_channels": adapted_channels,
             "input_conv_adapted": adapted,
-            "checkpoint_sha256": getattr(checkpoint, "sha256", None),
+            "checkpoint_sha256": None if checkpoint is None else checkpoint.sha256,
         },
         prefix="pfgr-lite-input-conv-adaptation-v1|",
     )
@@ -373,8 +404,8 @@ def source_provenance_from_semantic_prior(prior: nn.Module, *, source_sha: str |
         adapted_input_channels=adapted_channels,
         input_conv_adapted=adapted,
         checkpoint_path=getattr(checkpoint, "checkpoint_path", None),
-        checkpoint_sha256=getattr(checkpoint, "sha256", None),
-        checkpoint_integrity_verified=bool(getattr(checkpoint, "integrity_verified", False)) if checkpoint is not None else False,
+        checkpoint_sha256=None if checkpoint is None else checkpoint.sha256,
+        checkpoint_integrity_verified=integrity_verified,
         source_state_dict_key_count=int(getattr(checkpoint, "source_state_dict_key_count", 0)) if checkpoint is not None else 0,
         loaded_backbone_key_count=int(getattr(checkpoint, "loaded_backbone_key_count", 0)) if checkpoint is not None else 0,
         adaptation_digest=adaptation_digest,

@@ -8,7 +8,7 @@ teacher, oracle, data-loader, or value-fitting module is imported here.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 import math
 from typing import Any, Literal, Mapping, Sequence
 
@@ -39,6 +39,123 @@ COUNTERS_SCHEMA = "pfgr-lite-counters-v1"
 INFERENCE_SCHEMA = "point-guided-pfgr-lite-inference-v1"
 RESUME_SCHEMA = "point-guided-pfgr-lite-resume-v1"
 VALUE_BANK_SCHEMA = "point-guided-pfgr-lite-value-bank-v1"
+TRAINING_ROLES_SCHEMA = "pfgr-lite-training-roles-v1"
+
+
+@dataclass(frozen=True)
+class TrainingRoleManifest:
+    """Immutable baseline/training role declaration for V/calibration joins."""
+
+    baseline_split_hash: str
+    baseline_train_subject_ids: tuple[str, ...]
+    baseline_validation_subject_ids: tuple[str, ...]
+    baseline_test_subject_ids: tuple[str, ...]
+    producer_fit_subject_ids: tuple[str, ...]
+    calibration_fit_subject_ids: tuple[str, ...]
+    calibration_allowance_subject_ids: tuple[str, ...]
+    subject_group_ids: tuple[tuple[str, str], ...]
+    assignment_seed: int = 20260907
+    engineering_only: bool = False
+    schema_version: str = TRAINING_ROLES_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema_version != TRAINING_ROLES_SCHEMA:
+            raise ValueError("unknown training role manifest schema")
+        def _ids(name: str) -> tuple[str, ...]:
+            values = getattr(self, name)
+            if not isinstance(values, tuple) or any(not isinstance(item, str) or not item for item in values):
+                raise ValueError(f"{name} must be a tuple of nonempty identifiers")
+            if len(set(values)) != len(values):
+                raise ValueError(f"{name} identifiers must be unique")
+            return values
+
+        splits = [_ids(name) for name in ("baseline_train_subject_ids", "baseline_validation_subject_ids", "baseline_test_subject_ids")]
+        if any(set(splits[i]) & set(splits[j]) for i in range(3) for j in range(i + 1, 3)):
+            raise ValueError("baseline train/validation/test subjects must be disjoint")
+        roles = [_ids(name) for name in ("producer_fit_subject_ids", "calibration_fit_subject_ids", "calibration_allowance_subject_ids")]
+        if any(set(roles[i]) & set(roles[j]) for i in range(3) for j in range(i + 1, 3)):
+            raise ValueError("training role subjects must be disjoint")
+        if set().union(*roles) != set(splits[0]):
+            raise ValueError("training roles must partition baseline training subjects exactly")
+        if not isinstance(self.baseline_split_hash, str) or not self.baseline_split_hash or self.baseline_split_hash.lower() in {"unknown", "unset", "none", "null"}:
+            raise ValueError("baseline_split_hash must be complete")
+        if not isinstance(self.subject_group_ids, tuple) or not self.subject_group_ids:
+            raise ValueError("subject_group_ids must be nonempty")
+        group_by_subject: dict[str, str] = {}
+        for row in self.subject_group_ids:
+            if not isinstance(row, tuple) or len(row) != 2 or any(not isinstance(item, str) or not item for item in row):
+                raise ValueError("subject_group_ids rows must be (subject, related-group)")
+            subject, group = row
+            if subject in group_by_subject:
+                raise ValueError("each subject must have exactly one related-group assignment")
+            group_by_subject[subject] = group
+        all_subjects = set().union(*splits)
+        if set(group_by_subject) != all_subjects:
+            raise ValueError("subject_group_ids must cover every baseline subject exactly once")
+        by_group: dict[str, set[str]] = {}
+        for subject, group in group_by_subject.items():
+            by_group.setdefault(group, set()).add(subject)
+        partition_by_subject = {subject: "train" for subject in splits[0]}
+        partition_by_subject.update({subject: "validation" for subject in splits[1]})
+        partition_by_subject.update({subject: "test" for subject in splits[2]})
+        role_by_subject = {subject: "producer_fit" for subject in roles[0]}
+        role_by_subject.update({subject: "calibration_fit" for subject in roles[1]})
+        role_by_subject.update({subject: "calibration_allowance" for subject in roles[2]})
+        for group_subjects in by_group.values():
+            if len({partition_by_subject[item] for item in group_subjects}) != 1:
+                raise ValueError("related groups may not cross baseline splits")
+            train_subjects = [item for item in group_subjects if item in role_by_subject]
+            if train_subjects and len({role_by_subject[item] for item in train_subjects}) != 1:
+                raise ValueError("related groups may not cross training roles")
+        if not isinstance(self.assignment_seed, int) or isinstance(self.assignment_seed, bool):
+            raise ValueError("assignment_seed must be an integer")
+        if not isinstance(self.engineering_only, bool):
+            raise TypeError("engineering_only must be bool")
+        if not self.engineering_only:
+            group_counts = {
+                role: len({group_by_subject[item] for item in subjects})
+                for role, subjects in zip(("producer_fit", "calibration_fit", "calibration_allowance"), roles)
+            }
+            if group_counts["producer_fit"] < 1:
+                raise ValueError("production role manifest requires at least one producer-fit group")
+            if group_counts["calibration_fit"] < 32 or group_counts["calibration_allowance"] < 32:
+                raise ValueError("production calibration roles require at least 32 independent groups")
+
+    @property
+    def digest(self) -> str:
+        return canonical_digest(self, prefix="pfgr-lite-training-roles-v1|")
+
+    def as_dict(self) -> dict[str, Any]:
+        payload = {field.name: getattr(self, field.name) for field in fields(self)}
+        payload["baseline_train_subject_ids"] = list(self.baseline_train_subject_ids)
+        payload["baseline_validation_subject_ids"] = list(self.baseline_validation_subject_ids)
+        payload["baseline_test_subject_ids"] = list(self.baseline_test_subject_ids)
+        payload["producer_fit_subject_ids"] = list(self.producer_fit_subject_ids)
+        payload["calibration_fit_subject_ids"] = list(self.calibration_fit_subject_ids)
+        payload["calibration_allowance_subject_ids"] = list(self.calibration_allowance_subject_ids)
+        payload["subject_group_ids"] = [list(row) for row in self.subject_group_ids]
+        return payload
+
+    @classmethod
+    def from_dict(cls, values: Mapping[str, Any]) -> "TrainingRoleManifest":
+        if not isinstance(values, Mapping):
+            raise TypeError("training role manifest must be a mapping")
+        allowed = {field.name for field in fields(cls)}
+        unknown = set(values) - allowed
+        if unknown:
+            raise ValueError(f"unknown training role manifest keys: {sorted(unknown)}")
+        parsed = dict(values)
+        for name in (
+            "baseline_train_subject_ids",
+            "baseline_validation_subject_ids",
+            "baseline_test_subject_ids",
+            "producer_fit_subject_ids",
+            "calibration_fit_subject_ids",
+            "calibration_allowance_subject_ids",
+        ):
+            parsed[name] = tuple(parsed.get(name, ()))
+        parsed["subject_group_ids"] = tuple(tuple(row) for row in parsed.get("subject_group_ids", ()))
+        return cls(**parsed)
 
 
 def _finite(name: str, value: Tensor, rank: int | None = None, final: int | None = None) -> None:
@@ -540,13 +657,13 @@ class ActionProposalBatch:
     def __post_init__(self) -> None:
         if self.version != ACTION_SCHEMA:
             raise ValueError("unknown ActionProposalBatch schema")
-        if not isinstance(self.context_id, str) or not self.context_id:
-            raise ValueError("context_id must be nonempty")
+        _nonempty_text("context_id", self.context_id)
         if self.context_version != PFGR_TYPES_SCHEMA:
             raise ValueError("unknown context contract version")
         _nonempty_text("producer_compatibility_hash", self.producer_compatibility_hash)
         if not isinstance(self.state_version, int) or isinstance(self.state_version, bool) or self.state_version < 0:
             raise ValueError("state_version must be nonnegative")
+        _nonempty_text("state_digest", self.state_digest)
         for name, value, final in (("point_ids", self.point_ids, None), ("legal", self.legal, None)):
             _integer(name, value, rank=2)
         _finite("points_ras_mm", self.points_ras_mm, rank=3, final=3)
@@ -824,11 +941,18 @@ class CompletedBehaviorTrace:
             if proposal.state_version != state.state_version or proposal.state_digest != state.state_digest:
                 raise ValueError("proposal state identity does not match trace state chain")
             decision = self.decisions[index]
+            if decision.step != index:
+                raise ValueError("trace decision steps must match their state-transition index")
             if decision.stop_code == "continue":
+                if not decision.active:
+                    raise ValueError("continue decision must be active")
                 if decision.selected_point_id < 0 or decision.selected_point_id not in proposal.point_ids.reshape(-1).tolist():
                     raise ValueError("continue decision must select a proposal point")
-            elif decision.selected_point_id >= 0:
-                raise ValueError("stopping decision cannot carry a selected point")
+            else:
+                if decision.active:
+                    raise ValueError("stopping decision must be inactive")
+                if decision.selected_point_id >= 0:
+                    raise ValueError("stopping decision cannot carry a selected point")
             if decision.proposal_digest != proposal.proposal_digest:
                 raise ValueError("decision proposal_digest does not match scored proposal batch")
             if decision.selected_point_id >= 0:
@@ -873,6 +997,81 @@ class CompletedBehaviorTrace:
         if self.route_hash and self.route_hash != expected_hash:
             raise ValueError("route_hash does not match complete behavior trace identity")
         object.__setattr__(self, "route_hash", expected_hash)
+
+
+@dataclass(frozen=True)
+class ParallelBehaviorTrace:
+    """Frozen initial-bank diagnostic trace for ``parallel_topk`` controls."""
+
+    context_id: str
+    initial_state: PFGRState
+    proposals: ActionProposalBatch
+    selected_action_ids: tuple[str, ...]
+    selected_action_digests: tuple[str, ...]
+    selected_delta_digests: tuple[str, ...]
+    intermediate_states: tuple[PFGRState, ...]
+    policy_hash: str
+    trace_hash: str = ""
+    version: str = "pfgr-lite-parallel-trace-v1"
+
+    def __post_init__(self) -> None:
+        if self.version != "pfgr-lite-parallel-trace-v1":
+            raise ValueError("unknown parallel behavior trace schema")
+        _nonempty_text("context_id", self.context_id)
+        _nonempty_text("policy_hash", self.policy_hash)
+        if not isinstance(self.initial_state, PFGRState) or self.initial_state.context_id != self.context_id or self.initial_state.state_version != 0:
+            raise ValueError("parallel trace initial state must be context-bound version zero")
+        self.initial_state.validate_integrity()
+        if not isinstance(self.proposals, ActionProposalBatch) or self.proposals.context_id != self.context_id:
+            raise ValueError("parallel trace proposals must share the initial context")
+        self.proposals.validate_integrity()
+        if self.proposals.state_version != self.initial_state.state_version or self.proposals.state_digest != self.initial_state.state_digest:
+            raise ValueError("parallel proposal bank must be bound to the initial state")
+        count = len(self.selected_action_ids)
+        if count <= 0 or count > 4:
+            raise ValueError("parallel trace must contain between one and four selected actions")
+        if not (len(self.selected_action_digests) == len(self.selected_delta_digests) == len(self.intermediate_states) == count):
+            raise ValueError("parallel trace selected identities and states must have equal lengths")
+        if len(set(self.selected_action_ids)) != count or len(set(self.selected_action_digests)) != count:
+            raise ValueError("parallel selected action IDs/digests must be unique")
+        rows = {
+            action.action_id: action
+            for batch_index in range(self.proposals.point_ids.shape[0])
+            for point_index in range(self.proposals.point_ids.shape[1])
+            for action in (self.proposals.row(batch_index, point_index),)
+        }
+        if any(action_id not in rows for action_id in self.selected_action_ids):
+            raise ValueError("parallel selected action IDs must come from the initial proposal bank")
+        for index, (action_id, action_digest, delta_digest, state) in enumerate(zip(self.selected_action_ids, self.selected_action_digests, self.selected_delta_digests, self.intermediate_states), start=1):
+            action = rows[action_id]
+            if not action.legal:
+                raise ValueError("parallel selected action must be legal in the initial proposal bank")
+            if action.action_digest != action_digest:
+                raise ValueError("parallel action digest is not bound to the initial proposal row")
+            if tensor_digest(action.delta, name="delta") != delta_digest:
+                raise ValueError("parallel selected delta provenance does not match stored action")
+            if not isinstance(state, PFGRState) or state.context_id != self.context_id or state.state_version != index:
+                raise ValueError("parallel intermediate states must form a contiguous context-bound chain")
+            state.validate_integrity()
+            if state.producer.digest != self.initial_state.producer.digest:
+                raise ValueError("parallel producer identity changed during compound write")
+        expected = canonical_digest(
+            {
+                "version": self.version,
+                "context_id": self.context_id,
+                "initial_state": (self.initial_state.state_version, self.initial_state.state_digest, self.initial_state.producer.digest),
+                "proposal_digest": self.proposals.proposal_digest,
+                "selected_action_ids": self.selected_action_ids,
+                "selected_action_digests": self.selected_action_digests,
+                "selected_delta_digests": self.selected_delta_digests,
+                "intermediate_states": [(state.state_version, state.state_digest) for state in self.intermediate_states],
+                "policy_hash": self.policy_hash,
+            },
+            prefix="pfgr-lite-parallel-trace-v1|",
+        )
+        if self.trace_hash and self.trace_hash != expected:
+            raise ValueError("parallel trace hash does not match complete diagnostic identity")
+        object.__setattr__(self, "trace_hash", expected)
 
 
 @dataclass(frozen=True)
@@ -1081,6 +1280,15 @@ class InferenceBundle:
     calibration: GainCalibration | None = None
     split_hash: str | None = None
     schema_version: str = INFERENCE_SCHEMA
+    frontend_config: Mapping[str, Any] | None = None
+    value_fit_identity: ValueFitIdentity | None = None
+    gain_scale_hash: str = ""
+    effective_policy_hash: str = ""
+    role_manifest: TrainingRoleManifest | None = None
+    stage_provenance: Mapping[str, Any] | None = None
+    calibration_evidence: Mapping[str, Any] | None = None
+    effective_policy: Mapping[str, Any] | None = None
+    gain_scale_provenance: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != INFERENCE_SCHEMA:
@@ -1105,6 +1313,20 @@ class InferenceBundle:
                 for name in ("producer_compatibility_hash", "value_fit_identity_hash", "gain_scale_hash")
             ):
                 raise ValueError("adaptive inference requires complete calibration identities")
+            if self.frontend_config is None or self.value_fit_identity is None or not self.gain_scale_hash or not self.effective_policy_hash or self.role_manifest is None or self.calibration_evidence is None or self.effective_policy is None or self.gain_scale_provenance is None:
+                raise ValueError("adaptive inference requires complete frontend/value/scale/policy/role evidence")
+        if self.value_fit_identity is not None and not isinstance(self.value_fit_identity, ValueFitIdentity):
+            raise TypeError("value_fit_identity must be ValueFitIdentity or None")
+        if self.role_manifest is not None and not isinstance(self.role_manifest, TrainingRoleManifest):
+            raise TypeError("role_manifest must be TrainingRoleManifest or None")
+        for name in ("frontend_config", "stage_provenance", "calibration_evidence", "effective_policy", "gain_scale_provenance"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, Mapping):
+                raise TypeError(f"{name} must be a mapping or None")
+        for name in ("gain_scale_hash", "effective_policy_hash"):
+            value = getattr(self, name)
+            if value and (not isinstance(value, str) or value.lower() in {"unknown", "unset", "none", "null"}):
+                raise ValueError(f"{name} must be a complete non-sentinel string")
 
 
 @dataclass(frozen=True)
@@ -1159,16 +1381,43 @@ class PFGRRouteResult:
     counters: OperationCounters = field(default_factory=OperationCounters)
     context_id: str = ""
     policy_hash: str = ""
+    completed_trace: CompletedBehaviorTrace | None = None
+    parallel_trace: ParallelBehaviorTrace | None = None
+    terminal_proposals: ActionProposalBatch | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.final_state, PFGRState) or not isinstance(self.counters, OperationCounters):
             raise TypeError("PFGRRouteResult requires final state and counters")
         if not isinstance(self.k, int) or isinstance(self.k, bool) or self.k < 0 or self.k > 4:
             raise ValueError("PFGR route K must lie in 0..4")
+        if self.k != self.final_state.state_version:
+            raise ValueError("PFGR route K must match the final state version")
         if not self.context_id:
             object.__setattr__(self, "context_id", self.final_state.context_id)
         if self.context_id != self.final_state.context_id:
             raise ValueError("route context must match final state")
+        if self.completed_trace is not None:
+            if not isinstance(self.completed_trace, CompletedBehaviorTrace):
+                raise TypeError("completed_trace must be CompletedBehaviorTrace or None")
+            if self.completed_trace.context_id != self.context_id:
+                raise ValueError("completed_trace context must match route context")
+        if self.parallel_trace is not None:
+            if not isinstance(self.parallel_trace, ParallelBehaviorTrace):
+                raise TypeError("parallel_trace must be ParallelBehaviorTrace or None")
+            if self.parallel_trace.context_id != self.context_id:
+                raise ValueError("parallel_trace context must match route context")
+            if self.completed_trace is not None:
+                raise ValueError("parallel routes cannot masquerade as sequential CompletedBehaviorTrace")
+        if self.terminal_proposals is not None:
+            if not isinstance(self.terminal_proposals, ActionProposalBatch):
+                raise TypeError("terminal_proposals must be ActionProposalBatch or None")
+            if self.terminal_proposals.context_id != self.context_id:
+                raise ValueError("terminal proposal context must match route context")
+            self.terminal_proposals.validate_integrity()
+            if self.terminal_proposals.state_version != self.final_state.state_version or self.terminal_proposals.state_digest != self.final_state.state_digest:
+                raise ValueError("terminal proposal must be bound to the final route state")
+            if not self.decisions or self.decisions[-1].stop_code == "continue" or self.decisions[-1].proposal_digest != self.terminal_proposals.proposal_digest:
+                raise ValueError("terminal proposal must be bound to the final stopping decision")
 
 
 __all__ = [
@@ -1188,6 +1437,7 @@ __all__ = [
     "MultiScaleFeatureGeometry",
     "ObservationContext",
     "OperationCounters",
+    "ParallelBehaviorTrace",
     "PFGRRouteResult",
     "PFGRState",
     "PFGR_TYPES_SCHEMA",
@@ -1198,6 +1448,8 @@ __all__ = [
     "StageState",
     "SourceProvenance",
     "TRACE_SCHEMA",
+    "TRAINING_ROLES_SCHEMA",
+    "TrainingRoleManifest",
     "V_DESCRIPTOR_DIMS",
     "ValueBankManifest",
     "ValueFitIdentity",
