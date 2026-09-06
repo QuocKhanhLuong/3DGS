@@ -57,3 +57,17 @@ existing destinations. No CLI/service completion is claimed by this helper.
 W5a has no commit/staging permission until the principal grants a serialized
 slot. W1, W2a and W5a have disjoint owned paths; action/teacher/policy/training
 integration remains gated on corrected W1 acceptance.
+
+## Accepted W1 and independent W3a cached fitting
+
+W1 is accepted through `9f03660` after independent semantic checks, 38 final
+owned tests and the recorded legacy golden comparison. W2 teacher and W4
+policy may now proceed on their separate files. W3a may implement only
+`value_bank.py`, `value_net.py`, `test_value_bank.py` and `test_value_fit.py`
+against the frozen W1 descriptor, GainLabel, producer, manifest and value-fit
+declarations. Its input is already measured, detached state/action metadata;
+it must not import or invoke an MRI loader, updater, decoder or teacher.
+Bank generation from MRI and S0/S1/S2 orchestration still wait for W2/W4.
+This is an explicit scheduling amendment, not a change to the bank population,
+scale, regression objective or staged scientific acceptance. All shared-file
+changes require principal coordination; commits remain serialized.
