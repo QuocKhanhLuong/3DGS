@@ -1,5 +1,52 @@
 # PFGR-Lite evidence integration contract
 
+## Final service integration clarifications
+
+The staged execution configuration is a strict wrapper around the existing
+PFGR and frontend configurations, resolved normalization and explicit stage
+options. Optimizer, loss, teacher and operational work settings are saved;
+they are not undeclared callable defaults. W3b owns `stages.py`,
+`objectives.py` and `data.py`, including the real data/checkpoint input factory.
+The public stage result includes canonical `StageState`, actual artifact
+paths, metrics and completion evidence. A boolean `prediction_ready=True`
+cannot authorize a target read: deferred supervision requires the actual
+completed prediction/trace and its `ObservationContext`.
+
+Production target validation binds the observation context's actual mask,
+affines, normalization and producer identity. An unbound standalone fixture
+must explicitly declare engineering-only use. Immutable target validation is
+reused for the same subject context; it is not repeated for every candidate.
+Full audit and cheap mutation/version guards have distinct scopes.
+
+W4 owns a local `ForcedCalibrationTrace` wrapper in `calibration.py`, rather
+than adding more fields to shared route types. It binds the actual observation
+context, sequential route and collection `EffectivePolicy`. Collection uses
+forced greedy budget four with no calibration, the exact fitted V and scale,
+and matching route/decision policy hashes. Complete no-legal short routes are
+valid only when the stored terminal proposals have no legal nonzero action.
+The collection-policy identity is distinct from the intended adaptive-policy
+identity; their value, scale, candidate, writer, query, tie and revisit
+dependencies must agree. Winner raw scores must equal the executed decision's
+raw gain score. Exact confirmation has Q=0, no sampling seed and zero Monte
+Carlo uncertainty.
+
+`ObservationContext.context_id` is a content digest, not a subject identifier.
+The real W3b load/encode boundary creates a versioned subject-to-context
+receipt before supervision, containing subject, source observation record,
+context, geometry and normalization identities. W4 validates this receipt
+against the actual context and external training-role manifest; winner rows
+cannot independently assign subject identities to arbitrary traces.
+
+W5 is split into disjoint implementation tasks after interfaces are available.
+The scientific-services worker owns `experiments.py`, `oracle.py`, `metrics.py`
+and `benchmark.py` plus their tests. It exposes `run_evaluation`,
+`run_oracle_evaluation` and `run_teacher_benchmark` using W3b `StageInputs` and
+strict local scenario options. S6 delegates the same evaluation service.
+The later CLI/runbook worker owns `smagm/cli/pfgr_lite.py`, PFGR configuration
+files, root runbook, README/docs links and command integration tests. It calls
+these services and the existing staged APIs; it does not implement another
+policy or data path. Both workers must remain `gpt-5.6-luna` / `max`.
+
 Principal clarification, 2026-09-07. This supplements the accepted plan and
 interface companion; it changes no architecture, gain objective, sampling
 law, calibration minimum or scientific acceptance criterion. Early W3a/W4
