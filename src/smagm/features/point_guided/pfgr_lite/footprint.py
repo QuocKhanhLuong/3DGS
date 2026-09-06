@@ -26,9 +26,9 @@ from typing import ClassVar
 
 import torch
 from torch import Tensor
+from torch.nn import functional as F
 
 from ..contracts import VolumeGeometry
-from ..sampling import voxel_dhw_to_ras_mm
 from ..spectral_query import FeatureGridGeometry
 from ..state_init import DynamicTriPlanes
 
@@ -567,7 +567,7 @@ class PFGRQueryLattice:
                     dtype=query_dtype,
                 )
                 d, h, w = coordinates.unbind(dim=-1)
-                chunk_stencils = {
+                _chunk_stencils = {
                     "xy": _stencil_from_coordinates(
                         h,
                         w,
@@ -587,7 +587,7 @@ class PFGRQueryLattice:
                         columns=plane_shapes["yz"][1],
                     ),
                 }
-                for name, stencil in chunk_stencils.items():
+                for name, stencil in _chunk_stencils.items():
                     index_buffers[name][start:stop].copy_(stencil.neighbour_indices)
                     weight_buffers[name][start:stop].copy_(stencil.weights)
                     valid_buffers[name][start:stop].copy_(stencil.valid)
@@ -724,9 +724,49 @@ class PFGRQueryLattice:
         feature_geometry: FeatureGridGeometry,
         dtype: torch.dtype,
     ) -> Tensor:
+        # Keep this affine path elementwise instead of using a batched
+        # ``matmul``.  CPU/GPU BLAS kernels may choose a different reduction
+        # tree for a short chunk versus a full-volume chunk, which can move a
+        # near-boundary coordinate by one FP32 ulp and change ``floor``.  A
+        # fixed scalar addition order gives every output row the same
+        # canonical centre regardless of ``build_chunk_size``/``chunk_size``;
+        # it remains the full source/feature affine (no axis shortcut).
         voxel = voxel_ids_dhw.to(dtype=dtype)
-        ras = voxel_dhw_to_ras_mm(voxel, output_geometry)
-        return feature_geometry.ras_mm_to_feature_dhw(ras)
+        d, h, w = voxel.unbind(dim=-1)
+
+        def _affine_row(values: tuple[Tensor, Tensor, Tensor], row: int) -> Tensor:
+            # VolumeGeometry stores affine columns in WHD order, while the
+            # canonical lattice receives tensor DHW rows.  Evaluate each
+            # component with an explicit, stable left-associated sum.
+            x = values[2] * float(output_geometry.voxel_to_ras_mm[row][0])
+            x = x + values[1] * float(output_geometry.voxel_to_ras_mm[row][1])
+            x = x + values[0] * float(output_geometry.voxel_to_ras_mm[row][2])
+            return x + float(output_geometry.voxel_to_ras_mm[row][3])
+
+        xyz = torch.stack(
+            tuple(_affine_row((d, h, w), row) for row in range(3)), dim=-1
+        )
+        affine = torch.as_tensor(
+            feature_geometry.feature_geometry.voxel_to_ras_mm,
+            dtype=dtype,
+            device=xyz.device,
+        )
+        # ``feature_geometry`` maps feature DHW -> RAS.  Invert that full
+        # affine once per chunk; the inverse is geometry-only and preserves
+        # rotation, shear, anisotropic spacing and translation.
+        inverse = torch.linalg.inv(affine)
+        x, y, z = xyz.unbind(dim=-1)
+        feature_values: list[Tensor] = []
+        for row in range(3):
+            value = x * float(inverse[row, 0].item())
+            value = value + y * float(inverse[row, 1].item())
+            value = value + z * float(inverse[row, 2].item())
+            feature_values.append(value + float(inverse[row, 3].item()))
+        # The affine consumes WHD and returns feature DHW.  Keep this explicit
+        # permutation visible at the contract boundary.
+        return torch.stack(
+            (feature_values[2], feature_values[1], feature_values[0]), dim=-1
+        )
 
     @staticmethod
     def _build_inverse(stencil: BilinearStencil) -> PlaneNodeInverseIndex:
@@ -1068,6 +1108,48 @@ class PFGRQueryLattice:
         values = gathered * stencil.weights.unsqueeze(0) * stencil.valid.unsqueeze(0)
         return values.sum(dim=-1).transpose(0, 1)
 
+    @staticmethod
+    def _query_plane_grid(
+        plane: Tensor,
+        coordinates: Tensor,
+        *,
+        row_axis: int,
+        column_axis: int,
+    ) -> Tensor:
+        """Query one plane through PyTorch's canonical bilinear kernel.
+
+        The stored four-neighbour stencil remains the support/linearity
+        authority for sparse writes.  Dense canonical queries use the same
+        ``grid_sample(..., align_corners=False, padding_mode='zeros')``
+        arithmetic as the legacy geometry-aware path.  This avoids a
+        reduction-tree-dependent FP32 discrepancy between a hand-written
+        four-term sum and PyTorch's production sampler while retaining the
+        explicit stencil for inverse lookup and fallback accounting.
+        """
+
+        rows, columns = plane.shape[-2:]
+        row = coordinates[:, row_axis]
+        column = coordinates[:, column_axis]
+        grid = torch.stack(
+            (
+                (2.0 * column + 1.0) / float(columns) - 1.0,
+                (2.0 * row + 1.0) / float(rows) - 1.0,
+            ),
+            dim=-1,
+        ).reshape(1, -1, 1, 2)
+        sampling_plane = (
+            plane if plane.dtype == grid.dtype else plane.to(dtype=grid.dtype)
+        )
+        with torch.autocast(device_type=grid.device.type, enabled=False):
+            sampled = F.grid_sample(
+                sampling_plane,
+                grid,
+                mode="bilinear",
+                padding_mode="zeros",
+                align_corners=False,
+            )
+        return sampled[0, :, :, 0].transpose(0, 1)
+
     def _validate_planes(self, planes: DynamicTriPlanes) -> None:
         if not isinstance(planes, DynamicTriPlanes):
             raise TypeError("planes must be a DynamicTriPlanes instance")
@@ -1143,12 +1225,19 @@ class PFGRQueryLattice:
             if materialized is None:
                 chunk_ids = voxel_ids_dhw[start:stop]
                 canonical_ids = chunk_ids.to(device="cpu")
+                chunk_coordinates = self._feature_coordinates(
+                    canonical_ids,
+                    output_geometry=self.output_geometry,
+                    feature_geometry=self.feature_geometry,
+                    dtype=self.query_dtype,
+                ).to(device=planes.xy.device)
                 chunk_stencils_cpu = self._chunk_stencils(canonical_ids)
                 self._operation_counters["query_stencil_voxel_count"] += int(
                     3 * (stop - start)
                 )
                 self._operation_counters["query_stencil_bytes"] += int(
                     canonical_ids.numel() * canonical_ids.element_size()
+                    + chunk_coordinates.numel() * chunk_coordinates.element_size()
                     + sum(
                         value.numel() * value.element_size()
                         for stencil in chunk_stencils_cpu.values()
@@ -1159,7 +1248,7 @@ class PFGRQueryLattice:
                         )
                     )
                 )
-                chunk_stencils = {
+                _chunk_stencils = {
                     name: self._move_stencil(stencil, planes.xy.device)
                     for name, stencil in chunk_stencils_cpu.items()
                 }
@@ -1181,6 +1270,12 @@ class PFGRQueryLattice:
                     )
             else:
                 chunk_ids = voxel_ids_dhw[start:stop]
+                chunk_coordinates = self._feature_coordinates(
+                    chunk_ids.to(device="cpu"),
+                    output_geometry=self.output_geometry,
+                    feature_geometry=self.feature_geometry,
+                    dtype=self.query_dtype,
+                ).to(device=planes.xy.device)
                 linear = (
                     chunk_ids[:, 0] * (height * width)
                     + chunk_ids[:, 1] * width
@@ -1199,7 +1294,23 @@ class PFGRQueryLattice:
                     )
                     for name, stencil in materialized.items()
                 }
-                chunk_stencils = {
+                self._operation_counters["query_stencil_voxel_count"] += int(
+                    3 * (stop - start)
+                )
+                self._operation_counters["query_stencil_bytes"] += int(
+                    chunk_ids.numel() * chunk_ids.element_size()
+                    + chunk_coordinates.numel() * chunk_coordinates.element_size()
+                    + sum(
+                        value.numel() * value.element_size()
+                        for stencil in chunk_stencils_cpu.values()
+                        for value in (
+                            stencil.neighbour_indices,
+                            stencil.weights,
+                            stencil.valid,
+                        )
+                    )
+                )
+                _chunk_stencils = {
                     name: self._move_stencil(stencil, planes.xy.device)
                     for name, stencil in chunk_stencils_cpu.items()
                 }
@@ -1221,8 +1332,13 @@ class PFGRQueryLattice:
                     )
             queried = torch.cat(
                 tuple(
-                    self._query_plane(getattr(planes, name), chunk_stencils[name])
-                    for name in PLANE_NAMES
+                    self._query_plane_grid(
+                        getattr(planes, name),
+                        chunk_coordinates,
+                        row_axis=(1, 0, 0)[index],
+                        column_axis=(2, 2, 1)[index],
+                    )
+                    for index, name in enumerate(PLANE_NAMES)
                 ),
                 dim=-1,
             )
