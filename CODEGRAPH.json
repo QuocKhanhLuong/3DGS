@@ -101,6 +101,65 @@
         "src/smagm/features/point_guided/training.py"
       ]
     },
+    "pfgr_lite": {
+      "purpose": "Additive PFGR-Lite W1 static composition, typed contracts, provenance, and geometry seam; canonical W2 query/teacher and later stages remain separately owned.",
+      "entrypoints": [
+        "src/smagm/features/point_guided/pfgr_lite/__init__.py",
+        "src/smagm/features/point_guided/pfgr_lite/types.py",
+        "src/smagm/features/point_guided/pfgr_lite/config.py",
+        "src/smagm/features/point_guided/pfgr_lite/provenance.py",
+        "src/smagm/features/point_guided/pfgr_lite/static_geometry.py",
+        "src/smagm/features/point_guided/pfgr_lite/static_synthesis.py",
+        "src/smagm/features/point_guided/pfgr_lite/model.py"
+      ],
+      "read_paths": [
+        "AGENTS.md",
+        "docs/implementation/PFGR_LITE_IMPLEMENTATION_PLAN.md",
+        "docs/implementation/PFGR_LITE_INTERFACE_AMENDMENTS.md",
+        "docs/architecture/POINT_GUIDED_FRONTEND.md",
+        "src/smagm/features/point_guided/model.py",
+        "src/smagm/features/point_guided/contracts.py",
+        "src/smagm/features/point_guided/config.py",
+        "src/smagm/features/point_guided/medicalnet_resnet10.py",
+        "src/smagm/features/point_guided/semantic_prior.py",
+        "src/smagm/features/point_guided/state_init.py",
+        "src/smagm/features/point_guided/updater.py",
+        "src/smagm/features/point_guided/decoder.py",
+        "src/smagm/features/point_guided/spectral_query.py",
+        "tests/features/point_guided/test_frontend_forward.py",
+        "tests/test_codegraph.py"
+      ],
+      "write_paths": [
+        "AGENTS.md",
+        "CODEGRAPH.json",
+        "CODEBASE.md",
+        "docs/architecture/POINT_GUIDED_FRONTEND.md",
+        "src/smagm/features/point_guided/__init__.py",
+        "src/smagm/features/point_guided/model.py",
+        "src/smagm/features/point_guided/pfgr_lite/__init__.py",
+        "src/smagm/features/point_guided/pfgr_lite/types.py",
+        "src/smagm/features/point_guided/pfgr_lite/config.py",
+        "src/smagm/features/point_guided/pfgr_lite/provenance.py",
+        "src/smagm/features/point_guided/pfgr_lite/static_geometry.py",
+        "src/smagm/features/point_guided/pfgr_lite/static_synthesis.py",
+        "src/smagm/features/point_guided/pfgr_lite/model.py",
+        "tests/features/point_guided/pfgr_lite/test_contracts.py",
+        "tests/features/point_guided/pfgr_lite/test_base.py",
+        "tests/features/point_guided/pfgr_lite/test_provenance.py"
+      ],
+      "blocked_paths": [
+        "src/smagm/features/point_guided/pfgr_lite/footprint.py",
+        "src/smagm/features/point_guided/pfgr_lite/sparse_write.py",
+        "src/smagm/features/point_guided/pfgr_lite/teacher.py",
+        "src/smagm/features/point_guided/pfgr_lite/stages.py",
+        "src/smagm/features/point_guided/pfgr_lite/value_bank.py",
+        "src/smagm/features/point_guided/pfgr_lite/value_net.py",
+        "src/smagm/features/point_guided/pfgr_lite/action_proposal.py",
+        "src/smagm/features/point_guided/pfgr_lite/policy.py",
+        "src/smagm/features/point_guided/pfgr_lite/checkpoint.py",
+        "src/smagm/features/point_guided/pfgr_lite/inference.py"
+      ]
+    },
     "trajectory": {
       "purpose": "Maintain or audit completed Gate C C1-C7: dynamic tri-plane state, state-dependent reward, explicit reward-cost utility, adaptive selection, local updates, compact physical write-back, and trajectory composition. Gate D D1 and Gate E are complete; Gate-F ownership is separate and Gate-G G1-G4 is separately active.",
       "entrypoints": [

@@ -281,3 +281,40 @@ Use `python scripts/codegraph.py --task <frontend|medicalnet|data-boundary-audit
 before opening files. The policy grants the smallest task-specific read/write
 set and explicitly blocks legacy routing, training, anchor, field, memory, and
 evaluation packages from frontend work.
+
+## Additive PFGR-Lite W1 boundary
+
+PFGR-Lite is an additive, separately versioned implementation under
+`src/smagm/features/point_guided/pfgr_lite/`. Its W1 composition wraps a
+legacy `PointGuidedMRIModel` created without `TrajectoryConfig`, calls the
+private four-result shared-feature seam exactly once, and computes
+graph-preserving `Z0` while ordered observations and the shallow/Layer1/deep
+`MedicalNetFeatures` bundle are alive. The context stores only target-free
+typed frontend evidence, mask/geometry provenance, and owned 32-channel
+initial planes; `initialize_state` clones those planes without detaching.
+
+The static heads are explicitly versioned `b0_legacy_v1`,
+`b1_multiscale_v1`, `b2_ordered_multiscale_v1`, and `b_light_ordered_v1`.
+B1 and B2 instantiate equal-width/equal-depth source-slot projections; B1
+feeds those slots with explicit zeros while B2 uses ordered source samples at
+live affine-aware feature-cell centres. Static geometry derives centre
+lattices from every live Conv/Pool/residual transform and supports full RAS
+rotation, shear, anisotropic spacing, translation, and uneven shapes. The
+existing prepool B/A branch remains unchanged and no target/output bypass is
+available.
+
+`PFGRLiteModel.decode_final` deliberately requires W2's canonical
+`PFGRQueryLattice` injection. W2 must provide an object with
+`build(output_geometry, feature_geometry, query_dtype, build_chunk_size)` and
+the resulting `query(state.planes, voxel_ids_dhw, chunk_size=...) -> [Q,96]`
+(or `[B,Q,96]`) callable; the existing decoder MLP is reused on those query
+features. There is no silent legacy-query fallback, so this standalone W1
+package remains target-free until the explicit W2 dependency checkpoint.
+
+PFGR declarations/configurations are frozen under `pfgr-lite-config-v1`,
+with N=2048, state width 32, correction width 96, write scale 0.1, fixed
+4-mm support/2-mm displacement, FP32 production, FP64 test mode, and policy
+budgets 0/1/2/4. `ProducerCompatibility` excludes V architecture/weights,
+fit settings, calibration, CLI/metrics, and a bare Git SHA; `ValueFitIdentity`
+and `CalibrationIdentity` bind those separately. Synthetic/untrained
+MedicalNet provenance is reported honestly and never mints a real-data claim.

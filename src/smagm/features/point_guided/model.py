@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from contextlib import contextmanager, nullcontext
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 import torch
 from torch import nn
@@ -14,6 +14,7 @@ from .config import PointGuidedConfig
 from .contracts import FrontendOutput, PointSpectralEvidence, VolumeGeometry
 from .cross_plane_consistency import CrossPlaneConsistency
 from .decoder import ImplicitTriPlaneDecoder, ReconstructionOutput
+from .medicalnet_resnet10 import MedicalNetFeatures
 from .points import DeterministicPointInitializer
 from .pou import SparseSemanticPoU
 from .refinement import PointRefiner
@@ -23,13 +24,13 @@ from .spectral_query import FeatureGridGeometry, SpectralPointQuery, derive_feat
 from .reward import GateBDescriptorContext
 from .trajectory import AdaptiveRewardCostTrajectory, FrontendTrajectoryOutput, RouteAvailabilityPolicy
 from .trajectory_cost import TrajectoryConfig
-from .training_objective import (
-    GateESupervisionContext,
-    SupervisionConfig,
-    TrainingObjectiveResult,
-    _compute_training_objective,
-)
 from .triplane_projection import BaseTriPlaneProjector
+
+if TYPE_CHECKING:
+    # Gate-E owns the target-bearing objective and must not be imported by a
+    # target-free frontend import.  Runtime imports stay local to the two
+    # explicit Gate-E methods below.
+    from .training_objective import GateESupervisionContext, SupervisionConfig, TrainingObjectiveResult
 
 
 def _stage_scope(stage_timer: Any | None, name: str):
@@ -110,14 +111,14 @@ class PointGuidedMRIModel(nn.Module):
             return geometry
         return VolumeGeometry.from_spacing(spatial_shape_dhw, spacing_mm)
 
-    def _forward_frontend_with_gate_b_context(
+    def _forward_frontend_with_gate_b_context_and_features(
         self,
         x: torch.Tensor,
         brain_mask: torch.Tensor | None = None,
         spacing_mm: Sequence[float] = (1.0, 1.0, 1.0),
         *,
         voxel_to_ras_mm: Sequence[Sequence[float]] | None = None,
-    ) -> tuple[FrontendOutput, GateBDescriptorContext, FeatureGridGeometry]:
+    ) -> tuple[FrontendOutput, GateBDescriptorContext, FeatureGridGeometry, MedicalNetFeatures]:
         """Run Phase 1-7 once and retain only private descriptors for Gate C.
 
         ``brain_mask`` is an optional binary tensor of shape ``[B, 1, D, H, W]``
@@ -193,7 +194,33 @@ class PointGuidedMRIModel(nn.Module):
                 q_yz=consistency.q_yz,
             ),
             feature_grid_geometry,
+            features,
         )
+
+    def _forward_frontend_with_gate_b_context(
+        self,
+        x: torch.Tensor,
+        brain_mask: torch.Tensor | None = None,
+        spacing_mm: Sequence[float] = (1.0, 1.0, 1.0),
+        *,
+        voxel_to_ras_mm: Sequence[Sequence[float]] | None = None,
+    ) -> tuple[FrontendOutput, GateBDescriptorContext, FeatureGridGeometry]:
+        """Compatibility wrapper preserving the historical three-result seam.
+
+        PFGR-Lite uses the private four-result companion above so its static
+        head can consume all three already-emitted MedicalNet lattices.  The
+        public/legacy helper intentionally drops the local feature bundle and
+        therefore retains its old return shape, state-dict ownership, and
+        traversal behaviour.
+        """
+
+        output, descriptors, geometry, _features = self._forward_frontend_with_gate_b_context_and_features(
+            x,
+            brain_mask,
+            spacing_mm,
+            voxel_to_ras_mm=voxel_to_ras_mm,
+        )
+        return output, descriptors, geometry
 
     def forward_frontend(
         self,
@@ -400,6 +427,8 @@ class PointGuidedMRIModel(nn.Module):
                 ),
                 geometry=output.geometry,
             )
+        from .training_objective import GateESupervisionContext
+
         return GateESupervisionContext(
             frontend=output,
             _trace=trace,
@@ -449,6 +478,8 @@ class PointGuidedMRIModel(nn.Module):
                 "Gate-E context was produced by a different PointGuidedMRIModel; "
                 "use the context only with its producing model"
             )
+        from .training_objective import _compute_training_objective
+
         return _compute_training_objective(
             context,
             target_t1ce,

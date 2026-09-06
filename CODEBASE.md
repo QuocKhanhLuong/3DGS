@@ -98,3 +98,18 @@ research code, not a dependency of the new point-guided model.
 
 `CODEGRAPH.json` is the access-control map. Resolve one task before reading or
 editing code with `python scripts/codegraph.py --task <name>`.
+
+## Additive PFGR-Lite frontend
+
+`src/smagm/features/point_guided/pfgr_lite/` is the separately versioned
+PFGR-Lite W1 package. Its typed declarations/configuration/provenance are
+target-free and lazy; `PFGRLiteModel` wraps the legacy frontend without a
+trajectory or RewardNet, consumes one private four-result MedicalNet seam, and
+produces graph-preserving static B0/B1/B2/B-light `Z0` planes from true
+shallow/Layer1/deep feature-cell lattices. `initialize_state` clones Z0
+without detach. `decode_final` requires W2's canonical query-lattice
+injection and never falls back to the legacy query path.
+
+Run `python scripts/codegraph.py --task pfgr_lite` for the additive read/write
+scope. W2-W5 modules are intentionally absent from that task and remain
+owned by later workers; passing W1 CPU tests is software evidence only.

@@ -213,3 +213,22 @@ Add small CPU synthetic tests under `tests/features/point_guided/`. Run the
 smallest affected test file first, then the frontend smoke test, `compileall`,
 and `git diff --check`. A pass is software evidence only, not reconstruction,
 clinical, or novelty validation.
+
+## PFGR-Lite additive W1 navigation
+
+PFGR-Lite W1 is scoped to `src/smagm/features/point_guided/pfgr_lite/` plus
+the bounded lazy-export/private shared-feature seam and its three focused CPU
+test files. The package is additive: legacy E0/E1/E2 frontend, Gate-C/D/E
+modules, and existing public outputs/state dictionaries remain unchanged.
+`PFGRLiteModel` constructs the legacy frontend without `TrajectoryConfig`,
+uses one shared MedicalNet traversal, computes B0/B1/B2/B-light static Z0 on
+live multi-scale centre lattices, and fails closed in `decode_final` until W2
+injects the canonical `PFGRQueryLattice` (`build(...)` plus
+`query(state, voxel_ids_dhw, chunk_size=...)`).
+
+Use `python scripts/codegraph.py --task pfgr_lite` before PFGR work. The task
+declares only W1 paths as writable and blocks W2 footprint/sparse-write/
+teacher, W3 stage/bank/value, and W4 proposal/policy/checkpoint modules.
+Producer compatibility excludes V fit/calibration and bare Git SHA; those are
+separate provenance identities. Synthetic/untrained MedicalNet state is
+always labelled as such and does not support a real-data or clinical claim.
