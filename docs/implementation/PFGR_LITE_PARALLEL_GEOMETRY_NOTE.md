@@ -36,3 +36,24 @@ files, declare competing shared types, or commit while another worker can
 stage changes. The principal serializes explicit-path commits and reviews
 both workstreams before integration. All implementation workers remain
 `gpt-5.6-luna` with `max` reasoning; the principal remains Astra High.
+
+## Independent W5a evidence packaging
+
+W5a may also implement the standard-library evidence packaging helper while
+W1/W2a work. Exclusive ownership is
+`src/smagm/features/point_guided/pfgr_lite/artifacts.py` and
+`tests/features/point_guided/pfgr_lite/test_artifacts.py`. Its stable public
+interface is `package_evidence(run_dirs, destination) -> dict`, where input
+directories are existing run artifacts and `destination` is a new directory
+that must not already exist. The returned manifest describes a whitelist
+archive, included-file hashes and exclusions. It does not consume PFGR model,
+action, bank tensors or calibration types. The later W5 CLI wraps this helper
+with the already frozen `package --run-dir ... --output-root ... --run-name`
+command. Only reviewed metadata, metrics, tests and traceback evidence may be
+included; patient volumes, predictions, checkpoints, secrets and raw target
+banks remain excluded. Reject symlink escapes, oversized/unknown payloads and
+existing destinations. No CLI/service completion is claimed by this helper.
+
+W5a has no commit/staging permission until the principal grants a serialized
+slot. W1, W2a and W5a have disjoint owned paths; action/teacher/policy/training
+integration remains gated on corrected W1 acceptance.
