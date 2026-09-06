@@ -7,10 +7,13 @@ configuration import cannot pull in Gate-E teacher/objective or CLI modules.
 
 from .config import (
     EffectTeacherConfig,
+    FRONTEND_CONFIG_SCHEMA,
     PFGRLiteConfig,
     PFGRPolicyConfig,
     StaticSynthesisConfig,
     ValueModelConfig,
+    frontend_config_from_dict,
+    frontend_config_to_dict,
 )
 from .provenance import (
     CalibrationIdentity,
@@ -78,6 +81,7 @@ __all__ = [
     "Decision",
     "DescriptorBundle",
     "EffectTeacherConfig",
+    "FRONTEND_CONFIG_SCHEMA",
     "FeatureLattice",
     "GainCalibration",
     "GainLabel",
@@ -117,4 +121,6 @@ __all__ = [
     "resample_plane_between_lattices",
     "sample_source_to_lattice",
     "tensor_digest",
+    "frontend_config_from_dict",
+    "frontend_config_to_dict",
 ]

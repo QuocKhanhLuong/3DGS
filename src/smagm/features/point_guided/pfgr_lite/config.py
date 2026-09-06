@@ -11,7 +11,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields, is_dataclass
 import json
 import math
+from pathlib import Path
 from typing import Any, Literal, Mapping
+
+from ..config import PointGuidedConfig
 
 
 PFGR_CONFIG_SCHEMA = "pfgr-lite-config-v1"
@@ -19,6 +22,7 @@ STATIC_CONFIG_SCHEMA = "pfgr-lite-static-synthesis-v1"
 POLICY_CONFIG_SCHEMA = "pfgr-lite-policy-v1"
 VALUE_CONFIG_SCHEMA = "pfgr-lite-value-model-v1"
 TEACHER_CONFIG_SCHEMA = "pfgr-lite-effect-teacher-v1"
+FRONTEND_CONFIG_SCHEMA = "pfgr-lite-frontend-config-v1"
 
 
 def _positive_int(name: str, value: int) -> int:
@@ -47,7 +51,51 @@ def _canonical(value: Any) -> Any:
         return {str(key): _canonical(value[key]) for key in sorted(value, key=lambda item: str(item))}
     if isinstance(value, (tuple, list)):
         return [_canonical(item) for item in value]
+    if isinstance(value, Path):
+        return str(value)
     return value
+
+
+def frontend_config_to_dict(config: PointGuidedConfig) -> dict[str, Any]:
+    """Serialize the legacy observation frontend as a separate PFGR artifact.
+
+    ``PFGRLiteConfig`` deliberately contains only the four accepted PFGR
+    declarations and operational fields.  The legacy ``PointGuidedConfig``
+    therefore travels in this explicitly versioned sidecar instead of an
+    untyped aggregate field that could be silently ignored by a model loader.
+    """
+
+    if not isinstance(config, PointGuidedConfig):
+        raise TypeError("frontend config must be PointGuidedConfig")
+    return {
+        "schema_version": FRONTEND_CONFIG_SCHEMA,
+        "config": _canonical(config),
+    }
+
+
+def frontend_config_from_dict(values: Mapping[str, Any]) -> PointGuidedConfig:
+    """Load and strictly validate a serialized frontend sidecar."""
+
+    if not isinstance(values, Mapping):
+        raise TypeError("frontend config artifact must be a mapping")
+    allowed = {"schema_version", "config"}
+    unknown = set(values) - allowed
+    if unknown:
+        raise ValueError(f"unknown frontend config artifact keys: {sorted(unknown)}")
+    if values.get("schema_version") != FRONTEND_CONFIG_SCHEMA:
+        raise ValueError(f"schema_version must be {FRONTEND_CONFIG_SCHEMA!r}")
+    payload = values.get("config")
+    if not isinstance(payload, Mapping):
+        raise TypeError("frontend config artifact 'config' must be a mapping")
+    field_names = {item.name for item in fields(PointGuidedConfig)}
+    unknown_fields = set(payload) - field_names
+    if unknown_fields:
+        raise ValueError(f"unknown frontend config keys: {sorted(unknown_fields)}")
+    parsed = dict(payload)
+    for key in ("input_modalities", "directional_offsets_mm"):
+        if key in parsed:
+            parsed[key] = tuple(parsed[key])
+    return PointGuidedConfig(**parsed)
 
 
 @dataclass(frozen=True)
@@ -289,7 +337,6 @@ class PFGRLiteConfig:
     # relabelled as production when this capability is enabled.
     engineering_only: bool = False
     observation_normalization: str = "pfgr-observation-normalization-v1"
-    point_guided: Any | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != PFGR_CONFIG_SCHEMA:
@@ -359,6 +406,7 @@ class PFGRLiteConfig:
 
 __all__ = [
     "EffectTeacherConfig",
+    "FRONTEND_CONFIG_SCHEMA",
     "PFGRLiteConfig",
     "PFGRPolicyConfig",
     "StaticSynthesisConfig",
@@ -368,4 +416,6 @@ __all__ = [
     "POLICY_CONFIG_SCHEMA",
     "VALUE_CONFIG_SCHEMA",
     "TEACHER_CONFIG_SCHEMA",
+    "frontend_config_from_dict",
+    "frontend_config_to_dict",
 ]

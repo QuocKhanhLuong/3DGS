@@ -20,7 +20,10 @@ from smagm.features.point_guided.pfgr_lite import (
     ValueFitIdentity,
     PFGRState,
     ProducerCompatibility,
+    frontend_config_from_dict,
+    frontend_config_to_dict,
 )
+from smagm.features.point_guided import PointGuidedConfig
 from smagm.features.point_guided.state_init import DynamicTriPlanes
 
 
@@ -36,6 +39,23 @@ def test_locked_pfgr_configuration_defaults_and_schema() -> None:
     assert config.value.input_variants == (126, 222, 270, 366)
     assert config.teacher.mode == "iid_fixed_q"
     assert config.teacher.q_draws == 1024
+
+
+def test_frontend_sidecar_roundtrip_is_explicit_and_strict() -> None:
+    frontend = PointGuidedConfig(num_semantic_classes=3, num_points=2048)
+    payload = frontend_config_to_dict(frontend)
+    assert payload["schema_version"] == "pfgr-lite-frontend-config-v1"
+    assert frontend_config_from_dict(payload) == frontend
+    with pytest.raises(ValueError, match="unknown frontend config artifact keys"):
+        frontend_config_from_dict({**payload, "unexpected": True})
+    with pytest.raises(ValueError, match="unknown frontend config keys"):
+        frontend_config_from_dict({
+            **payload,
+            "config": {**payload["config"], "unexpected": True},
+        })
+    # The aggregate contract does not carry an untyped legacy frontend field.
+    with pytest.raises(TypeError, match="point_guided"):
+        PFGRLiteConfig(point_guided={"num_points": 2048})
 
 
 @pytest.mark.parametrize(

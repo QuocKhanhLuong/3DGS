@@ -89,13 +89,6 @@ class PFGRLiteModel(nn.Module):
             raise TypeError("config must be PFGRLiteConfig")
         if frontend_config is not None and not isinstance(frontend_config, PointGuidedConfig):
             raise TypeError("frontend_config must be PointGuidedConfig")
-        configured_frontend = self.config.point_guided
-        if configured_frontend is not None and not isinstance(configured_frontend, PointGuidedConfig):
-            raise TypeError("PFGRLiteConfig.point_guided must be PointGuidedConfig when supplied")
-        if frontend_config is None and isinstance(configured_frontend, PointGuidedConfig):
-            frontend_config = configured_frontend
-        elif frontend_config is not None and isinstance(configured_frontend, PointGuidedConfig) and frontend_config != configured_frontend:
-            raise ValueError("frontend_config disagrees with PFGRLiteConfig.point_guided")
         if frontend_config is None:
             frontend_config = PointGuidedConfig(
                 num_semantic_classes=3,
