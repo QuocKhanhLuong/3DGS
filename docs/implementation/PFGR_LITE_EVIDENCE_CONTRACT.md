@@ -100,3 +100,27 @@ All additions are independently reviewed and tested before acceptance.
 W4 requests a serialized commit slot for its additional owned file. W2 and
 W3a must not edit it concurrently. CLI, real-data execution, GPU numerical
 evidence and trained improvement remain pending.
+
+## Parallel diagnostic trace clarification
+
+W4 review found that rebinding an initial proposal batch to successive state
+digests fabricates freshly scored actions. The parallel control must retain
+the original initial-state proposal/action identities throughout compound
+execution. It is an explicit diagnostic exception to sequential freshness,
+not permission to weaken `apply_scored_action` stale-action rejection.
+
+W4 additionally owns a narrow `ParallelBehaviorTrace` declaration in
+`types.py`, plus optional `PFGRRouteResult.parallel_trace`. It contains the
+original initial state and proposal batch, ordered selected original action
+digests, actual intermediate/final states, and effective policy identity.
+Validate initial state/proposal bindings, unique selected rows, unchanged
+producer/context, state order and exact selected delta provenance. The
+compound writer may apply those stored deltas without re-querying or calling
+U. It must retain the original action IDs; it may not mint sequential
+proposal digests for intermediate states.
+
+Parallel results carry this trace and no sequential `completed_trace`.
+Sequential teacher/calibration/bank consumers reject a parallel trace.
+Diagnostic interaction evaluation may explicitly compare compound final
+gain with independently measured initial-state single-action gains. This
+clarification changes neither the writer nor the correction family.
