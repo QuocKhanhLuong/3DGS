@@ -124,3 +124,33 @@ Sequential teacher/calibration/bank consumers reject a parallel trace.
 Diagnostic interaction evaluation may explicitly compare compound final
 gain with independently measured initial-state single-action gains. This
 clarification changes neither the writer nor the correction family.
+
+## Producer-stage receipt
+
+W3a validates and stores one `stage_provenance` mapping; W4 checkpoints
+preserve the same mapping and W3b emits it from actual stage measurements.
+Its exact fields are `schema_version=pfgr-lite-producer-stage-v1`,
+`stage=updater`, `spectral_arm` (`u_plus_spectral` or `verified_prior`),
+`completed`, `producer_compatibility_hash`, `projector_before_hash`,
+`projector_after_hash`, `projector_gradient_evidence`,
+`projector_update_evidence`, `initialization_id`, `checkpoint_id`, `source_id`,
+`split_role_hash`, `role_manifest_digest`, `verified_prior_receipt`, and
+`verified_prior_receipt_hash`. The checkpoint ID identifies the input/parent
+snapshot; it is not a circular checksum of the output artifact.
+
+Gradient evidence contains finite nonnegative `l2_norm_max`, integer
+`nonzero_steps` and `measured_steps`. Update evidence contains integer
+`changed_parameter_count` and `optimizer_steps`. MAIN U-plus-spectral
+evidence requires completion, positive measured gradient/update evidence,
+different before/after projector hashes, and an after hash matching the
+current producer's spectral projector dependency. These are software checks
+of a trained producer, not evidence of useful reconstruction capacity.
+
+For a verified prior, the original U-plus-spectral receipt and its canonical
+hash are required and validated, including the same final projector hash.
+A magic `not_applicable` string is insufficient. The current outer receipt
+binds current U and other producers; the original receipt records ancestry.
+Both prior fields are null for a direct U-plus-spectral stage. Engineering
+fixtures may omit this receipt and remain engineering-only. Static-only
+checkpoints carry explicit static-stage provenance and cannot supply a MAIN
+ValueBank until useful spectral producer training is documented as above.
