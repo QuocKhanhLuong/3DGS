@@ -39,6 +39,7 @@ if TYPE_CHECKING:
         CompletedBehaviorTrace,
         GainLabel,
         OperationCounters,
+        PFGRState,
     )
 
 TEACHER_VERSION = "pfgr-lite-teacher-v1"
@@ -630,6 +631,118 @@ def validate_target(
         label_definition=label_definition,
         trace_route_hash=trace_route_hash,
     )
+
+
+DIAGNOSTIC_GAIN_SCHEMA = "pfgr-lite-diagnostic-gain-v1"
+DIAGNOSTIC_GAIN_SCOPES = ("oracle_state", "parallel_initial_state")
+
+
+@dataclass(frozen=True)
+class DiagnosticGainResult:
+    """Privileged effect label bound to one *actual* oracle state.
+
+    This wrapper is intentionally separate from :class:`GainLabel` and from
+    ``CompletedBehaviorTrace``.  It retains the original immutable state and
+    proposal row so a caller cannot accidentally rebase a measurement onto a
+    later state, while ``as_dict`` emits only immutable identities and the
+    detached label metadata (never target tensors or a target-free route).
+    Both ``oracle_state`` and ``parallel_initial_state`` are privileged
+    diagnostic scopes; deployment/value-bank adapters must reject either.
+    """
+
+    action_id: str
+    context_id: str
+    state_version: int
+    state_digest: str
+    proposal_digest: str
+    label: GainLabel
+    target_context_digest: str
+    action: ActionProposal
+    proposal: object
+    state: PFGRState
+    scope: str = "oracle_state"
+    privileged: bool = True
+    schema_version: str = DIAGNOSTIC_GAIN_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema_version != DIAGNOSTIC_GAIN_SCHEMA:
+            raise ValueError("unknown DiagnosticGainResult schema")
+        if self.scope not in DIAGNOSTIC_GAIN_SCOPES:
+            raise ValueError(
+                "DiagnosticGainResult scope must be oracle_state or parallel_initial_state"
+            )
+        if self.privileged is not True:
+            raise ValueError("DiagnosticGainResult must remain privileged")
+        if not isinstance(self.action_id, str) or not self.action_id:
+            raise ValueError("action_id must be nonempty")
+        if not isinstance(self.context_id, str) or not self.context_id:
+            raise ValueError("context_id must be nonempty")
+        if not isinstance(self.state_version, int) or self.state_version < 0:
+            raise ValueError("state_version must be nonnegative")
+        for name in (
+            "state_digest",
+            "proposal_digest",
+            "target_context_digest",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{name} must be nonempty")
+        from .types import ActionProposal, GainLabel, PFGRState
+
+        if not isinstance(self.action, ActionProposal):
+            raise TypeError("action must be an ActionProposal")
+        if not isinstance(self.state, PFGRState):
+            raise TypeError("state must be a PFGRState")
+        if not isinstance(self.label, GainLabel):
+            raise TypeError("label must be a GainLabel")
+        if self.action.action_id != self.action_id:
+            raise ValueError("diagnostic action identity does not match action row")
+        if self.action.context_id != self.context_id or self.state.context_id != self.context_id:
+            raise ValueError("diagnostic context identity does not match state/action")
+        if self.action.state_version != self.state_version or self.state.state_version != self.state_version:
+            raise ValueError("diagnostic state version does not match state/action")
+        if self.action.state_digest != self.state_digest or self.state.state_digest != self.state_digest:
+            raise ValueError("diagnostic state digest does not match state/action")
+        if self.label.action_id != self.action_id or self.label.context_id != self.context_id:
+            raise ValueError("diagnostic label identity does not match action")
+        if self.label.state_version != self.state_version:
+            raise ValueError("diagnostic label state version does not match action")
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a bounded JSON-ready identity/label mapping."""
+
+        label_fields = (
+            "action_id",
+            "context_id",
+            "state_version",
+            "raw_gain",
+            "benefit",
+            "harm",
+            "mask_count",
+            "role",
+            "q_draws",
+            "seed",
+            "variance",
+            "standard_error",
+            "footprint_voxels",
+            "valid_masked_contributions",
+            "sampler_law",
+            "label_definition",
+        )
+        label = {name: getattr(self.label, name) for name in label_fields}
+        return {
+            "schema_version": self.schema_version,
+            "scope": self.scope,
+            "privileged": self.privileged,
+            "action_id": self.action_id,
+            "context_id": self.context_id,
+            "state_version": self.state_version,
+            "state_digest": self.state_digest,
+            "proposal_digest": self.proposal_digest,
+            "target_context_digest": self.target_context_digest,
+            "action_digest": self.action.action_digest,
+            "label": label,
+        }
 
 
 @dataclass(frozen=True)
@@ -2218,18 +2331,518 @@ def measure_actions(
         return labels
 
 
+def _diagnostic_target_context_digest(target_context: ValidatedTargetContext) -> str:
+    """Digest target-context bytes and metadata without exposing target data."""
+
+    return hashlib.sha256(
+        "|".join(
+            (
+                str(getattr(target_context, "_target_digest", "")),
+                str(getattr(target_context, "_mask_digest", "")),
+                str(getattr(target_context, "_metadata_digest", "")),
+                target_context.version,
+            )
+        ).encode()
+    ).hexdigest()
+
+
+def _measure_state_actions(
+    state: PFGRState,
+    actions: Sequence[ActionProposal],
+    target_context: ValidatedTargetContext,
+    decoder: object,
+    teacher_config: EffectTeacherConfig,
+    *,
+    lattice: PFGRQueryLattice,
+    chunk_size: int = DEFAULT_QUERY_CHUNK_SIZE,
+    candidate_chunk_size: int = 1,
+    seed: int | None = None,
+    observation_context: object | None = None,
+    scope: str = "oracle_state",
+    counters: OperationCounters | None = None,
+) -> tuple[DiagnosticGainResult, ...]:
+    """Measure proposals from one real target-free state for oracle diagnostics.
+
+    Unlike :func:`measure_actions`, this seam deliberately does not accept or
+    construct a ``CompletedBehaviorTrace``.  Every action is validated against
+    the supplied immutable ``PFGRState`` and is evaluated using the shared
+    exact/fixed-Q candidate engine.  ``ValidatedTargetContext.trace_route_hash``
+    must be unset: a diagnostic label is target-aware but route-unbound and can
+    never be laundered into the main deployment/value-bank path.
+    """
+
+    from .config import EffectTeacherConfig
+    from .types import ActionProposal, GainLabel, PFGRState
+
+    if scope not in DIAGNOSTIC_GAIN_SCOPES:
+        raise ValueError(
+            "diagnostic state measurement scope is not an approved privileged scope"
+        )
+    if not isinstance(state, PFGRState):
+        raise TypeError("state must be a PFGRState")
+    if not isinstance(target_context, ValidatedTargetContext):
+        raise TypeError("target_context must be ValidatedTargetContext")
+    if not isinstance(teacher_config, EffectTeacherConfig):
+        raise TypeError("teacher_config must be EffectTeacherConfig")
+    if not isinstance(lattice, PFGRQueryLattice):
+        raise TypeError("lattice must be a PFGRQueryLattice")
+    _positive_int("chunk_size", chunk_size)
+    _positive_int("candidate_chunk_size", candidate_chunk_size)
+    if target_context.trace_route_hash is not None:
+        raise ValueError(
+            "diagnostic oracle-state target context must be route-unbound"
+        )
+    if target_context.engineering_only:
+        if observation_context is not None:
+            raise ValueError(
+                "engineering_only target contexts cannot be paired with observation_context"
+            )
+    elif target_context.observation_context_id is None:
+        raise ValueError(
+            "production target context is missing its ObservationContext binding"
+        )
+    elif observation_context is not None:
+        from .types import ObservationContext
+
+        if not isinstance(observation_context, ObservationContext):
+            raise TypeError("observation_context must be ObservationContext")
+        observation_context.validate_integrity()
+        if observation_context.context_id != target_context.observation_context_id:
+            raise ValueError("observation context identity does not match target context")
+        if (
+            observation_context.producer.compatibility_hash
+            != target_context.observation_context_producer_hash
+        ):
+            raise ValueError(
+                "observation context producer identity does not match target context"
+            )
+        if observation_context.geometry != target_context.output_geometry:
+            raise ValueError("observation context geometry does not match target context")
+        if observation_context.feature_geometry != target_context.feature_geometry:
+            raise ValueError(
+                "observation context feature geometry does not match target context"
+            )
+        if not torch.equal(
+            observation_context.observation_mask, target_context.observation_mask
+        ):
+            raise ValueError("observation context mask does not match target context")
+    if target_context.mask_definition != teacher_config.mask_definition:
+        raise ValueError("target context mask definition does not match teacher config")
+    if target_context.label_definition not in {
+        LABEL_DEFINITION,
+        teacher_config.label_definition,
+    }:
+        raise ValueError("target context label definition does not match teacher config")
+    target_context.validate_integrity()
+    state.validate_integrity()
+    if state.context_id != target_context.completed_context_id:
+        raise ValueError("state and target context IDs must match")
+    if tuple(lattice.output_shape_dhw) != tuple(target_context.target.shape[-3:]):
+        raise ValueError("lattice output shape does not match target context")
+    if (
+        target_context.output_geometry is not None
+        and lattice.output_geometry != target_context.output_geometry
+    ):
+        raise ValueError("lattice output affine does not match target context")
+    if (
+        target_context.feature_geometry is not None
+        and lattice.feature_geometry != target_context.feature_geometry
+    ):
+        raise ValueError("lattice feature affine does not match target context")
+    if lattice.query_dtype != state.planes.xy.dtype:
+        raise TypeError("lattice dtype must match diagnostic state planes")
+    actions_list = _coerce_actions(actions)
+    if not actions_list:
+        return ()
+    producer = state.producer
+    if producer is None:  # pragma: no cover - PFGRState constructor rejects this
+        raise ValueError("diagnostic state is missing producer identity")
+    trace_producer_hash = producer.digest
+    expected_label_hash = _expected_label_identity(teacher_config)
+    if producer.label_definition_hash != expected_label_hash:
+        raise ValueError(
+            "teacher label definition is stale or incompatible with diagnostic state"
+        )
+    decoder_identity = _module_digest(decoder)
+    if producer.decoder_hash != decoder_identity:
+        raise ValueError(
+            "decoder weights are stale or incompatible with diagnostic state"
+        )
+    resolved_lattice = lattice
+    resolved_lattice.validate_integrity()
+    target_digest = _diagnostic_target_context_digest(target_context)
+    proposal_digest = hashlib.sha256(
+        "|".join(str(action.action_digest) for action in actions_list).encode()
+    ).hexdigest()
+    records: list[_CandidateProbe] = []
+    with torch.no_grad():
+        for action_index, action in enumerate(actions_list):
+            if not isinstance(action, ActionProposal):
+                raise TypeError("actions must contain ActionProposal rows")
+            action.validate_integrity()
+            if action.context_id != state.context_id or action.context_id != target_context.completed_context_id:
+                raise ValueError("action/state/target context IDs must match")
+            if action.state_version != state.state_version:
+                raise ValueError("diagnostic action state version does not match state")
+            if action.state_digest != state.state_digest:
+                raise ValueError("diagnostic action state digest does not match state")
+            if action.producer_compatibility_hash != trace_producer_hash:
+                raise ValueError("diagnostic action producer identity is stale")
+            if action.updater_producer_hash != producer.updater_hash:
+                raise ValueError("diagnostic action updater producer identity is stale")
+            if action.query_version not in {
+                resolved_lattice.query_version,
+                "pfgr-lite-point-query-v1",
+            }:
+                raise ValueError("diagnostic action query version is stale")
+            if action.query_hash not in {
+                resolved_lattice.geometry_hash,
+                producer.geometry_query_version_hash,
+                POINT_QUERY_HASH,
+            }:
+                raise ValueError("diagnostic action query identity is stale")
+            if action.geometry_hash not in {
+                resolved_lattice.geometry_hash,
+                _expected_geometry_identity(resolved_lattice),
+            }:
+                raise ValueError("diagnostic action geometry identity is stale")
+            if action.writer_version != "compact-writeback-4mm-v1":
+                raise ValueError("diagnostic action writer version is stale")
+            if action.writer_hash != producer.writer_hash:
+                raise ValueError("diagnostic action writer identity is stale")
+            if (
+                action.delta.dtype != state.planes.xy.dtype
+                or action.delta.device != state.planes.xy.device
+            ):
+                raise TypeError("diagnostic action delta must match state dtype/device")
+            if action.point_ras_mm.dtype != state.planes.xy.dtype:
+                raise TypeError("diagnostic action point must match state dtype")
+            footprint = build_footprint(
+                resolved_lattice, action, chunk_size=chunk_size
+            )
+            if counters is not None:
+                counters.add(
+                    candidate_labels=1,
+                    footprint_unique_voxels=footprint.union_size,
+                )
+            records.append(
+                _CandidateProbe(
+                    action=action,
+                    state=state,
+                    footprint=footprint,
+                    action_index=action_index,
+                    ids=footprint.voxel_ids_dhw,
+                    sorted_linear=torch.empty((0,), dtype=torch.long),
+                )
+            )
+        if counters is not None:
+            counters.add(states_labeled=1)
+
+        def _append_label(
+            probe: _CandidateProbe, values: tuple[float, ...]
+        ) -> GainLabel:
+            action = probe.action
+            if teacher_config.mode == "exact_footprint":
+                raw, benefit, harm, valid_count, footprint_count = values
+                return GainLabel(
+                    action_id=action.action_id,
+                    context_id=action.context_id,
+                    state_version=action.state_version,
+                    raw_gain=raw,
+                    benefit=benefit,
+                    harm=harm,
+                    mask_count=target_context.mask_count,
+                    role="exact_footprint",
+                    q_draws=0,
+                    variance=0.0,
+                    standard_error=0.0,
+                    footprint_voxels=int(footprint_count),
+                    valid_masked_contributions=int(valid_count),
+                    sampler_law="exact_union_v1",
+                    label_definition=LABEL_DEFINITION,
+                )
+            (
+                _raw,
+                benefit,
+                harm,
+                valid_count,
+                _unique_count,
+                variance,
+                standard_error,
+                action_seed,
+            ) = values
+            return GainLabel(
+                action_id=action.action_id,
+                context_id=action.context_id,
+                state_version=action.state_version,
+                raw_gain=benefit - harm,
+                benefit=benefit,
+                harm=harm,
+                mask_count=target_context.mask_count,
+                role="iid_fixed_q",
+                q_draws=int(teacher_config.q_draws),
+                seed=int(action_seed),
+                variance=variance,
+                standard_error=standard_error,
+                footprint_voxels=probe.footprint.union_size,
+                valid_masked_contributions=int(valid_count),
+                sampler_law="iid_fixed_q_plane_mixture_c_over_S_v1",
+                label_definition=LABEL_DEFINITION,
+            )
+
+        measured: list[tuple[_CandidateProbe, GainLabel]] = []
+
+        def _single_values(probe: _CandidateProbe) -> tuple[float, ...]:
+            action = probe.action
+            if teacher_config.mode == "exact_footprint":
+                return _evaluate_exact(
+                    resolved_lattice,
+                    probe.footprint,
+                    state.planes,
+                    action,
+                    target_context,
+                    decoder,
+                    chunk_size=chunk_size,
+                    epsilon=float(teacher_config.epsilon),
+                    counters=counters,
+                    state_identity=state.state_digest,
+                    decoder_identity=decoder_identity,
+                )
+            action_seed = _seed_for_action(action, seed, probe.action_index)
+            raw, benefit, harm, valid_count, unique_count, variance, standard_error = _evaluate_fixed_q(
+                resolved_lattice,
+                probe.footprint,
+                state.planes,
+                action,
+                target_context,
+                decoder,
+                q_draws=int(teacher_config.q_draws),
+                seed=action_seed,
+                chunk_size=chunk_size,
+                epsilon=float(teacher_config.epsilon),
+                counters=counters,
+                state_identity=state.state_digest,
+                decoder_identity=decoder_identity,
+            )
+            return (
+                raw,
+                benefit,
+                harm,
+                valid_count,
+                unique_count,
+                variance,
+                standard_error,
+                action_seed,
+            )
+
+        if candidate_chunk_size == 1:
+            for probe in records:
+                measured.append((probe, _append_label(probe, _single_values(probe))))
+        else:
+            for group in _candidate_groups(
+                records,
+                candidate_chunk_size=candidate_chunk_size,
+                dtype=state.planes.xy.dtype,
+            ):
+                estimate = sum(
+                    _candidate_rows_bytes(
+                        int(probe.footprint.union_size), state.planes.xy.dtype
+                    )
+                    for probe in group
+                )
+                if estimate > CANDIDATE_BATCH_MAX_BYTES and len(group) == 1:
+                    probe = group[0]
+                    measured.append((probe, _append_label(probe, _single_values(probe))))
+                    continue
+                if teacher_config.mode == "exact_footprint":
+                    values_batch = _evaluate_exact_candidate_batch(
+                        resolved_lattice,
+                        group,
+                        target_context,
+                        decoder,
+                        chunk_size=chunk_size,
+                        epsilon=float(teacher_config.epsilon),
+                        counters=counters,
+                        decoder_identity=decoder_identity,
+                    )
+                else:
+                    values_batch = _evaluate_fixed_q_candidate_batch(
+                        resolved_lattice,
+                        group,
+                        target_context,
+                        decoder,
+                        q_draws=int(teacher_config.q_draws),
+                        seed=seed,
+                        chunk_size=chunk_size,
+                        epsilon=float(teacher_config.epsilon),
+                        counters=counters,
+                        decoder_identity=decoder_identity,
+                    )
+                measured.extend(
+                    (probe, _append_label(probe, tuple(values)))
+                    for probe, values in zip(group, values_batch)
+                )
+        return tuple(
+            DiagnosticGainResult(
+                action_id=probe.action.action_id,
+                context_id=probe.action.context_id,
+                state_version=state.state_version,
+                state_digest=state.state_digest,
+                proposal_digest=proposal_digest,
+                label=label,
+                target_context_digest=target_digest,
+                action=probe.action,
+                proposal=probe.action,
+                state=state,
+                scope=scope,
+            )
+            for probe, label in measured
+        )
+
+
+def measure_diagnostic_actions(
+    state: PFGRState,
+    actions: Sequence[ActionProposal],
+    target_context: ValidatedTargetContext,
+    decoder: object,
+    teacher_config: EffectTeacherConfig,
+    *,
+    lattice: PFGRQueryLattice,
+    chunk_size: int = DEFAULT_QUERY_CHUNK_SIZE,
+    candidate_chunk_size: int = 1,
+    seed: int | None = None,
+    observation_context: object | None = None,
+    scope: str = "oracle_state",
+    counters: OperationCounters | None = None,
+) -> tuple[DiagnosticGainResult, ...]:
+    """Measure one real state with the privileged ``oracle_state`` scope."""
+
+    if scope != "oracle_state":
+        raise ValueError("measure_diagnostic_actions scope is locked to oracle_state")
+    return _measure_state_actions(
+        state,
+        actions,
+        target_context,
+        decoder,
+        teacher_config,
+        lattice=lattice,
+        chunk_size=chunk_size,
+        candidate_chunk_size=candidate_chunk_size,
+        seed=seed,
+        observation_context=observation_context,
+        scope=scope,
+        counters=counters,
+    )
+
+
+def measure_parallel_actions(
+    parallel_trace: object,
+    selected_actions: Sequence[ActionProposal],
+    target_context: ValidatedTargetContext,
+    decoder: object,
+    teacher_config: EffectTeacherConfig,
+    *,
+    lattice: PFGRQueryLattice,
+    observation_context: object | None = None,
+    chunk_size: int = DEFAULT_QUERY_CHUNK_SIZE,
+    candidate_chunk_size: int = 1,
+    seed: int | None = None,
+    counters: OperationCounters | None = None,
+) -> tuple[DiagnosticGainResult, ...]:
+    """Measure stored parallel actions from their frozen initial state.
+
+    ``ParallelBehaviorTrace`` is validated before any target access.  The
+    selected rows remain bound to the initial state and their stored deltas;
+    no sequential/no-op successor or rebased action is ever constructed.
+    """
+
+    from .types import ActionProposal, ParallelBehaviorTrace
+
+    if not isinstance(parallel_trace, ParallelBehaviorTrace):
+        raise TypeError("parallel_trace must be a ParallelBehaviorTrace")
+    parallel_trace.initial_state.validate_integrity()
+    parallel_trace.proposals.validate_integrity()
+    if parallel_trace.context_id != target_context.completed_context_id:
+        raise ValueError("parallel trace and target context IDs must match")
+    if target_context.trace_route_hash is not None:
+        raise ValueError(
+            "parallel diagnostic target context must be route-unbound"
+        )
+    if not isinstance(selected_actions, Sequence) or isinstance(
+        selected_actions, (str, bytes)
+    ):
+        raise TypeError("selected_actions must be a sequence of ActionProposal rows")
+    rows = {action.action_id: action for action in _coerce_actions(parallel_trace.proposals)}
+    selected = list(selected_actions)
+    if not selected:
+        return ()
+    if len(selected) > len(parallel_trace.selected_action_ids):
+        raise ValueError("selected_actions exceed the frozen parallel selection")
+    selected_ids = set(parallel_trace.selected_action_ids)
+    for action in selected:
+        if not isinstance(action, ActionProposal):
+            raise TypeError("selected_actions must contain ActionProposal rows")
+        action.validate_integrity()
+        stored = rows.get(action.action_id)
+        if (
+            stored is None
+            or action.action_id not in selected_ids
+            or stored.action_digest != action.action_digest
+        ):
+            raise ValueError(
+                "selected parallel action is not the stored initial proposal row"
+            )
+        if action.action_digest not in parallel_trace.selected_action_digests:
+            raise ValueError("selected parallel action digest is stale")
+        if action.state_version != parallel_trace.initial_state.state_version:
+            raise ValueError("parallel selected action must remain initial-state bound")
+        if action.state_digest != parallel_trace.initial_state.state_digest:
+            raise ValueError("parallel selected action state digest is stale")
+    if target_context.mask_definition != teacher_config.mask_definition:
+        raise ValueError("target context mask definition does not match teacher config")
+    target_context.validate_integrity()
+    measured = _measure_state_actions(
+        parallel_trace.initial_state,
+        selected,
+        target_context,
+        decoder,
+        teacher_config,
+        lattice=lattice,
+        chunk_size=chunk_size,
+        candidate_chunk_size=candidate_chunk_size,
+        seed=seed,
+        observation_context=observation_context,
+        scope="parallel_initial_state",
+        counters=counters,
+    )
+    expected_delta_digests = set(parallel_trace.selected_delta_digests)
+    from .types import tensor_digest
+
+    if any(
+        tensor_digest(result.action.delta, name="delta") not in expected_delta_digests
+        for result in measured
+    ):
+        raise ValueError("parallel diagnostic measured an unbound action delta")
+    return measured
+
+
 __all__ = [
     "CANDIDATE_BATCH_MAX_BYTES",
     "DEFAULT_CHARBONNIER_EPSILON",
+    "DIAGNOSTIC_GAIN_SCHEMA",
+    "DIAGNOSTIC_GAIN_SCOPES",
     "LABEL_DEFINITION",
     "PROBE_CACHE_MAX_BYTES",
     "PROBE_CACHE_MAX_ENTRIES",
     "TARGET_CONTEXT_VERSION",
     "TEACHER_VERSION",
+    "DiagnosticGainResult",
     "ValidatedTargetContext",
     "clear_target_validation_stats",
     "clear_teacher_cache",
     "measure_actions",
+    "measure_diagnostic_actions",
+    "measure_parallel_actions",
     "reference_full_write",
     "target_validation_stats",
     "teacher_cache_stats",

@@ -30,10 +30,12 @@ from smagm.features.point_guided.pfgr_lite.sparse_write import (
     reference_full_write,
 )
 from smagm.features.point_guided.pfgr_lite.teacher import (
+    DiagnosticGainResult,
     ValidatedTargetContext,
     clear_target_validation_stats,
     clear_teacher_cache,
     measure_actions,
+    measure_diagnostic_actions,
     target_validation_stats,
     validate_target,
 )
@@ -169,6 +171,107 @@ def test_exact_teacher_gain_matches_full_dense_reference() -> None:
     dense_gain = float((error_before - error_after).mean().item())
     assert label.raw_gain == pytest.approx(dense_gain, abs=1e-10, rel=1e-9)
     assert label.raw_gain == pytest.approx(label.benefit - label.harm, abs=1e-12)
+
+
+def test_diagnostic_teacher_binds_real_state_without_completed_trace() -> None:
+    output, geometry, lattice, state, action, _trace, decoder = _fixture()
+    target_context = validate_target(
+        "ctx",
+        torch.randn((1, *output.shape_dhw), dtype=torch.float64),
+        None,
+        output_geometry=output,
+        feature_geometry=geometry,
+        lattice=lattice,
+        engineering_only=True,
+    )
+    diagnostic = measure_diagnostic_actions(
+        state,
+        [action],
+        target_context,
+        decoder,
+        EffectTeacherConfig(mode="exact_footprint"),
+        lattice=lattice,
+        chunk_size=5,
+    )
+    assert len(diagnostic) == 1
+    result = diagnostic[0]
+    assert isinstance(result, DiagnosticGainResult)
+    assert result.scope == "oracle_state"
+    assert result.privileged is True
+    assert result.state is state and result.action is action and result.proposal is action
+    assert result.state_version == state.state_version
+    assert result.label.raw_gain == pytest.approx(
+        measure_actions(
+            _trace,
+            [action],
+            target_context,
+            decoder,
+            EffectTeacherConfig(mode="exact_footprint"),
+            lattice=lattice,
+            chunk_size=5,
+        )[0].raw_gain,
+        abs=1e-10,
+        rel=1e-9,
+    )
+    payload = result.as_dict()
+    assert payload["schema_version"] == "pfgr-lite-diagnostic-gain-v1"
+    assert "target_data" not in str(payload).lower()
+
+
+def test_diagnostic_teacher_rejects_route_bound_target_context() -> None:
+    output, geometry, lattice, state, action, _trace, decoder = _fixture()
+    target_context = validate_target(
+        "ctx",
+        torch.zeros((1, *output.shape_dhw), dtype=torch.float64),
+        None,
+        output_geometry=output,
+        feature_geometry=geometry,
+        lattice=lattice,
+        trace_route_hash="sealed-route",
+        engineering_only=True,
+    )
+    with pytest.raises(ValueError, match="route-unbound"):
+        measure_diagnostic_actions(
+            state,
+            [action],
+            target_context,
+            decoder,
+            EffectTeacherConfig(mode="exact_footprint"),
+            lattice=lattice,
+            chunk_size=5,
+        )
+
+
+def test_diagnostic_teacher_accepts_state_version_transition_identity() -> None:
+    output, geometry, lattice, state, action, _trace, decoder = _fixture()
+    next_state = state.next(state.planes)
+    next_action = replace(
+        action,
+        state_version=next_state.state_version,
+        state_digest=next_state.state_digest,
+        action_digest=None,
+    )
+    target_context = validate_target(
+        "ctx",
+        torch.zeros((1, *output.shape_dhw), dtype=torch.float64),
+        None,
+        output_geometry=output,
+        feature_geometry=geometry,
+        lattice=lattice,
+        engineering_only=True,
+    )
+    result = measure_diagnostic_actions(
+        next_state,
+        [next_action],
+        target_context,
+        decoder,
+        EffectTeacherConfig(mode="exact_footprint"),
+        lattice=lattice,
+        chunk_size=5,
+    )[0]
+    assert result.state_version == 1
+    assert result.state_digest == next_state.state_digest
+    assert result.action.state_version == 1
 
 
 def test_fixed_q_keeps_complete_support_law_and_duplicate_draws() -> None:
