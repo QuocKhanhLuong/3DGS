@@ -434,3 +434,32 @@ action/value/teacher work and CPU tensor staging in both insufficient and
 sufficient branches. CPU staging grows with the selected cohort; a measured
 peak is not a declared finite resource limit. Each additional encoding used
 to replay a sealed route is included in operation counts.
+
+## Local MedicalNet source verification clarification (2026-09-07)
+
+The frozen plan requires an explicit local checkpoint and expected SHA256,
+strict architecture loading, frozen parameters/BN, and truthful adaptation
+provenance. It preserves the distinction between byte-integrity verification
+and an authenticated official pretrained source. The legacy approved official
+digest registry is currently empty. Requiring membership for every PFGR run
+would add an unintended blocker beyond the accepted plan.
+
+PFGR factory MAIN therefore accepts a local source only after expected-digest
+verification and strict loading of actual backbone keys. Missing weights,
+digest conflicts and incompatible architectures fail closed; random fallback
+is forbidden. `official_pretrained_verified` remains a separate truthful
+field. A digest match alone never establishes pretrained origin or trained
+quality. The team must review and identify its actual MedicalNet source.
+The existing legacy loader, registry, and explicit
+`require_pretrained_backbone=true` behavior remain unchanged. This optional
+strict request continues to require an approved official digest. Generated
+random one-channel fixtures test loading/adaptation only and retain an explicit
+engineering-only scope and `official_pretrained_verified=false`.
+
+This factory clarification does not relax the production ValueBank or adaptive
+calibration/checkpoint source gates. Those remain blocked for an unapproved
+source. Since no actual official weights were supplied for this implementation
+session and the legacy registry is empty, registering a vetted source digest
+is an explicit runtime prerequisite for the team's real MAIN S2/adaptive runs.
+The implementation must report this prerequisite; it must not manufacture an
+approved digest or reinterpret the existing provenance fields to bypass it.

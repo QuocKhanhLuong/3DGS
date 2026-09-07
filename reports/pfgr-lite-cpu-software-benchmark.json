@@ -1,0 +1,254 @@
+{
+  "schema_version": "pfgr-lite-software-benchmark-review-v1",
+  "recorded_at_utc": "2026-09-07T02:47:50Z",
+  "scope": "bounded CPU synthetic software parity only",
+  "source": {
+    "dirty_diff_sha256": "c86a4c2f370d709b10bbc48c00027c09d8e648575e2fff7732b6980b293e9cce",
+    "source_scope_file_count": 65,
+    "source_scope_roots": [
+      "src/smagm/cli/pfgr_lite.py",
+      "src/smagm/features/point_guided/pfgr_lite/",
+      "tests/features/point_guided/pfgr_lite/",
+      "configs/pfgr_lite/",
+      "RUNBOOK_PFGR_LITE.md",
+      "README.md",
+      "docs/README.md"
+    ],
+    "source_scope_sha256": "e1411e1994c3873d44cef7ad3e49d7b4d3d73b5bfdc330a90a8583304b923522",
+    "source_sha": "f467ebc2cc1899e686cf06e4484b9ea014886c4e",
+    "working_tree_dirty": true
+  },
+  "environment": {
+    "amp": false,
+    "cuda_available": false,
+    "cuda_device_count": 0,
+    "device_requested": "cpu",
+    "platform": "macOS-26.2-arm64-arm-64bit",
+    "python": "/Users/alvinluong/miniforge3/bin/python",
+    "python_version": "3.11.16",
+    "schema_version": "pfgr-lite-environment-v1",
+    "torch_version": "2.13.0"
+  },
+  "command": [
+    "benchmark",
+    "--synthetic",
+    "--config",
+    "configs/pfgr_lite/synthetic.json",
+    "--output-root",
+    "<temporary repository output>",
+    "--run-name",
+    "bench",
+    "--max-subjects",
+    "1",
+    "--max-states",
+    "1",
+    "--candidate-count",
+    "2",
+    "--query-count",
+    "32",
+    "--repeats",
+    "3",
+    "--device",
+    "cpu",
+    "--no-amp"
+  ],
+  "exit_code": 0,
+  "benchmark": {
+    "cases": 2,
+    "cold_warm_labels": [
+      "cold_lattice_query_cache",
+      "warm_lattice_query_cache"
+    ],
+    "effective_policy": {
+      "rows": [
+        {
+          "effective_policy_hash": "28ed1cf028abf7cb086f896b1a7556e212b748d8bebb1e1e14b9ec0587de72e1",
+          "policy": {
+            "budget": 4,
+            "calibration_hash": "",
+            "candidate_chunk_size": 1,
+            "capability": "forced_diagnostic",
+            "compute_cost": 0,
+            "engineering_only": true,
+            "gain_scale": 1,
+            "gain_scale_hash": "",
+            "gain_scale_provenance": null,
+            "gain_units": "raw_signed_loss",
+            "mode": "random",
+            "policy_hash": "28ed1cf028abf7cb086f896b1a7556e212b748d8bebb1e1e14b9ec0587de72e1",
+            "producer_compatibility_hash": "76b99acb4c4daa5b67c24e89e2940185e7586a5b96f41ef2afff19625bb0021b",
+            "proposal_generator_version": "pfgr-lite-action-generator-v1",
+            "quality_margin": 0,
+            "random_seed": 20260907,
+            "revisit": "allow",
+            "schema_version": "pfgr-lite-effective-policy-v1",
+            "tie_break": "lowest_point_id",
+            "value_fit_identity": null,
+            "value_input_variant": 366
+          },
+          "status": "RECORDED",
+          "subject_id": "synthetic-00"
+        }
+      ],
+      "status": "RECORDED"
+    },
+    "options": {
+      "candidate_chunk_size": 1,
+      "candidate_count": 2,
+      "chunk_size": 1024,
+      "dtype": "float32",
+      "engineering_only": true,
+      "max_states": 1,
+      "max_subjects": 1,
+      "query_count": 32,
+      "repeats": 3,
+      "schema_version": "pfgr-lite-benchmark-options-v1",
+      "seed": 20260907,
+      "teacher_mode": "iid_fixed_q"
+    },
+    "parity": {
+      "cases": 2,
+      "failure_count": 0,
+      "gain_error_max": 7.663345513719833e-10,
+      "gain_parity_required": true,
+      "gain_tolerance_atol": 0.000001,
+      "gain_tolerance_rtol": 0.00001,
+      "gain_unavailable_rows": 0,
+      "prediction_error_max": 1.4901161193847656e-8,
+      "prediction_tolerance_atol": 0.000001,
+      "prediction_tolerance_rtol": 0.00001,
+      "query_error_max": 5.960464477539063e-8,
+      "query_tolerance_atol": 0.000001,
+      "query_tolerance_rtol": 0.00001,
+      "repeats": 3,
+      "same_work": true,
+      "schema_version": "pfgr-lite-benchmark-options-v1",
+      "scientific_status": "NOT_EVALUATED",
+      "status": "PASS"
+    },
+    "rows": 6,
+    "same_work": true,
+    "schema_version": "pfgr-lite-benchmark-options-v1",
+    "scientific_scope": "CPU/CUDA software parity only; no speedup or real-data claim",
+    "scientific_status": "NOT_EVALUATED",
+    "software_status": "SOFTWARE_PASS",
+    "source_receipt": {
+      "actual_devices": [
+        "cpu"
+      ],
+      "baseline_split_hash": null,
+      "contexts": [
+        {
+          "baseline_split_hash": null,
+          "context_id": "5ad6bdf31b69087404de7a8430e8e4d51a38d6635ca5a617bc34e42a810573a9",
+          "initialization_hash": "3a8cbd491da50edd918bc080e0dd4eecee2a18e5e54a6710c13355a0de4bacf2",
+          "normalization_hash": "8cf2321fea098831f5a55a7b03dad0fd191f39f6b30b6ebe067807ae97a0ed15",
+          "pipeline_counter_scope": "service_outer_calls_only; route counters remain separately tagged",
+          "pipeline_counters": {
+            "final_decode_calls": 1,
+            "initial_decode_calls": 0,
+            "observation_encode_calls": 1
+          },
+          "producer_compatibility_hash": "76b99acb4c4daa5b67c24e89e2940185e7586a5b96f41ef2afff19625bb0021b",
+          "source_provenance": {
+            "adaptation_digest": "ae7d674fea14c57358a81be9e4be2ed4d6decaeadc438ad5aa1d15246a91b55c",
+            "adapted_input_channels": 3,
+            "checkpoint_integrity_verified": false,
+            "checkpoint_path": null,
+            "checkpoint_sha256": null,
+            "config_sha": "ad3197c1e67c0adf72e49bd570bc36e807c42fa024ea1171cfa8010bb623f0bc",
+            "details": [],
+            "frozen_bn_hash": "18b04fd0be4be42191761b756a7452cdc67ea06e8a1a0a00b49211b5580ab2e5",
+            "implementation_version": "pfgr-lite-v1",
+            "input_conv_adapted": false,
+            "integrity_verified": false,
+            "loaded_backbone_key_count": 0,
+            "model_family": "MedicalNet_ResNet10",
+            "official_pretrained_verified": false,
+            "parameter_hash": "848f55f8ca24fda66f43897882308904b4c3f258ecb714874f46a35a7750b6e7",
+            "schema_version": "pfgr-lite-provenance-v1",
+            "sha256": null,
+            "source_input_channels": 3,
+            "source_sha": "f467ebc2cc1899e686cf06e4484b9ea014886c4e",
+            "source_state_dict_key_count": 0,
+            "synthetic_untrained": true,
+            "traversal_count": 1
+          },
+          "subject_id": "synthetic-00",
+          "training_role_manifest_hash": null
+        }
+      ],
+      "engineering_only": true,
+      "initialization_hash": "3a8cbd491da50edd918bc080e0dd4eecee2a18e5e54a6710c13355a0de4bacf2",
+      "normalization_hash": "8cf2321fea098831f5a55a7b03dad0fd191f39f6b30b6ebe067807ae97a0ed15",
+      "options_hash": "9fd4965ef3f41bc5887382940f669c7649728dd2b1090d332e95d2826214bbae",
+      "producer_compatibility_hash": "76b99acb4c4daa5b67c24e89e2940185e7586a5b96f41ef2afff19625bb0021b",
+      "sample_ids": [
+        "synthetic-00"
+      ],
+      "subject_initialization_hashes": {
+        "synthetic-00": "3a8cbd491da50edd918bc080e0dd4eecee2a18e5e54a6710c13355a0de4bacf2"
+      },
+      "training_role_manifest_hash": null
+    },
+    "timing": {
+      "matched_work_only": true,
+      "optimized_mean_seconds": 0.0005370141686095545,
+      "optimized_to_reference_ratio": 0.48544867249057166,
+      "reference_mean_seconds": 0.0011062223444848012,
+      "shared_before_mean_seconds": 0.00048684017383493483,
+      "speedup_claim": "none_without_stable_independent_repeats"
+    }
+  },
+  "counts": {
+    "decoder_calls": {
+      "optimized": 6,
+      "reference": 6,
+      "shared_before": 6
+    },
+    "observation_reads": 0,
+    "operation_counter_schema_version": "pfgr-lite-counters-v1",
+    "operation_counters": {
+      "after_decoder_outputs": 0,
+      "before_decoder_outputs": 0,
+      "behavior_states": 0,
+      "bytes_copied": 0,
+      "cache_hits": 0,
+      "cache_misses": 0,
+      "candidate_evaluations": 0,
+      "candidate_labels": 0,
+      "candidate_proposals": 0,
+      "decoder_calls": 0,
+      "dense_decodes": 0,
+      "eligible_candidate_evaluations": 0,
+      "exact_sphere_valid_voxels": 0,
+      "executed_writes": 0,
+      "footprint_unique_voxels": 0,
+      "full_plane_clone_bytes": 0,
+      "geometry_cache_builds": 0,
+      "medicalnet_traversals": 0,
+      "mlp_calls": 0,
+      "padded_cube_slots": 0,
+      "sampled_draws": 0,
+      "states_labeled": 0,
+      "target_validations": 0,
+      "unique_decoded_queries": 0,
+      "value_evaluations": 0
+    },
+    "query_calls": {
+      "optimized_delta": 0,
+      "reference_after": 6,
+      "shared_before": 6
+    },
+    "reference_full_write_calls": 6,
+    "rows_measured": 6,
+    "segmentation_reads": 0,
+    "target_reads": 1
+  },
+  "claims": {
+    "trained_improvement": false,
+    "stable_speedup": false,
+    "gpu_validated": false,
+    "real_data_validated": false
+  }
+}
