@@ -29,10 +29,7 @@ jobs:
           python -m pytest -q tests/quality --tb=short
       - name: Run active automated phase evidence
         run: |
-          python scripts/check_phase.py T1C --run --report-dir /tmp/smagm-quality-reports
-          python scripts/check_phase.py T2 --run --report-dir /tmp/smagm-quality-reports
-          python scripts/check_phase.py T3 --run --report-dir /tmp/smagm-quality-reports
-          python scripts/check_phase.py T5 --run --report-dir /tmp/smagm-quality-reports
+          python scripts/check_phase.py POINT_GUIDED_FRONTEND --run --report-dir /tmp/smagm-quality-reports
       - name: Validate public CLI contracts
         run: |
           python scripts/train.py --help
@@ -57,6 +54,57 @@ jobs:
             --output-dir /tmp/smagm-full-static-report
           python scripts/audit.py \
             --package /tmp/smagm-full-static-reconstruction
+      - name: Run bounded PFGR synthetic diagnostics
+        run: |
+          set -euo pipefail
+          PFGR_OUTPUT=/tmp/smagm-pfgr-synthetic
+          python -m smagm.cli.pfgr_lite smoke \
+            --synthetic --config configs/pfgr_lite/synthetic.json \
+            --output-root "$PFGR_OUTPUT" --run-name smoke \
+            --device cpu --no-amp --max-subjects 1 --max-steps 1
+          test -f "$PFGR_OUTPUT/smoke/inference.pt"
+          python -m smagm.cli.pfgr_lite updater-train \
+            --synthetic --config configs/pfgr_lite/synthetic.json \
+            --output-root "$PFGR_OUTPUT" --run-name updater \
+            --device cpu --no-amp --max-subjects 1 --max-steps 1 \
+            --checkpoint "$PFGR_OUTPUT/smoke/inference.pt" \
+            --spectral-arm u_plus_spectral
+          test -f "$PFGR_OUTPUT/updater/inference.pt"
+          python -m smagm.cli.pfgr_lite bank-build \
+            --synthetic --config configs/pfgr_lite/synthetic.json \
+            --output-root "$PFGR_OUTPUT" --run-name bank \
+            --device cpu --no-amp --max-subjects 1 --max-states 1 \
+            --checkpoint "$PFGR_OUTPUT/updater/inference.pt" \
+            --candidate-count 2 --query-count 8 --teacher-mode iid_fixed_q
+          PFGR_BANK="$PFGR_OUTPUT/bank/s2/bank/index.json"
+          test -f "$PFGR_BANK"
+          python -m smagm.cli.pfgr_lite bank-verify \
+            --synthetic --config configs/pfgr_lite/synthetic.json \
+            --output-root "$PFGR_OUTPUT" --run-name bank-verify \
+            --device cpu --no-amp --checkpoint "$PFGR_OUTPUT/bank/inference.pt" \
+            --bank-index "$PFGR_BANK" --replay-count 1
+          python -m smagm.cli.pfgr_lite value-fit \
+            --synthetic --config configs/pfgr_lite/synthetic.json \
+            --output-root "$PFGR_OUTPUT" --run-name value126 \
+            --device cpu --no-amp --checkpoint "$PFGR_OUTPUT/bank/inference.pt" \
+            --bank-index "$PFGR_BANK" --value-input 126 \
+            --epochs 1 --batch-size 2 --max-steps 1
+          test -f "$PFGR_OUTPUT/value126/value.pt"
+          python -m smagm.cli.pfgr_lite value-evaluate \
+            --synthetic --config configs/pfgr_lite/synthetic.json \
+            --output-root "$PFGR_OUTPUT" --run-name value126-eval \
+            --device cpu --no-amp --checkpoint "$PFGR_OUTPUT/bank/inference.pt" \
+            --bank-index "$PFGR_BANK" \
+            --value-checkpoint "$PFGR_OUTPUT/value126/value.pt" --batch-size 2
+          test -f "$PFGR_OUTPUT/value126-eval/value_evaluate_pairs.json"
+          python -m smagm.cli.pfgr_lite benchmark \
+            --synthetic --config configs/pfgr_lite/synthetic.json \
+            --output-root "$PFGR_OUTPUT" --run-name benchmark \
+            --device cpu --no-amp --checkpoint "$PFGR_OUTPUT/bank/inference.pt" \
+            --max-subjects 1 --max-states 1 --candidate-count 2 \
+            --query-count 8 --repeats 3 --teacher-mode iid_fixed_q
+          test -f "$PFGR_OUTPUT/benchmark/benchmark.json"
+          test -f "$PFGR_OUTPUT/benchmark/parity.json"
       - name: Compile sources, tests, and scripts
         run: python -m compileall -q src tests scripts
       - name: Require a clean checkout after validation

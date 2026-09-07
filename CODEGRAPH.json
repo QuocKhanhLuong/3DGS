@@ -102,7 +102,7 @@
       ]
     },
     "pfgr_lite": {
-      "purpose": "Additive PFGR-Lite W1-W5 package scope with a serialized completion ledger: W1 static/contracts/provenance seam is the current implementation owner, while W2 query/teacher, W3 bank/value, W4 policy/checkpoint, and W5 services remain explicitly authorized future owners. Per-worker dispatch, not this navigation task, enforces exclusive write ownership.",
+      "purpose": "Additive PFGR-Lite W1-W5 package with a serialized completion ledger: W1 static/contracts/provenance, W2 query/teacher, W3 bank/value, W4 policy/checkpoint, and W5 scientific services are staged implementation owners. W5 services are committed at c2b9f4b; the CLI and Vietnamese R0-R10 runbook remain a separate integration handoff. Per-worker dispatch, not this navigation task, enforces exclusive write ownership and keeps real/CUDA/scientific evidence pending.",
       "entrypoints": [
         "src/smagm/features/point_guided/pfgr_lite/__init__.py",
         "src/smagm/features/point_guided/pfgr_lite/types.py",
@@ -110,7 +110,12 @@
         "src/smagm/features/point_guided/pfgr_lite/provenance.py",
         "src/smagm/features/point_guided/pfgr_lite/static_geometry.py",
         "src/smagm/features/point_guided/pfgr_lite/static_synthesis.py",
-        "src/smagm/features/point_guided/pfgr_lite/model.py"
+        "src/smagm/features/point_guided/pfgr_lite/model.py",
+        "src/smagm/features/point_guided/pfgr_lite/experiments.py",
+        "src/smagm/features/point_guided/pfgr_lite/oracle.py",
+        "src/smagm/features/point_guided/pfgr_lite/metrics.py",
+        "src/smagm/features/point_guided/pfgr_lite/benchmark.py",
+        "RUNBOOK_PFGR_LITE.md"
       ],
       "read_paths": [
         "AGENTS.md",
@@ -146,7 +151,21 @@
         "src/smagm/features/point_guided/pfgr_lite/model.py",
         "tests/features/point_guided/pfgr_lite/test_contracts.py",
         "tests/features/point_guided/pfgr_lite/test_base.py",
-        "tests/features/point_guided/pfgr_lite/test_provenance.py"
+        "tests/features/point_guided/pfgr_lite/test_provenance.py",
+        "src/smagm/features/point_guided/pfgr_lite/experiments.py",
+        "src/smagm/features/point_guided/pfgr_lite/oracle.py",
+        "src/smagm/features/point_guided/pfgr_lite/metrics.py",
+        "src/smagm/features/point_guided/pfgr_lite/benchmark.py",
+        "src/smagm/features/point_guided/pfgr_lite/teacher.py",
+        "tests/features/point_guided/pfgr_lite/test_experiments.py",
+        "tests/features/point_guided/pfgr_lite/test_oracle.py",
+        "tests/features/point_guided/pfgr_lite/test_metrics.py",
+        "tests/features/point_guided/pfgr_lite/test_benchmark.py",
+        "tests/features/point_guided/pfgr_lite/test_parallel.py",
+        "tests/features/point_guided/pfgr_lite/test_teacher.py",
+        "RUNBOOK_PFGR_LITE.md",
+        "README.md",
+        "docs/README.md"
       ],
       "blocked_paths": []
     },

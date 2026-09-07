@@ -111,8 +111,16 @@ without detach. `decode_final` requires W2's canonical query-lattice
 injection and never falls back to the legacy query path. W2 owns query,
 footprint, sparse writer, and teacher; W3 owns stages/bank/value; W4 owns
 proposals/policy/calibration/checkpoints/inference; W5 owns services,
-diagnostics, CLI, and runbook. W1 fix-round software is pending review and
-the W2-W5 ledger remains pending implementation/evidence.
+diagnostics, CLI, and runbook. W1 fix-round software and W2-W5 package
+services are staged for independent review; W5 scientific services were
+committed as `c2b9f4b`, while CLI/runbook integration remains a separate
+handoff. The latest root report is software-only: the prior W5 service scope was
+46 passed in 7.73 s and legacy point-guided 336 passed/18 skipped in 71.08 s;
+the final integrated root run is 977 passed, 18 skipped, 26 subtests, 1 warning
+in 103.07 s, with targeted PFGR/acceptance 24 passed and all three
+`POINT_GUIDED_FRONTEND` automated checks PASS (Human Gate pending). These are
+software checks only; real data, CUDA, trained checkpoints and scientific
+claims remain pending.
 
 Run `python scripts/codegraph.py --task pfgr_lite` for the package navigation
 scope; future package paths are not permanently blocked and per-worker

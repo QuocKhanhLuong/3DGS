@@ -2,17 +2,17 @@
   "schema_version": 1,
   "gate": {
     "id": "POINT_GUIDED_FRONTEND",
-    "title": "Locked point-guided T1/T2/FLAIR MRI frontend",
+    "title": "Locked point-guided T1/T2/FLAIR frontend with PFGR-Lite final-Z contract",
     "automated_checks": [
       {
         "id": "PGF-CPU-TESTS-001",
-        "description": "Run the CPU synthetic point-guided suite, including the frontend smoke and refusal to synthesize T1ce.",
+        "description": "Run the CPU synthetic point-guided and PFGR-Lite suite, including frontend smoke, target boundary, and generic-forward fail-closed behavior.",
         "command": ["python", "-m", "pytest", "-q", "tests/features/point_guided", "--tb=short"],
         "timeout_seconds": 600
       },
       {
         "id": "PGF-COMPILE-001",
-        "description": "Compile the point-guided frontend and its focused tests.",
+        "description": "Compile the point-guided frontend, PFGR-Lite final-Z services, and focused tests.",
         "command": ["python", "-m", "compileall", "-q", "src/smagm/features/point_guided", "tests/features/point_guided"],
         "timeout_seconds": 180
       },
@@ -28,13 +28,15 @@
       "policy": "Automated checks collect software evidence only. This runner cannot approve the Human Gate; a human must review the locked boundary and record any decision outside this runner.",
       "questions": [
         "Does the implementation preserve the T1/T2/FLAIR input, RAS-mm coordinates, explicit spacing, deterministic points, bounded 2 mm displacement, fixed 4 mm supports, and compact semantic-aware PoU contracts?",
-        "Does the public boundary stop at coarse semantics, points, point-centre semantics, and sparse PoU without creating a T1ce volume or adding unresolved downstream behavior?"
+        "Does the public boundary preserve target-free PFGR-Lite trajectory/policy and final-Z-only decoding, with T1ce entering only after inference for typed supervision?",
+        "Are PFGR-Lite service, writer, teacher, value-bank, policy, and metrics identities matched across checkpoints, roles, splits, and action traces without claiming a trained/scientific result?"
       ]
     },
     "non_claims": [
       "A passing automated gate is software-contract evidence only, not reconstruction, clinical, or novelty validation.",
-      "This frontend does not synthesize, reconstruct, export, or claim a T1ce volume.",
-      "Spectral anchors, dynamic tri-planes, selection, updates, history, stopping, decoding, and reconstruction losses remain unresolved interfaces."
+      "This software evidence does not establish a trained checkpoint, real-data/CUDA/AMP execution, reconstruction quality, clinical utility, or novelty.",
+      "Gate-C bounded dynamic trajectory, Gate-D final-Z-only decoder, Gate-E target-after-inference supervision, and PFGR-Lite services are implemented contracts; their scientific performance remains pending measured cohorts and human review.",
+      "MedicalNet pretrained provenance is not inferred from a local file hash; official source, patient-volume, and held-out evidence require separate review."
     ]
   }
 }

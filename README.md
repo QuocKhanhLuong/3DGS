@@ -26,3 +26,18 @@ endpoint still predicts an absolute scalar volume from final `Z` only.
 Start with [the frontend contract](docs/architecture/POINT_GUIDED_FRONTEND.md)
 and use the task-scoped [codegraph](CODEGRAPH.json) rather than scanning the
 whole repository.
+
+PFGR-Lite CLI/config integration and the Vietnamese R0–R10 execution boundary
+are documented in [RUNBOOK_PFGR_LITE.md](RUNBOOK_PFGR_LITE.md). The runbook is
+software evidence guidance only; real-data, CUDA, trained-checkpoint and
+clinical claims remain review-gated.
+
+Current software handoff (root-reported): the prior W5 service scope was 46
+passed in 7.73 s and legacy point-guided was 336 passed/18 skipped in 71.08 s;
+the final integrated root run is 977 passed, 18 skipped, 26 subtests, 1 warning
+in 103.07 s, with targeted PFGR/acceptance 24 passed and all three
+`POINT_GUIDED_FRONTEND` automated checks PASS (Human Gate pending). These are
+software scopes only; MedicalNet pretrained,
+GPU/AMP, patient-volume, trained-checkpoint, reconstruction, and scientific
+headroom evidence remain pending and must not be inferred from synthetic CPU
+smoke or historical runs.
