@@ -286,3 +286,27 @@ and execution; W5 CLI owns serialization wiring and may narrowly harden
 `checkpoint.py`/`test_checkpoint.py` for incomplete optimization artifacts.
 Acceptance compares uninterrupted and interrupted/resumed actual S0/S1
 weights, optimizer state and action schedule under the same numerical setup.
+
+## Parallel measurement and resume serialization clarifications
+
+The completed frozen-proposal parallel route has a `ParallelBehaviorTrace`,
+not a sequential `CompletedBehaviorTrace`. Its post-route control uses
+`measure_parallel_actions(parallel_trace, selected_actions, target_context,
+decoder, teacher_config, *, lattice, observation_context, chunk_size,
+candidate_chunk_size, seed, counters)`. This validates the actual typed parallel
+trace, initial state, selected action membership/digests and compound completion,
+then shares the sparse numerical engine on that initial state. It returns
+diagnostic wrappers with `scope="parallel_initial_state"`; these remain excluded
+from MAIN banks. The oracle public API retains its separate `oracle_state`
+scope. No fake sequential transition or action rebasing is permitted. The sum
+of independent initial-state gains is an interaction control, not a telescoping
+claim for the compound parallel prediction. W5 scientific services owns this
+narrow teacher extension and its actual-model integration regression.
+
+Resume's exact execution configuration legitimately contains the schema field
+`bank_state.stage_runtime.execution_config.pfgr_config.teacher`. W5 CLI may allow
+this precise path after strict execution/config validation. The value contains
+only the versioned teacher configuration, never target tensors, labels or teacher
+contexts. Unknown nested fields and forbidden target/oracle state elsewhere
+remain rejected. Redacting or stringifying the configuration to evade validation
+is not an accepted serialization strategy.
