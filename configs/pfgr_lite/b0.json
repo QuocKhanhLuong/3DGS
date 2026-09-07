@@ -1,0 +1,7 @@
+{
+  "static": {"variant": "b0_legacy_v1"},
+  "engineering_only": true,
+  "num_points": 4,
+  "build_chunk_size": 128,
+  "decode_chunk_size": 128
+}

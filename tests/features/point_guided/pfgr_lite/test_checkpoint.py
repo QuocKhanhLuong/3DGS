@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import asdict
 import json
 import random
 from types import SimpleNamespace
@@ -138,6 +137,40 @@ def test_resume_roundtrip_preserves_stage_optimizer_rng_and_bank_state(tmp_path)
     assert loaded.bank_state["shard_cursor"] == 3
     with pytest.raises(FileExistsError):
         save_resume(path, _bundle(), stage, {}, {}, {})
+
+
+def test_resume_allows_only_typed_stage_runtime_teacher_config(tmp_path) -> None:
+    path = tmp_path / "runtime-resume.pt"
+    execution = PFGRLiteConfig(engineering_only=True).as_dict()
+    runtime = {
+        "schema_version": "pfgr-lite-stage-runtime-v1",
+        "stage_state": {"stage": "S0", "epoch": 0, "update": 1, "microstep": 0, "optimizer_groups": ()},
+        "optimizer_state": {},
+        "rng_state": {},
+        "cursor": {"epoch": 0, "batch_index": 1, "update": 1, "microstep": 0, "sample_order": ()},
+        "parameter_names": (),
+        "execution_config": {
+            "schema_version": "pfgr-lite-execution-config-v1",
+            "pfgr_config": execution,
+            "frontend_sidecar": {},
+            "normalization": {},
+            "stage_options": {},
+        },
+        "execution_config_hash": "execution-hash",
+        "training_config_hash": "training-hash",
+        "producer_compatibility_hash": "producer-hash",
+        "split_role_hash": "split-hash",
+    }
+    save_resume(path, _bundle(), StageState(stage="S0", update=1), {}, {}, {"stage_runtime": runtime})
+    loaded = load_resume(path)
+    assert loaded.bank_state["stage_runtime"]["execution_config"]["pfgr_config"]["teacher"]["mode"] == "iid_fixed_q"
+    bad = dict(runtime)
+    bad["execution_config"] = dict(runtime["execution_config"])
+    bad_pfgr = dict(execution)
+    bad_pfgr["teacher"] = {"target_context": "forbidden"}
+    bad["execution_config"]["pfgr_config"] = bad_pfgr
+    with pytest.raises(ValueError, match="unknown teacher config keys"):
+        save_resume(tmp_path / "bad-runtime.pt", _bundle(), StageState(stage="S0", update=1), {}, {}, {"stage_runtime": bad})
 
 
 def test_resume_rejects_target_keys_and_legacy_requires_explicit_adapter(tmp_path) -> None:

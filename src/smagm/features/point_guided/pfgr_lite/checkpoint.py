@@ -22,7 +22,7 @@ from torch import Tensor
 import numpy as np
 
 from .calibration import CalibrationEvidence, attach_calibration_evidence, calibration_evidence
-from .config import PFGRLiteConfig, frontend_config_from_dict, frontend_config_to_dict
+from .config import EffectTeacherConfig, PFGRLiteConfig, frontend_config_from_dict, frontend_config_to_dict
 from .provenance import ProducerCompatibility, SourceProvenance, batchnorm_state_digest, canonical_digest, module_parameter_digest, module_state_digest, source_provenance_from_semantic_prior, tensor_digest
 from .types import (
     RESUME_SCHEMA,
@@ -164,6 +164,37 @@ def _reject_secret_keys(key: object) -> None:
         raise ValueError("target/oracle/teacher state is forbidden in PFGR artifacts")
 
 
+def _allow_stage_runtime_teacher(value: object, *, path: str) -> bool:
+    """Allow only the typed teacher *configuration* in runtime identity.
+
+    Resume metadata stores the full canonical execution config so training
+    hashes cannot be silently weakened.  The generic safe-value boundary
+    rejects keys containing ``teacher`` everywhere else; this one exact path
+    is a declared configuration envelope, never a teacher state/context.
+    """
+
+    if path != "bank_state.stage_runtime.execution_config.pfgr_config" or not isinstance(value, Mapping):
+        return False
+    EffectTeacherConfig.from_dict(value)
+    return True
+
+
+def _allow_stage_runtime_teacher_q(value: object, *, path: str) -> bool:
+    """Allow only the scalar S2 measurement-Q execution sidecar.
+
+    ``teacher_q_draws`` is a stage option, not a target/teacher object.  It is
+    accepted only at the exact canonical runtime path and is validated as an
+    explicit ``None``/nonnegative integer so arbitrary teacher state cannot be
+    laundered through resume metadata.
+    """
+
+    if path != "bank_state.stage_runtime.execution_config.stage_options":
+        return False
+    if value is None:
+        return True
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
 def _safe_value(value: Any, *, path: str) -> Any:
     """Convert resume metadata to a ``weights_only``-safe payload."""
 
@@ -188,7 +219,11 @@ def _safe_value(value: Any, *, path: str) -> Any:
             if not isinstance(key, (str, int)) or isinstance(key, bool):
                 raise TypeError(f"serialized mapping keys at {path} must be strings or integer optimizer IDs")
             if isinstance(key, str):
-                _reject_secret_keys(key)
+                if not (
+                    (key == "teacher" and _allow_stage_runtime_teacher(item, path=path))
+                    or (key == "teacher_q_draws" and _allow_stage_runtime_teacher_q(item, path=path))
+                ):
+                    _reject_secret_keys(key)
             result[key] = _safe_value(item, path=f"{path}.{key}")
         return result
     if isinstance(value, tuple):
@@ -249,7 +284,11 @@ def _validate_loaded_value(value: Any, *, path: str) -> None:
             if not isinstance(key, (str, int)) or isinstance(key, bool):
                 raise TypeError(f"serialized mapping keys at {path} must be strings or integer optimizer IDs")
             if isinstance(key, str):
-                _reject_secret_keys(key)
+                if not (
+                    (key == "teacher" and _allow_stage_runtime_teacher(item, path=path))
+                    or (key == "teacher_q_draws" and _allow_stage_runtime_teacher_q(item, path=path))
+                ):
+                    _reject_secret_keys(key)
             _validate_loaded_value(item, path=f"{path}.{key}")
         return
     if isinstance(value, (tuple, list)):
