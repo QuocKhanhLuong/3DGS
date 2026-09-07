@@ -1647,6 +1647,10 @@ class ValueBankReader:
         for shard_spec in index["shards"]:
             if isinstance(shard_spec, Mapping) and isinstance(shard_spec.get("path"), str):
                 expected_bank_files.add(shard_spec["path"])
+        # S2 may publish one immutable content-addressed replay directory in
+        # addition to shards.  Its contents are validated against the loaded
+        # row references below; no other top-level artifacts are permitted.
+        expected_bank_files.add("replay")
         unexpected_files = {
             child.name
             for child in self.root.iterdir()
@@ -1743,6 +1747,7 @@ class ValueBankReader:
                 raise ValueError("MAIN bank producer provenance lacks verified parameter/BN/traversal fields")
         self._index = index
         self._rows = self._load_rows()
+        self._validate_replay_files()
         if expected_producer is not None:
             self.validate_producer(expected_producer)
         if expected_split_role_hash is not None:
@@ -1894,6 +1899,93 @@ class ValueBankReader:
             if self._role_membership and self._role_membership.get(row.subject_key) != row.split_role:
                 raise ValueError("row split role does not match role_membership")
         return tuple(rows)
+
+    def _validate_replay_files(self) -> None:
+        """Validate the optional S2 replay directory against row references.
+
+        Replay snapshots are not a second arbitrary bank payload: every file
+        must be a content-addressed ``replay/<sha256>.pt`` referenced by at
+        least one immutable row.  The narrow audit helper owns snapshot schema
+        and tensor checks; this reader only binds files to bank identities and
+        rejects unexpected/unindexed/path-escape entries.
+        """
+
+        references: list[str] = []
+        for row in self._rows:
+            reference = row.selected_replay_ref
+            if not reference:
+                continue
+            relative = Path(reference)
+            if (
+                relative.is_absolute()
+                or relative.parts[:1] != ("replay",)
+                or len(relative.parts) != 2
+                or relative.suffix != ".pt"
+                or re.fullmatch(r"[0-9a-f]{64}", relative.stem) is None
+            ):
+                raise ValueError("selected replay reference must be replay/<sha256>.pt")
+            references.append(relative.as_posix())
+        replay_root = self.root / "replay"
+        if replay_root.exists() and (replay_root.is_symlink() or not replay_root.is_dir()):
+            raise ValueError("value-bank replay path must be a real directory")
+        if not references:
+            if replay_root.exists():
+                children = tuple(replay_root.iterdir())
+                if children:
+                    raise ValueError("unexpected or unindexed replay artifact")
+                # An empty replay directory is itself an unnecessary artifact;
+                # reject it to keep publication and evidence manifests exact.
+                raise ValueError("unexpected empty replay directory")
+            return
+        if not replay_root.is_dir():
+            raise ValueError("selected replay reference is missing replay directory")
+        indexed = set(references)
+        actual: set[str] = set()
+        for child in replay_root.iterdir():
+            if child.is_symlink() or not child.is_file():
+                raise ValueError("unexpected or unsafe replay artifact")
+            relative = Path("replay") / child.name
+            relative_text = relative.as_posix()
+            if relative_text not in indexed:
+                raise ValueError(f"unindexed replay artifact: {relative_text}")
+            if relative.suffix != ".pt" or re.fullmatch(r"[0-9a-f]{64}", relative.stem) is None:
+                raise ValueError("selected replay filename must be a SHA256 digest")
+            actual.add(relative_text)
+        if actual != indexed:
+            missing = sorted(indexed - actual)
+            raise ValueError(f"selected replay snapshot is missing: {missing}")
+        # Import lazily to keep value_bank independent from audit's snapshot
+        # implementation at module import time and avoid any import cycle.
+        from .bank_audit import validate_snapshot_file, validate_snapshot_row
+
+        expected_producer = self._manifest.producer_compatibility_hash
+        expected_split_role = self._manifest.split_role_hash
+        rows_by_reference: dict[str, list[ValueBankRow]] = {}
+        for row in self._rows:
+            if row.selected_replay_ref:
+                rows_by_reference.setdefault(row.selected_replay_ref, []).append(row)
+        for reference in sorted(indexed):
+            path = self.root / Path(reference)
+            try:
+                resolved_root = self.root.resolve()
+                resolved_path = path.resolve()
+                if os.path.commonpath((str(resolved_root), str(resolved_path))) != str(resolved_root):
+                    raise ValueError("selected replay path escapes bank root")
+            except FileNotFoundError as exc:
+                raise ValueError("selected replay path does not exist") from exc
+            if path.is_symlink() or not path.is_file():
+                raise ValueError("selected replay path must be a regular file")
+            # Validate/load one file once, then bind every indexed row to its
+            # snapshot identity (a selected state may serve multiple actions).
+            metadata = validate_snapshot_file(
+                path,
+                expected_digest=path.stem,
+                expected_producer=expected_producer,
+                expected_split_role_hash=expected_split_role,
+                max_bytes=self.max_file_size,
+            )
+            for row in rows_by_reference.get(reference, ()):  # defensive; set equality above
+                validate_snapshot_row(metadata, row)
 
     def validate_producer(self, expected: ProducerCompatibility | ProducerDependencies | str) -> None:
         if _producer_hash(expected) != self._manifest.producer_compatibility_hash:

@@ -98,7 +98,9 @@ def _row(
         sampler_law="iid_fixed_q" if role == "iid_fixed_q" else "exact",
         support_provenance="complete_support_v1" if role != "screening" else "screening_subset",
         inclusion_mechanism="fixed_q_complete_support_v1" if role == "iid_fixed_q" else "complete_support_v1",
-        selected_replay_ref=f"replay/{index}.json",
+        # Ordinary bank fixtures do not publish S2 state snapshots; replay
+        # references are populated only by the canonical staged collector.
+        selected_replay_ref="",
         diagnostic=diagnostic,
     )
 

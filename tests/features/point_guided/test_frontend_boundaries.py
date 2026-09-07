@@ -80,6 +80,8 @@ FORBIDDEN_INACTIVE_GATE_IMPORT_PREFIXES = (
     "smagm.features.point_guided.synthesis",
 )
 POINT_GUIDED_PACKAGE = "smagm.features.point_guided"
+STAGED_LOADER_FILES = frozenset({PACKAGE / "pfgr_lite" / "data.py", PACKAGE / "pfgr_lite" / "stages.py"})
+STAGED_LOADER_NAMES = frozenset({"load_point_guided_subject", "load_point_guided_split"})
 
 
 def _starts_with_module(name: str, prefixes: tuple[str, ...] | frozenset[str]) -> bool:
@@ -103,6 +105,18 @@ def _is_forbidden_import_module(name: str) -> bool:
             or _starts_with_module(name, FORBIDDEN_INACTIVE_GATE_IMPORT_PREFIXES)
             or _starts_with_module(name, ("torch.fft",))
         )
+    )
+
+
+def _is_authorized_staged_loader_import(path: Path, node: ast.ImportFrom) -> bool:
+    """Allow only the two reviewed observation/split loader symbols in W3b."""
+
+    return (
+        path in STAGED_LOADER_FILES
+        and node.level == 0
+        and node.module == "smagm.data.brats21_point_guided"
+        and bool(node.names)
+        and all(alias.name in STAGED_LOADER_NAMES for alias in node.names)
     )
 
 
@@ -367,7 +381,8 @@ def test_frontend_static_import_boundary_allows_only_completed_gates_and_active_
                         violations.append(f"{path.name}: import {alias.name}")
             elif isinstance(node, ast.ImportFrom):
                 candidates = _import_from_candidates(node)
-                if any(_is_forbidden_import_module(candidate) for candidate in candidates) or (
+                staged_loader_exception = _is_authorized_staged_loader_import(path, node)
+                if (not staged_loader_exception and any(_is_forbidden_import_module(candidate) for candidate in candidates)) or (
                     node.module == "torch" and any(alias.name == "fft" for alias in node.names)
                 ):
                     rendered = node.module if node.module is not None else "."
@@ -385,3 +400,13 @@ def test_frontend_static_import_boundary_allows_only_completed_gates_and_active_
             ):
                 violations.append(f"{path.name}: torch.fft")
     assert not violations, "\n".join(violations)
+
+
+def test_staged_loader_exception_is_limited_to_exact_w3b_files_and_symbols() -> None:
+    allowed = ast.parse("from smagm.data.brats21_point_guided import load_point_guided_subject").body[0]
+    assert isinstance(allowed, ast.ImportFrom)
+    assert _is_authorized_staged_loader_import(PACKAGE / "pfgr_lite" / "data.py", allowed)
+    assert not _is_authorized_staged_loader_import(PACKAGE / "model.py", allowed)
+    disallowed_symbol = ast.parse("from smagm.data.brats21_point_guided import load_target").body[0]
+    assert isinstance(disallowed_symbol, ast.ImportFrom)
+    assert not _is_authorized_staged_loader_import(PACKAGE / "pfgr_lite" / "data.py", disallowed_symbol)
