@@ -401,3 +401,7 @@ fail closed. One shared snapshot may serve multiple action rows; raw bank and
 snapshot tensors remain excluded from the default evidence package. W3 owns
 snapshot production/helper tests; W5 CLI only calls the helper and documents
 the real audit scope. No change to MAIN row or checkpoint schema is required.
+
+## S2 measurement budget sidecar clarification (2026-09-07)
+
+`StageOptions.teacher_q_draws: int | None = None` is the explicit S2 measurement budget. `None` inherits the frozen config teacher Q; fixed-Q overrides require at least two draws; exact enumeration resolves Q=0. CLI `--query-count` binds this sidecar, while `query_mode` selects exact versus sampled measurement. These execution options are serialized and labelled, and do not mutate the saved producer PFGR configuration or its loss/mask definition. Unsupported state/candidate counts fail explicitly rather than being clamped. W3 owns the stage field/resolution; W5 owns CLI forwarding.
