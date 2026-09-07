@@ -369,3 +369,35 @@ only for `load_point_guided_subject` and `load_point_guided_split` imported from
 paths. Inference/model/routing modules and all other forbidden imports retain
 the original restriction. W3b owns this narrowly scoped test amendment and
 negative sibling-path/symbol coverage.
+
+## CLI continuation and selected-state audit clarification
+
+CLI S0/S1 publication preserves the actual W3 runtime snapshot; it must reject
+missing/conflicting fields instead of filling defaults or rewriting identities.
+W3 validates all dependencies before optimizer/RNG restore. Cached V continuation
+uses the existing W4 resume envelope with the producer InferenceBundle and the
+actual W3a fit state under bank_state.cached_value_fit; it does not invent a
+second checkpoint family or load MRI during continuation.
+
+W3b additionally owns pfgr_lite/bank_audit.py and test_bank_audit.py.
+write_state_snapshot(bank_root, state, context, *, subject_binding, route_hash,
+selected_actions, split_role_hash) writes one detached CPU snapshot per selected
+state under bank/replay/<sha256>.pt. It returns the safe relative reference for
+existing ValueBankRow.selected_replay_ref. Schema is
+pfgr-lite-selected-state-snapshot-v1. The payload includes the three state
+planes once, actual context/state/producer/split/normalization/subject binding,
+output and feature geometry metadata, route identity and selected action
+identities. It contains no target, segmentation or image prediction. Snapshot
+file digest is bound by its filename and the immutable indexed row reference;
+existing differing files are never overwritten.
+
+audit_bank_replay(reader, replay_count, *, producer, role_manifest) validates a
+bounded selected row set, safe reference paths, file digests, weights-only
+schema, plane state digest and subject/context/state/action/producer/split joins.
+Its receipt explicitly reports audit_kind=state_snapshot_and_row_identity,
+actual rows/snapshots/bytes checked and zero decoder/teacher calls. It does not
+claim reconstruction replay. Positive requested audits with missing snapshots
+fail closed. One shared snapshot may serve multiple action rows; raw bank and
+snapshot tensors remain excluded from the default evidence package. W3 owns
+snapshot production/helper tests; W5 CLI only calls the helper and documents
+the real audit scope. No change to MAIN row or checkpoint schema is required.
