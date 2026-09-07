@@ -223,3 +223,66 @@ with explicit engineering-only policy and diagnostic affine parameters.
 Every derived receipt retains that status, and adaptive deployment artifact
 save/load/promotion remains forbidden. Synthetic tests must not fabricate
 production training provenance to exercise this harness.
+
+## Diagnostic oracle-state teacher seam
+
+Integration review exposed that a target-aware oracle history cannot honestly
+be represented by `CompletedBehaviorTrace`, whose contract is target-free
+completed behavior. The accepted clarification is a separate
+`measure_diagnostic_actions(state, actions, target_context, decoder,
+teacher_config, *, lattice, chunk_size=1024, candidate_chunk_size=1,
+seed=None, observation_context=None, counters=None, scope="oracle_state")`
+API in `teacher.py`. It validates the actual immutable state and action
+identities, preserves their original versions, and shares the existing
+exact/fixed-Q numerical evaluator. It must not fabricate transitions, no-op
+successors, target-free trace objects, or rebased action identities.
+
+Its return is a tuple of frozen `DiagnosticGainResult` wrappers with schema
+`pfgr-lite-diagnostic-gain-v1`, actual action/context/state/proposal identities,
+`label: GainLabel`, target-context digest, constant `scope="oracle_state"`
+and `privileged=True`. It does not delegate ordinary GainLabel attributes.
+MAIN ValueBank adapters and deployment APIs reject the wrapper; oracle
+exports explicitly retain privileged provenance. The ordinary
+`measure_actions` API remains strict and unchanged externally. Diagnostic
+target contexts bind the immutable subject/context/mask/normalization and
+have `trace_route_hash=None`; their target join occurs only after the actual
+initial prediction and first proposal bank. Route-bound targets are rejected
+by this diagnostic API rather than having their binding discarded.
+
+W5 scientific services owns only the necessary additional `teacher.py` and
+`test_teacher.py` edits. Acceptance requires the existing teacher suites plus
+actual Oracle-1/greedy-2 final-write, state-identity and telescoping checks.
+This clarification repairs a software interface gap; it is not an observed
+research result or a new teacher approximation.
+
+## Actual staged optimization resume state
+
+S0/S1 receipts alone cannot resume optimization. `StageResult.runtime_state`
+and `StageInputs.resume` use strict schema `pfgr-lite-stage-runtime-v1` with
+fields `stage_state`, `optimizer_state`, `rng_state`, `cursor`,
+`parameter_names`, `execution_config`, `execution_config_hash`,
+`training_config_hash`, `producer_compatibility_hash`, and `split_role_hash`.
+The cursor contains `epoch`, `batch_index`, `update`, `microstep`,
+`sample_order`, and `route_rng_state`; it identifies the next unprocessed
+batch. Parameter names preserve exact optimizer-group/order ownership.
+Snapshots own detached CPU state, including actual Adam moments and supported
+Python/NumPy/Torch/CUDA RNG streams. Accumulation is initially one; unsupported
+values fail closed rather than being ignored.
+
+The full resolved execution mapping is retained and hashed.
+`training_config_hash` excludes only `stage_options.max_updates`, allowing an
+explicitly recorded continuation budget to change after a bounded interruption.
+Old/new full hashes and that override are recorded. Model, data, optimizer,
+epoch, seed and precision semantics must match. Restore occurs after strict
+model hydration and identity checks, before route randomness or processing
+the next batch. An interrupted epoch is not marked complete.
+
+CLI persists the actual optimizer/RNG through existing W4 `save_resume` and
+stores the remaining metadata in `bank_state["stage_runtime"]`. Resume
+hydrates model and optimizer and continues the same stage; loading metadata
+and printing a summary is not a resume experiment. Empty optimization state
+after completed updates is not accepted as resumable. W3b owns runtime capture
+and execution; W5 CLI owns serialization wiring and may narrowly harden
+`checkpoint.py`/`test_checkpoint.py` for incomplete optimization artifacts.
+Acceptance compares uninterrupted and interrupted/resumed actual S0/S1
+weights, optimizer state and action schedule under the same numerical setup.
