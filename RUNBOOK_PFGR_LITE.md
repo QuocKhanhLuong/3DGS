@@ -8,16 +8,19 @@ không được đoán theo tên thư mục.
 
 ## Trạng thái bằng chứng đã biết
 
-Mốc W5 service trước đây là **46 passed trong 7.73 s** và legacy point-guided
-là **336 passed, 18 skipped trong 71.08 s**; các scope này có thể chồng lấp.
-Root đã chạy mốc tích hợp cuối: **977 passed, 18 skipped, 26 subtests, 1
-warning trong 103.07 s**; targeted PFGR/acceptance là **24 passed**, và ba
-automated checks của `POINT_GUIDED_FRONTEND` là **PASS** (Human Gate vẫn
-pending). Đây là software evidence hiện có, không phải bằng chứng khoa học.
-CUDA/AMP,
+Root đã chạy toàn repository trong checkout sạch tại `abe252d`: **982 passed,
+18 skipped, 26 subtests, 1 warning trong 115.34 s**. Sau commit packaging
+`3f08288`, kiểm tra artifact/runbook/E2E trong checkout sạch đạt **35 passed
+trong 33.60 s**; các scope chồng lấp, không cộng thành một tổng mới. Phép đóng
+gói nhiều run độc lập giữ đúng 38 file metadata, gồm split/roles với 1.251 ID
+tự sinh, và loại checkpoint/bank tensor. Ba automated checks của
+`POINT_GUIDED_FRONTEND` đều **PASS**; Human Gate vẫn pending.
+
+Đây là software evidence, không phải bằng chứng khoa học. CUDA/AMP,
 MedicalNet pretrained thật, dữ liệu bệnh nhân, checkpoint huấn luyện, latency
-ổn định, speedup, headroom và reconstruction vẫn **PENDING**; historical smoke
-SHA cũ chưa được xác minh. Các run Reward/trajectory cũ chỉ là tài liệu lịch sử.
+ổn định, speedup, headroom và chất lượng tái tạo vẫn **PENDING**. Historical
+smoke SHA cũ chưa được xác minh. Các run Reward/trajectory cũ chỉ là tài liệu
+lịch sử; dùng runbook này làm entrypoint PFGR-Lite.
 
 ## 0. Quy tắc an toàn, thứ tự môi trường và biến chung
 
