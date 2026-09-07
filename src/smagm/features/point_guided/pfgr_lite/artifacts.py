@@ -97,6 +97,23 @@ _EXACT_JSON_CATEGORIES: dict[str, str] = {
     "roles.json": "role_manifest",
     "role_manifest.json": "role_manifest",
     "receipt.json": "receipt",
+    # Exact scalar/metadata handoffs emitted by the PFGR CLI services.
+    # Keep these names explicit; stage_runtime and all tensor/checkpoint
+    # payloads remain intentionally outside the package boundary.
+    "service_receipt.json": "receipt",
+    "bank_verify.json": "bank_index_metadata",
+    "value_fit.json": "metrics_summary",
+    "value_evaluate.json": "metrics_summary",
+    "value_evaluate_pairs.json": "value_evaluation_pairs",
+    "calibration_evidence.json": "calibration_manifest_metadata",
+    "trace_receipts.json": "paired_action_rows",
+    "collection_policy.json": "effective_policy",
+    "fit_winners.json": "paired_action_rows",
+    "allowance_winners.json": "paired_action_rows",
+    "review_context.json": "provenance",
+    "stage_state.json": "receipt",
+    "resume_summary.json": "receipt",
+    "r4-paired.json": "paired_comparison",
     "changes.json": "config_changes",
     "provenance.json": "provenance",
     "metrics.json": "metrics_summary",
@@ -136,6 +153,8 @@ _EXACT_JSONL_CATEGORIES: dict[str, str] = {
     "teacher_benchmark.jsonl": "teacher_benchmark",
     "parity.jsonl": "teacher_parity",
     "teacher_parity.jsonl": "teacher_parity",
+    "privileged_oracle.jsonl": "oracle_diagnostic",
+    "rows.jsonl": "benchmark_rows",
 }
 
 _EXACT_CSV_CATEGORIES: dict[str, str] = {
@@ -281,6 +300,10 @@ _SENSITIVE_KEY_RE = re.compile(
     r"aws[_-]?(?:secret|access)[_-]?key|hf[_-]?token)(?:$|_)",
     re.IGNORECASE,
 )
+# Raw payload keys are rejected structurally.  The matcher intentionally
+# catches prefixed/nested variants (for example ``metrics.raw_target_array``)
+# rather than relying on a basename-only filename check.  Explicit scalar
+# counter exceptions are validated below before this matcher runs.
 _RAW_PAYLOAD_KEY_RE = re.compile(
     r"(?:^|_)(?:raw[_-]?(?:target|image|volume|array|data)|target[_-]?(?:values?|array|volume|image|data)|"
     r"ground[_-]?truth|prediction(?:s)?|logits?|(?:nifti|dicom)|ndarray|"
@@ -289,6 +312,38 @@ _RAW_PAYLOAD_KEY_RE = re.compile(
     r"(?:encoded|base64|blob|payload)(?:$|[_-](?:array|data|bytes|values)))(?:$|_)",
     re.IGNORECASE,
 )
+
+# A few CLI receipts use names that contain the raw-payload tokens above but
+# carry only a scalar counter (or ``null`` when unavailable).  Keep this list
+# exact and validate values as finite, non-negative counts before bypassing
+# the raw-payload matcher.  Arrays/objects under these keys remain rejected.
+_SAFE_SCALAR_COUNTER_KEYS = {
+    "target_reads",
+    "target_volume_reads",
+    "segmentation_reads",
+    "observation_reads",
+    "prediction_count",
+    "teacher_calls",
+    "decoder_calls",
+    "medicalnet_traversals",
+    "mri_loader_calls",
+    "updater_calls",
+    "target_validations",
+    "value_evaluations",
+    "candidate_evaluations",
+    # Exact scalar benchmark/oracle metadata whose names contain the raw
+    # ``prediction`` token but whose values are bounded counters/errors, not
+    # tensors or image payloads.
+    "prediction_error_max",
+    "prediction_tolerance_atol",
+    "prediction_tolerance_rtol",
+}
+_SAFE_BOOLEAN_METADATA_KEYS = {"oracle_final_prediction_decoded"}
+# Benchmark parity emits ``decoder_calls`` as a bounded mapping of phase to
+# scalar counts, while service receipts may emit the same name as one scalar.
+# Admit this exact mapping shape through normal structural recursion; all
+# other raw-token exceptions remain scalar-only.
+_SAFE_COUNTER_MAPPING_KEYS = {"decoder_calls"}
 _KNOWN_SECRET_TEXT_PATTERNS = (
     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"),
     re.compile(
@@ -344,6 +399,18 @@ _NUMERIC_VECTOR_LIMITS = {
     "volume_shape": 5,
     "feature_shape": 5,
     "seeds": 32,
+    # Small, declared configuration/receipt vectors emitted by the PFGR CLI.
+    # These are metadata scalars, not descriptor/volume payloads.
+    "budgets": 8,
+    "hidden_channels": 8,
+    "input_variants": 8,
+    "range": 4,
+    "directional_offsets_mm": 3,
+    "state_versions": 5,
+    "measurement_q_draws": 8,
+    "selected_point_ids": 64,
+    "split_fractions": 3,
+    "group_counts": 8,
 }
 _AFFINE_KEYS = {"affine", "affine4x4", "affine_mm", "voxel_to_ras"}
 _MAPPING_LIST_KEYS = {
@@ -375,6 +442,15 @@ _MAPPING_LIST_KEYS = {
     "per_subject",
     "candidate_evaluations",
     "eligible_candidate_evaluations",
+    # Concrete CLI service/verification/calibration metadata rows.
+    "selection_receipts",
+    "subject_context_bindings",
+    "subject_contexts",
+    "completed_trace_receipts",
+    "shards",
+    "policies",
+    "confirmation",
+    "contexts",
 }
 _STRING_LIST_KEYS = {
     "argv",
@@ -384,21 +460,210 @@ _STRING_LIST_KEYS = {
     "roles",
     "devices",
     "paths",
+    "source_paths",
     "files",
     "names",
     "expected",
     "present",
     "missing",
     "subject_ids",
+    "all_subject_ids",
+    "excluded_subject_ids",
+    "val_subject_ids",
+    "selected_subject_ids",
     "subject_names",
     "train_subjects",
     "validation_subjects",
     "test_subjects",
     "deployment_subjects",
     "train",
+    "val",
     "validation",
     "test",
     "deployment",
+    # Concrete CLI service/verification/calibration metadata vectors.
+    "shard_hashes",
+    "selected_replay_refs",
+    "source_scope_roots",
+    "authorized_modules",
+    "subject_ids",
+    "baseline_test_subject_ids",
+    "baseline_train_subject_ids",
+    "baseline_validation_subject_ids",
+    "calibration_allowance_subject_ids",
+    "calibration_fit_subject_ids",
+    "producer_fit_subject_ids",
+    "producer_fit_subjects",
+    "fit_subjects",
+    "allowance_subjects",
+    "train_subject_ids",
+    "validation_subject_ids",
+    "test_subject_ids",
+    "completed_trace_hashes",
+    "selected_action_ids",
+    "measurement_modes",
+    "proposal_digests",
+    "action_digests",
+    "optimizer_groups",
+    "restored_rng_streams",
+    "expected_per_run",
+    "parameter_names",
+    "changed_parameter_groups",
+    "changed_parameter_names",
+    "optimizer_parameter_names",
+    "input_modalities",
+    "forbidden_imports_during_fit",
+    "forbidden_imports_during_eval",
+    "reasons",
+    "missing_inputs",
+    "cold_warm_labels",
+    "actual_devices",
+    "sample_ids",
+}
+
+# A few evidence schemas intentionally use bounded tuples represented as JSON
+# arrays.  They are not arbitrary nested arrays: each row has an explicit
+# element type/length contract and is validated before packaging.
+_STRING_PAIR_LIST_LIMITS = {
+    "component_versions": 64,
+    # Full split/role manifests can contain the untouched BraTS population;
+    # retain a narrow per-key bound rather than applying this to arbitrary
+    # arrays.
+    "subject_group_ids": 16384,
+    "details": 64,
+}
+_STRING_LIST_LIMITS = {
+    "baseline_train_subject_ids": 16384,
+    "baseline_validation_subject_ids": 16384,
+    "baseline_test_subject_ids": 16384,
+    "all_subject_ids": 16384,
+    "excluded_subject_ids": 16384,
+    "val_subject_ids": 16384,
+    "calibration_allowance_subject_ids": 16384,
+    "calibration_fit_subject_ids": 16384,
+    "producer_fit_subject_ids": 16384,
+    "producer_fit_subjects": 16384,
+    "fit_subjects": 16384,
+    "allowance_subjects": 16384,
+    "train_subject_ids": 16384,
+    "validation_subject_ids": 16384,
+    "test_subject_ids": 16384,
+    "train": 16384,
+    "val": 16384,
+    "validation": 16384,
+    "test": 16384,
+}
+_TYPED_ROW_SCHEMAS: dict[str, tuple[str, ...]] = {
+    "trace_subject_bindings": ("str", "str", "str"),
+    "winner_bindings": ("str", "str", "str", "str", "int"),
+    "winner_confirmations": (
+        "str",
+        "str",
+        "str",
+        "str",
+        "str",
+        "int",
+        "int_or_none",
+        "float_or_none",
+        "str",
+    ),
+}
+_TYPED_ROW_LIMITS = {
+    "trace_subject_bindings": 16384,
+    "winner_bindings": 16384,
+    "winner_confirmations": 16384,
+}
+
+# R4 comparisons publish bounded scalar series under these exact keys.  The
+# generic metadata validator intentionally rejects an unknown list; these
+# vectors are admitted only for the explicitly named comparison artifact.
+_COMPARISON_NUMERIC_VECTOR_LIMITS = {
+    "values": 16384,
+    "oracle_vs_z0": 16384,
+    "oracle_vs_random": 16384,
+    "learned_vs_random": 16384,
+    "random_vs_z0": 16384,
+    "learned_vs_z0": 16384,
+    "recovery_values": 16384,
+    "route_gap_values": 16384,
+    "top1_regret_values": 16384,
+}
+
+# A benchmark row is a scalar parity record, not a feature/action payload.
+# Keep this schema in sync with benchmark._one_parity_case/run_teacher_benchmark
+# and reject descriptors/proposals/planes rather than relying on a generic
+# numeric-vector allow-list.
+_BENCHMARK_ROW_KEYS = {
+    "voxel_count",
+    "query_error_max",
+    "prediction_error_max",
+    "gain_error_max",
+    "charbonnier_epsilon",
+    "sampling_law",
+    "sampling_seed",
+    "query_draws",
+    "candidate_batch_size",
+    "candidate_batch_scope",
+    "cache_scope",
+    "optimized_gain",
+    "reference_gain",
+    "shared_before_elapsed_seconds",
+    "optimized_elapsed_seconds",
+    "reference_elapsed_seconds",
+    "parity_failure",
+    "dtype",
+    "query_calls",
+    "decoder_calls",
+    "decoded_outputs",
+    "stored_action_reused",
+    "reference_rebased_action",
+    "full_clone_bytes",
+    "optimized_clone_bytes",
+    "subject_id",
+    "case_index",
+    "repeat",
+    "cache_state",
+    "cache_reset",
+    "cache_reset_scope",
+    "footprint_build_elapsed_seconds",
+    "elapsed_seconds",
+    "allocated_memory_bytes",
+    "reserved_memory_bytes",
+    "device",
+    "state_version",
+    "action_id",
+    "effective_policy_hash",
+    "lattice_counter_delta",
+    "sampling_probability_digest",
+    "full_pipeline_elapsed_seconds",
+    "pipeline_counters",
+    "pipeline_counter_scope",
+}
+
+# Value-evaluation paired rows retain only signed gains/predictions/ranks,
+# identifiers, and producer/bank provenance hashes.  In particular, a
+# descriptor/proposal/plane payload under rows is never evidence metadata.
+_VALUE_PAIR_ROW_KEYS = {
+    "action_id",
+    "bank_manifest_hash",
+    "context_id",
+    "group_key",
+    "input_variant",
+    "measured_rank",
+    "measured_raw_gain",
+    "offset",
+    "point_id",
+    "predicted_rank",
+    "predicted_raw",
+    "predicted_scaled",
+    "proposal_hash",
+    "row_hash",
+    "row_id",
+    "row_key",
+    "shard",
+    "state_digest",
+    "state_version",
+    "subject_id",
 }
 _RAW_ARRAY_KEYS = {
     "array",
@@ -546,12 +811,216 @@ def _normalise_key(key: object) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(key).lower()).strip("_")
 
 
+def _validate_typed_metadata_rows(
+    value: Sequence[object],
+    *,
+    source: Path,
+    key_path: str,
+    schema: Sequence[str],
+    limit: int = 512,
+) -> None:
+    """Validate one of the explicitly declared tuple-row metadata lists."""
+
+    if len(value) > limit:
+        raise UnsafeEvidenceError(
+            f"allow-listed JSON evidence {source} has too many metadata rows at '{key_path}'; "
+            f"expected at most {limit}"
+        )
+    for row_index, row in enumerate(value):
+        if not isinstance(row, (list, tuple)) or len(row) != len(schema):
+            raise UnsafeEvidenceError(
+                f"allow-listed JSON evidence {source} has invalid metadata row at '{key_path}[{row_index}]'; "
+                f"expected a bounded sequence of length {len(schema)}"
+            )
+        for column_index, (item, expected) in enumerate(zip(row, schema)):
+            valid = (
+                expected == "str" and isinstance(item, str)
+            ) or (
+                expected == "int"
+                and isinstance(item, int)
+                and not isinstance(item, bool)
+            ) or (
+                expected == "int_or_none"
+                and (
+                    item is None
+                    or (isinstance(item, int) and not isinstance(item, bool))
+                )
+            ) or (
+                expected == "float_or_none"
+                and (
+                    item is None
+                    or (
+                        isinstance(item, (int, float))
+                        and not isinstance(item, bool)
+                        and math.isfinite(float(item))
+                    )
+                )
+            )
+            if not valid:
+                raise UnsafeEvidenceError(
+                    f"allow-listed JSON evidence {source} has invalid metadata value at "
+                    f"'{key_path}[{row_index}][{column_index}]'; expected {expected}"
+                )
+            if isinstance(item, str):
+                for pattern in _KNOWN_SECRET_TEXT_PATTERNS:
+                    if pattern.search(item):
+                        raise UnsafeEvidenceError(
+                            f"allow-listed JSON evidence {source} contains a credential-like string at "
+                            f"'{key_path}[{row_index}][{column_index}]'; remove the secret and retry "
+                            "(arbitrary text cannot be perfectly scanned)"
+                        )
+
+
+def _validate_string_pairs(
+    value: Sequence[object],
+    *,
+    source: Path,
+    key_path: str,
+    limit: int,
+) -> None:
+    if len(value) > limit or any(
+        not isinstance(row, (list, tuple))
+        or len(row) != 2
+        or any(not isinstance(item, str) for item in row)
+        for row in value
+    ):
+        raise UnsafeEvidenceError(
+            f"allow-listed JSON evidence {source} has invalid metadata pairs at '{key_path}'; "
+            f"expected at most {limit} string pairs"
+        )
+    for row_index, row in enumerate(value):
+        for column_index, item in enumerate(row):
+            for pattern in _KNOWN_SECRET_TEXT_PATTERNS:
+                if pattern.search(item):
+                    raise UnsafeEvidenceError(
+                        f"allow-listed JSON evidence {source} contains a credential-like string at "
+                        f"'{key_path}[{row_index}][{column_index}]'; remove the secret and retry "
+                        "(arbitrary text cannot be perfectly scanned)"
+                    )
+
+
+def _validate_safe_scalar_counter(
+    value: object,
+    *,
+    source: Path,
+    key_path: str,
+) -> None:
+    if value is None:
+        return
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) < 0.0
+    ):
+        raise UnsafeEvidenceError(
+            f"allow-listed JSON evidence {source} has invalid scalar counter at '{key_path}'; "
+            "expected a finite non-negative number or null"
+        )
+
+
+def _validate_safe_boolean_metadata(
+    value: object,
+    *,
+    source: Path,
+    key_path: str,
+) -> None:
+    if not isinstance(value, bool):
+        raise UnsafeEvidenceError(
+            f"allow-listed JSON evidence {source} has invalid boolean metadata at '{key_path}'; "
+            "expected a JSON boolean"
+        )
+
+
+def _validate_safe_counter_mapping(
+    value: Mapping[object, object],
+    *,
+    source: Path,
+    key_path: str,
+    category: str | None,
+) -> None:
+    """Validate the one bounded mapping form used by benchmark counters."""
+
+    if len(value) > 16:
+        raise UnsafeEvidenceError(
+            f"allow-listed JSON evidence {source} has too many decoder counter entries at '{key_path}'; "
+            "expected at most 16 finite scalar counters"
+        )
+    for key, child in value.items():
+        normalised = _normalise_key(key)
+        child_path = f"{key_path}.{key}"
+        if _SENSITIVE_KEY_RE.search(normalised) or _RAW_PAYLOAD_KEY_RE.search(normalised):
+            raise UnsafeEvidenceError(
+                f"allow-listed evidence {source} contains unsafe decoder counter key '{child_path}'"
+            )
+        _validate_safe_scalar_counter(child, source=source, key_path=child_path)
+        _validate_json_value(
+            child,
+            source=source,
+            key_path=child_path,
+            parent_key=normalised,
+            category=category,
+        )
+
+
+def _validate_benchmark_row(
+    value: Mapping[object, object],
+    *,
+    source: Path,
+    key_path: str,
+) -> None:
+    """Validate one exact ``rows.jsonl`` benchmark parity row.
+
+    Benchmark rows are emitted by the teacher parity service and contain only
+    scalar timings/errors, bounded counter mappings, and stable IDs.  A strict
+    top-level key set prevents a future descriptor/proposal/plane field from
+    becoming packageable merely because it happens to be JSON-compatible.
+    """
+
+    unknown = sorted(
+        str(key)
+        for key in value
+        if _normalise_key(key) not in _BENCHMARK_ROW_KEYS
+    )
+    if unknown:
+        raise UnsafeEvidenceError(
+            f"allow-listed benchmark rows {source} contain unsupported keys at '{key_path}': {unknown}; "
+            "only bounded scalar parity metadata is packageable"
+        )
+
+
+def _validate_value_pair_row(
+    value: Mapping[object, object],
+    *,
+    source: Path,
+    key_path: str,
+) -> None:
+    """Validate one same-bank ValueNet evaluation row.
+
+    The row is deliberately limited to signed measured/predicted gains,
+    ranks, IDs, and immutable provenance hashes; action descriptors,
+    proposals, planes, and tensors are not evidence metadata.
+    """
+
+    unknown = sorted(
+        str(key)
+        for key in value
+        if _normalise_key(key) not in _VALUE_PAIR_ROW_KEYS
+    )
+    if unknown:
+        raise UnsafeEvidenceError(
+            f"allow-listed value-evaluation rows {source} contain unsupported keys at '{key_path}': {unknown}; "
+            "descriptors/proposals/planes are never packaged"
+        )
+
+
 def _validate_json_value(
     value: object,
     *,
     source: Path,
     key_path: str = "",
     parent_key: str | None = None,
+    category: str | None = None,
 ) -> None:
     if isinstance(value, float) and not math.isfinite(value):
         raise EvidenceValidationError(
@@ -574,6 +1043,38 @@ def _validate_json_value(
                     f"allow-listed evidence {source} contains credential-like key '{child_path}'; "
                     "remove the secret and retry"
                 )
+            if normalised in _SAFE_SCALAR_COUNTER_KEYS:
+                if normalised in _SAFE_COUNTER_MAPPING_KEYS and isinstance(child, Mapping):
+                    _validate_safe_counter_mapping(
+                        child,
+                        source=source,
+                        key_path=child_path,
+                        category=category,
+                    )
+                    continue
+                _validate_safe_scalar_counter(
+                    child,
+                    source=source,
+                    key_path=child_path,
+                )
+                # This exact scalar counter is intentionally exempt from the
+                # raw-payload token matcher; nested arrays/objects fail closed
+                # in the helper above, and arbitrary names remain rejected.
+                _validate_json_value(
+                    child,
+                    source=source,
+                    key_path=child_path,
+                    parent_key=normalised,
+                    category=category,
+                )
+                continue
+            if normalised in _SAFE_BOOLEAN_METADATA_KEYS:
+                _validate_safe_boolean_metadata(
+                    child,
+                    source=source,
+                    key_path=child_path,
+                )
+                continue
             if _RAW_PAYLOAD_KEY_RE.search(normalised):
                 raise UnsafeEvidenceError(
                     f"allow-listed evidence {source} contains raw target/image payload key '{child_path}'; "
@@ -607,9 +1108,79 @@ def _validate_json_value(
                 source=source,
                 key_path=child_path,
                 parent_key=normalised,
+                category=category,
             )
     elif isinstance(value, (list, tuple)):
         list_key = parent_key or ""
+        if category == "value_evaluation_pairs" and list_key == "rows":
+            if len(value) > 16384 or not all(isinstance(item, Mapping) for item in value):
+                raise UnsafeEvidenceError(
+                    f"allow-listed value-evaluation rows {source} has invalid rows at '{key_path}'; "
+                    "expected at most 16384 object rows"
+                )
+            for index, child in enumerate(value):
+                assert isinstance(child, Mapping)
+                _validate_value_pair_row(
+                    child,
+                    source=source,
+                    key_path=f"{key_path}[{index}]",
+                )
+                _validate_json_value(
+                    child,
+                    source=source,
+                    key_path=f"{key_path}[{index}]",
+                    category=category,
+                )
+            return
+        if category == "paired_comparison":
+            if list_key in _COMPARISON_NUMERIC_VECTOR_LIMITS:
+                limit = _COMPARISON_NUMERIC_VECTOR_LIMITS[list_key]
+                if len(value) > limit or not all(
+                    isinstance(item, (int, float)) and not isinstance(item, bool)
+                    for item in value
+                ):
+                    raise UnsafeEvidenceError(
+                        f"allow-listed comparison evidence {source} has invalid or oversized numeric vector at '{key_path}'; "
+                        f"expected at most {limit} finite scalar values"
+                    )
+                for index, item in enumerate(value):
+                    if isinstance(item, float) and not math.isfinite(item):
+                        raise EvidenceValidationError(
+                            f"non-finite comparison vector value in {source}: {key_path}[{index}]"
+                        )
+                return
+            if list_key == "subjects":
+                if len(value) > 16384 or not all(isinstance(item, str) for item in value):
+                    raise UnsafeEvidenceError(
+                        f"allow-listed comparison evidence {source} has invalid subject IDs at '{key_path}'; "
+                        "expected at most 16384 strings"
+                    )
+                for index, child in enumerate(value):
+                    _validate_json_value(
+                        child,
+                        source=source,
+                        key_path=f"{key_path}[{index}]",
+                        parent_key=list_key,
+                        category=category,
+                    )
+                return
+        if list_key in _STRING_PAIR_LIST_LIMITS:
+            _validate_string_pairs(
+                value,
+                source=source,
+                key_path=key_path,
+                limit=_STRING_PAIR_LIST_LIMITS[list_key],
+            )
+            return
+        if list_key in _TYPED_ROW_SCHEMAS:
+            _validate_typed_metadata_rows(
+                value,
+                source=source,
+                key_path=key_path,
+                schema=_TYPED_ROW_SCHEMAS[list_key],
+                limit=_TYPED_ROW_LIMITS.get(list_key, 512),
+            )
+            return
         if list_key in _AFFINE_KEYS:
             rows = list(value)
             flat = rows and all(
@@ -664,13 +1235,15 @@ def _validate_json_value(
                     child,
                     source=source,
                     key_path=f"{key_path}[{index}]",
+                    category=category,
                 )
             return
         if list_key in _STRING_LIST_KEYS:
-            if len(value) > 256 or not all(isinstance(item, str) for item in value):
+            limit = _STRING_LIST_LIMITS.get(list_key, 256)
+            if len(value) > limit or not all(isinstance(item, str) for item in value):
                 raise UnsafeEvidenceError(
                     f"allow-listed JSON evidence {source} has invalid string list at '{key_path}'; "
-                    "expected at most 256 strings"
+                    f"expected at most {limit} strings"
                 )
             for index, child in enumerate(value):
                 _validate_json_value(
@@ -678,6 +1251,7 @@ def _validate_json_value(
                     source=source,
                     key_path=f"{key_path}[{index}]",
                     parent_key=list_key,
+                    category=category,
                 )
             return
         # Top-level arrays are accepted only for row documents, and must be a
@@ -685,7 +1259,12 @@ def _validate_json_value(
         # ambiguous and therefore fail-closed rather than risk a raw payload.
         if parent_key is None and all(isinstance(item, Mapping) for item in value):
             for index, child in enumerate(value):
-                _validate_json_value(child, source=source, key_path=f"[{index}]")
+                _validate_json_value(
+                    child,
+                    source=source,
+                    key_path=f"[{index}]",
+                    category=category,
+                )
             return
         raise UnsafeEvidenceError(
             f"allow-listed JSON evidence {source} contains an unrecognised array at '{key_path}'; "
@@ -739,6 +1318,7 @@ def _load_json(path: Path, *, category: str) -> object:
         "bank_index_metadata",
         "calibration_manifest_metadata",
         "calibration_metadata",
+        "paired_comparison",
     } and not isinstance(value, Mapping):
         raise EvidenceValidationError(
             f"allow-listed metadata evidence must be a JSON object: {path}"
@@ -748,6 +1328,7 @@ def _load_json(path: Path, *, category: str) -> object:
         "metrics_history",
         "paired_subject_rows",
         "paired_action_rows",
+        "value_evaluation_pairs",
         "teacher_benchmark",
         "teacher_parity",
     }:
@@ -761,11 +1342,11 @@ def _load_json(path: Path, *, category: str) -> object:
             raise EvidenceValidationError(
                 f"allow-listed metrics/row arrays must contain JSON objects: {path}"
             )
-    _validate_json_value(value, source=path)
+    _validate_json_value(value, source=path, category=category)
     return value
 
 
-def _validate_jsonl(path: Path) -> None:
+def _validate_jsonl(path: Path, *, category: str) -> None:
     try:
         text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError as error:
@@ -789,7 +1370,15 @@ def _validate_jsonl(path: Path) -> None:
             raise EvidenceValidationError(
                 f"allow-listed JSONL rows must be objects: {path} line {line_number}"
             )
-        _validate_json_value(value, source=path, key_path=f"line[{line_number}]")
+        key_path = f"line[{line_number}]"
+        if category == "benchmark_rows":
+            _validate_benchmark_row(value, source=path, key_path=key_path)
+        _validate_json_value(
+            value,
+            source=path,
+            key_path=key_path,
+            category=category,
+        )
 
 
 def _validate_text(path: Path) -> None:
@@ -849,7 +1438,7 @@ def _validate_csv(path: Path) -> None:
 
 def _validate_payload(path: Path, category: str) -> None:
     if path.suffix.lower() == ".jsonl":
-        _validate_jsonl(path)
+        _validate_jsonl(path, category=category)
     elif path.suffix.lower() == ".json":
         _load_json(path, category=category)
     elif path.suffix.lower() == ".csv":
