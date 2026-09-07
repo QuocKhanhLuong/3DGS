@@ -310,3 +310,24 @@ only the versioned teacher configuration, never target tensors, labels or teache
 contexts. Unknown nested fields and forbidden target/oracle state elsewhere
 remain rejected. Redacting or stringifying the configuration to evade validation
 is not an accepted serialization strategy.
+
+The runtime schema additionally requires `input_manifest_hash`, derived from
+the ordered `(subject_id, observation_record_id)` pairs. Observation record
+identity includes observation/mask content, geometry, normalization and source
+paths. Equal subject names alone do not establish equal resume inputs. The
+hash is validated before optimizer/RNG mutation. Synthetic observation generation
+uses an independent deterministic generator so model hydration cannot change
+fixture data under unchanged names and seeds. `continuation` is the explicitly
+permitted optional runtime field recording the allowed max-update override.
+
+`ExperimentOptions.local_footprint_audit` is an explicit false-by-default
+diagnostic. Its selected stored actions are measured after completed inference
+using both physical-sphere local signed Charbonnier gain and MAIN complete
+footprint/global-denominator gain. `local_footprint_audit.jsonl` records both
+denominators, voxel counts and sign disagreements; local control labels never
+enter MAIN banks. W5 scientific services owns computation; the CLI owner
+forwards the flag and documents its R4 command. Paired comparison must consume
+the actual service artifacts, retain required producer/split/loss identities,
+and permit absent learned results for pre-ValueNet correction/selection
+headroom decisions. Whole-route oracle-minus-learned gain is a route gap,
+not top-1 regret at a single measured candidate state.
