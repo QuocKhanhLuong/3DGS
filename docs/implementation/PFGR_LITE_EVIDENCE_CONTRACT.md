@@ -405,3 +405,32 @@ the real audit scope. No change to MAIN row or checkpoint schema is required.
 ## S2 measurement budget sidecar clarification (2026-09-07)
 
 `StageOptions.teacher_q_draws: int | None = None` is the explicit S2 measurement budget. `None` inherits the frozen config teacher Q; fixed-Q overrides require at least two draws; exact enumeration resolves Q=0. CLI `--query-count` binds this sidecar, while `query_mode` selects exact versus sampled measurement. These execution options are serialized and labelled, and do not mutate the saved producer PFGR configuration or its loss/mask definition. Unsupported state/candidate counts fail explicitly rather than being clamped. W3 owns the stage field/resolution; W5 owns CLI forwarding.
+
+## Review preparation and cached ranking joins (2026-09-07)
+
+The existing `calibrate --dry-manifest` and `evaluate --split-role test
+--dry-manifest` commands prepare `review_context.json` when their predecessor
+artifacts exist. Preparation never approves the run and performs no MRI,
+target, teacher or route work. The context binds ordered subject IDs, original
+split and role manifest, producer and ValueFitIdentity, resolved scientific
+configuration, policy, budget, seed, measurement Q and execution chunks.
+Normal execution recomputes this context and validates the human-authored
+`pfgr-lite-review-receipt-v1` before target access. Missing predecessors remain
+BLOCKED. Reviewer identity/decision are supplied by the reviewer, never
+fabricated by a command or inferred from elapsed time.
+
+R6's first implementation is explicitly same-bank evaluation. A cached Value
+artifact must match the evaluated bank manifest, fixed gain scale including
+provenance, producer, split and complete role manifest. Supplied external
+split/role files are validated before any optimizer work. Per-action ranking
+records retain immutable bank/action/group identities so V126/V270/V366 can
+be compared on the same measured population without new MRI/teacher calls.
+This is a training-bank ranking diagnostic; it is not held-out prediction
+evidence. A separate evaluation-bank population requires an explicit future
+contract rather than silently rescaling its labels.
+
+S5 accounts for actual collection and replay encodings, validation calls,
+action/value/teacher work and CPU tensor staging in both insufficient and
+sufficient branches. CPU staging grows with the selected cohort; a measured
+peak is not a declared finite resource limit. Each additional encoding used
+to replay a sealed route is included in operation counts.
