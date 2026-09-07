@@ -172,7 +172,7 @@ def _finite(name: str, value: Tensor, rank: int | None = None, final: int | None
 
 
 def _integer(name: str, value: Tensor, rank: int | None = None, final: int | None = None) -> None:
-    if not isinstance(value, Tensor) or not value.dtype in (torch.bool, torch.int8, torch.int16, torch.int32, torch.int64, torch.uint8):
+    if not isinstance(value, Tensor) or value.dtype not in (torch.bool, torch.int8, torch.int16, torch.int32, torch.int64, torch.uint8):
         raise TypeError(f"{name} must be an integer tensor")
     if rank is not None and value.ndim != rank:
         raise ValueError(f"{name} must have rank {rank}")

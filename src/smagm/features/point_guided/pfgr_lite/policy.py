@@ -8,12 +8,12 @@ from collections.abc import Mapping
 from typing import Literal
 
 import torch
-from torch import Tensor, nn
+from torch import Tensor
 
 from .action_proposal import ACTION_GENERATOR_VERSION
 from .config import PFGRLiteConfig
 from .calibration import calibration_evidence
-from .provenance import ProducerCompatibility, ValueFitIdentity, canonical_digest, module_state_digest
+from .provenance import ProducerCompatibility, ValueFitIdentity, canonical_digest
 from .types import ActionProposalBatch, Decision, GainCalibration, ProducerDependencies
 
 

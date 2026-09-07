@@ -11,7 +11,6 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 import hashlib
 import io
-import json
 import os
 from pathlib import Path
 import re

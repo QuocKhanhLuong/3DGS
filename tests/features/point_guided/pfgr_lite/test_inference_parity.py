@@ -7,11 +7,10 @@ from smagm.features.point_guided import PointGuidedConfig
 from smagm.features.point_guided.pfgr_lite.action_proposal import ACTION_GENERATOR_VERSION
 from smagm.features.point_guided.pfgr_lite.config import PFGRLiteConfig, PFGRPolicyConfig
 from smagm.features.point_guided.pfgr_lite.inference import run_pfgr_inference
-from smagm.features.point_guided.pfgr_lite.calibration import CalibrationEvidence, CalibrationWinner, TraceReceipt, attach_calibration_evidence, calibration_evidence, fit_calibration, trace_receipt_from_route
+from smagm.features.point_guided.pfgr_lite.calibration import CalibrationEvidence, CalibrationWinner, TraceReceipt, attach_calibration_evidence, calibration_evidence, trace_receipt_from_route
 from smagm.features.point_guided.pfgr_lite.model import PFGRLiteModel
-from smagm.features.point_guided.pfgr_lite.policy import EffectivePolicy, load_effective_policy
+from smagm.features.point_guided.pfgr_lite.policy import load_effective_policy
 from smagm.features.point_guided.pfgr_lite.provenance import ValueFitIdentity, canonical_digest
-from smagm.features.point_guided.state_init import DynamicTriPlanes
 from smagm.features.point_guided.state_init import DynamicTriPlanes
 from smagm.features.point_guided.pfgr_lite.types import GainCalibration, TrainingRoleManifest
 

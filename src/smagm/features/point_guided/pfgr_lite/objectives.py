@@ -10,7 +10,7 @@ gradient from accidentally reaching V or the detached teacher.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 import math
 from typing import Any
 

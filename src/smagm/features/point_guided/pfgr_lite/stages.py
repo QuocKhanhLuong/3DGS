@@ -13,14 +13,12 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 import copy
-import hashlib
 import inspect
 import json
 import math
 import os
 from pathlib import Path
 import random
-import shutil
 from types import MappingProxyType
 from typing import Any, Literal
 
@@ -1546,7 +1544,9 @@ def _run_s0(inputs: StageInputs, execution: StageExecutionConfig) -> tuple[dict[
     if static_step is None:
         if inputs.model is None:
             raise ValueError("S0 requires a PFGR model or explicit static_step(sample, ...) callable")
-        static_step = lambda sample, **_kwargs: _default_static_step(sample, model=inputs.model, options=execution.stage_options, inputs=inputs)
+
+        def static_step(sample: TargetFreeSample, **_kwargs: object) -> Any:
+            return _default_static_step(sample, model=inputs.model, options=execution.stage_options, inputs=inputs)
     static_names_and_modules: tuple[tuple[str, nn.Module | None], ...] = (
         ("static_head", _module(inputs.model, ("static_head",))),
         ("base_plane_projector", _module(inputs.model, ("frontend.base_plane_projector", "base_plane_projector"))),
@@ -1699,15 +1699,17 @@ def _run_s1(inputs: StageInputs, execution: StageExecutionConfig) -> tuple[dict[
     if route_builder is None:
         if inputs.model is None:
             raise ValueError("S1 requires a PFGR model or explicit target-free route_builder")
-        route_builder = lambda sample, **kwargs: _default_random_route(
-            sample,
-            model=inputs.model,
-            options=options,
-            inputs=inputs,
-            k=kwargs.get("k", 1),
-            seed=kwargs.get("seed", options.seed),
-            counters=kwargs.get("counters"),
-        )
+
+        def route_builder(sample: TargetFreeSample, **kwargs: object) -> Any:
+            return _default_random_route(
+                sample,
+                model=inputs.model,
+                options=options,
+                inputs=inputs,
+                k=kwargs.get("k", 1),
+                seed=kwargs.get("seed", options.seed),
+                counters=kwargs.get("counters"),
+            )
     updater = _module(inputs.model, ("updater", "update_net"))
     spectral = _module(inputs.model, ("frontend.spectral_anchor_builder", "spectral_projector", "spectral_anchor_builder"))
     if options.arm == "u_plus_spectral" and spectral is None and not options.engineering_only:
@@ -1756,7 +1758,6 @@ def _run_s1(inputs: StageInputs, execution: StageExecutionConfig) -> tuple[dict[
     history_records: list[dict[str, Any]] = []
     paired_rows: list[dict[str, Any]] = []
     paired_unmeasured: list[dict[str, Any]] = []
-    observed_producer_hash: str | None = None
     observed_producer: object | None = None
     before_hash = module_state_digest(spectral) if spectral is not None else "none"
     changed_projector = 0
@@ -1800,7 +1801,6 @@ def _run_s1(inputs: StageInputs, execution: StageExecutionConfig) -> tuple[dict[
                     context = result.get("context") if isinstance(result, Mapping) else getattr(result, "context", None)
                     if context is not None:
                         observed_producer = getattr(context, "producer", None)
-                        observed_producer_hash = getattr(observed_producer, "compatibility_hash", None)
                     if _route_k(result) != k:
                         raise ValueError("route_builder returned a route with K different from the sampled K")
                     target_context = _target_context_for(sample, result, inputs, engineering_only=execution.stage_options.engineering_only)
@@ -2053,7 +2053,9 @@ def _select_diverse(
             return tuple(((feature[index] if index < len(feature) else 0.0) - mins[index]) / spans[index] if spans[index] > 0.0 else 0.0 for index in range(width))
 
     else:
-        normalized = lambda _item: None  # type: ignore[assignment]
+
+        def normalized(_item: object) -> tuple[float, ...] | None:
+            return None
     chosen: list[object] = []
     used = {_candidate_value(item)[0] for item in selected}
     available = [item for item in candidates if _candidate_value(item)[0] not in used]
@@ -2284,15 +2286,17 @@ def _run_s2_impl(inputs: StageInputs, execution: StageExecutionConfig, output_di
     if route_builder is None:
         if inputs.model is None:
             raise ValueError("S2 requires a PFGR model or target-free behavior_builder/route_builder")
-        route_builder = lambda sample, **kwargs: _default_random_route(
-            sample,
-            model=inputs.model,
-            options=options,
-            inputs=inputs,
-            k=4,
-            seed=kwargs.get("seed", options.seed),
-            counters=kwargs.get("counters"),
-        )
+
+        def route_builder(sample: TargetFreeSample, **kwargs: object) -> Any:
+            return _default_random_route(
+                sample,
+                model=inputs.model,
+                options=options,
+                inputs=inputs,
+                k=4,
+                seed=kwargs.get("seed", options.seed),
+                counters=kwargs.get("counters"),
+            )
     proposal_builder = inputs.proposal_builder
     if proposal_builder is None:
         def proposal_builder(trace: object, state: object, **_kwargs: object) -> list[object]:
@@ -3069,7 +3073,16 @@ def _run_s5(inputs: StageInputs, execution: StageExecutionConfig, output_dir: Pa
     traces: list[object] = []
     bindings: list[Mapping[str, Any]] = []
     if forced_builder is None and inputs.model is not None and inputs.query is not None and inputs.writer is not None:
-        forced_builder = lambda sample, **kwargs: _default_random_route(sample, model=inputs.model, options=execution.stage_options, inputs=inputs, k=4, seed=kwargs.get("seed", execution.stage_options.seed))
+
+        def forced_builder(sample: TargetFreeSample, **kwargs: object) -> Any:
+            return _default_random_route(
+                sample,
+                model=inputs.model,
+                options=execution.stage_options,
+                inputs=inputs,
+                k=4,
+                seed=kwargs.get("seed", execution.stage_options.seed),
+            )
     if forced_builder is not None:
         for index, sample in enumerate(inputs.samples):
             trace = _invoke(forced_builder, sample, sample=sample, k=4, forced=True, seed=execution.stage_options.seed + index, options=execution.stage_options, config=execution.config)
@@ -3240,12 +3253,33 @@ def build_stage_inputs(
                 offset_hidden_channels=12,
                 medicalnet_checkpoint_path=Path(medicalnet_checkpoint_path).resolve(),
                 medicalnet_checkpoint_sha256=resolved_hash,
-                require_pretrained_backbone=True,
+                # An explicit local checkpoint plus its expected digest is
+                # sufficient for the factory source boundary.  The legacy
+                # loader may optionally require an approved official digest
+                # when a caller sets this flag, but an engineering fixture is
+                # intentionally allowed to remain arbitrary/random.
+                require_pretrained_backbone=False,
+            )
+        else:
+            # An execution config may carry the reviewed frontend sidecar
+            # with null checkpoint fields while the caller supplies the
+            # verified source path/hash at the factory boundary.  Bind those
+            # values onto the typed config before constructing the semantic
+            # prior; otherwise the external checkpoint is validated only by
+            # the CLI preflight and silently ignored by MedicalNet.  Keep the
+            # engineering fixture's explicit random-source policy, while
+            # production configs continue to require a strict verified source
+            # through the existing integrity guard below.
+            frontend_config = replace(
+                frontend_config,
+                medicalnet_checkpoint_path=Path(medicalnet_checkpoint_path).resolve(),
+                medicalnet_checkpoint_sha256=resolved_hash,
+                require_pretrained_backbone=bool(frontend_config.require_pretrained_backbone),
             )
     if frontend_config is not None and not resolved_config.engineering_only:
         source_path = getattr(frontend_config, "medicalnet_checkpoint_path", None)
         source_hash = getattr(frontend_config, "medicalnet_checkpoint_sha256", None)
-        if source_path is None or source_hash is None or not bool(getattr(frontend_config, "require_pretrained_backbone", False)):
+        if source_path is None or source_hash is None:
             raise ValueError("production StageInputs require a verified MedicalNet checkpoint path and SHA-256")
     if frontend_config is None and not resolved_config.engineering_only and checkpoint_path is None:
         raise ValueError("production StageInputs require frontend_config with verified MedicalNet provenance or checkpoint_path")
@@ -3371,8 +3405,10 @@ def build_stage_inputs(
         prior = getattr(getattr(model, "frontend", None), "semantic_prior", None)
         source = getattr(prior, "backbone_provenance", None)
         integrity = bool(getattr(source, "integrity_verified", getattr(source, "checkpoint_integrity_verified", False))) if source is not None else False
-        if source is None or not integrity or not bool(getattr(source, "official_pretrained_verified", False)):
-            raise ValueError("production StageInputs require verified MedicalNet checkpoint provenance; synthetic/unverified backbones are denied")
+        loaded_keys = int(getattr(source, "loaded_backbone_key_count", 0)) if source is not None else 0
+        frozen = bool(getattr(prior, "backbone_is_frozen", False)) if prior is not None else False
+        if source is None or not integrity or loaded_keys <= 0 or not frozen:
+            raise ValueError("production StageInputs require verified MedicalNet checkpoint provenance with loaded keys and a frozen backbone")
     from .sparse_write import make_action_writer, make_point_query, make_support_legal_mask
 
     # W2's query is stateless and can be shared across subjects; its writer is

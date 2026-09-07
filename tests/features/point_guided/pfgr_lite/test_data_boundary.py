@@ -237,3 +237,79 @@ def test_nifti_adapter_preserves_affine_and_deferred_target_identity(tmp_path: P
     wrong = defer_supervision(sample, wrong_provider)
     with pytest.raises(ValueError, match="subject"):
         wrong(completed_context=context, prediction=prediction)
+
+
+def test_stage_factory_binds_external_one_channel_checkpoint_to_existing_frontend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An existing sidecar with null source fields must consume the supplied checkpoint."""
+
+    import hashlib
+    import json
+    import shutil
+    import tempfile
+
+    from smagm.features.point_guided import PointGuidedConfig
+    from smagm.features.point_guided.pfgr_lite.config import PFGRLiteConfig
+    from smagm.features.point_guided.pfgr_lite.stages import StageOptions, build_stage_inputs
+    from smagm.features.point_guided.medicalnet_resnet10 import MedicalNetResNet10
+    from smagm.data.brats21_point_guided import build_subject_split
+
+    cache = Path(".pytest_cache")
+    cache.mkdir(parents=True, exist_ok=True)
+    root = Path(tempfile.mkdtemp(prefix="w5-boundary-checkpoint-", dir=str(cache)))
+    try:
+        subject_id = "BraTS2021_00001"
+        split = build_subject_split([subject_id], seed=17, split_fractions=(0.8, 0.1, 0.1))
+        split_file = root / "split.json"
+        split_file.write_text(json.dumps(split.to_dict()), encoding="utf-8")
+        roles = build_training_role_manifest(split, engineering_only=True)
+        roles_file = root / "roles.json"
+        roles_file.write_text(json.dumps(roles.as_dict()), encoding="utf-8")
+
+        torch.manual_seed(17)
+        checkpoint = root / "engineering-random-1channel.pt"
+        torch.save(MedicalNetResNet10(in_channels=1).state_dict(), checkpoint)
+        checkpoint_sha = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+
+        # Keep this regression focused on source binding; the generated-NIfTI
+        # acceptance test covers the real loader separately.
+        monkeypatch.setattr(
+            "smagm.features.point_guided.pfgr_lite.stages.load_observation_sample",
+            lambda source, **_: _sample(Path(source).name),
+        )
+        config = PFGRLiteConfig(num_points=4, engineering_only=True, build_chunk_size=64, decode_chunk_size=64)
+        frontend = PointGuidedConfig(
+            num_semantic_classes=3,
+            num_points=4,
+            point_candidate_multiplier=2,
+            offset_hidden_channels=12,
+            medicalnet_checkpoint_path=None,
+            medicalnet_checkpoint_sha256=None,
+            require_pretrained_backbone=False,
+        )
+        factory_kwargs = {
+            "data_root": root,
+            "split_file": split_file,
+            "roles_file": roles_file,
+            "frontend_config": frontend,
+            "medicalnet_checkpoint_path": checkpoint,
+            "normalization_config": {"normalization_policy": "masked_zscore"},
+            "stage_options": StageOptions(stage="S0", seed=17, engineering_only=True, query_chunk_size=64),
+        }
+        with pytest.raises(ValueError, match="medicalnet_checkpoint_sha256 is required"):
+            build_stage_inputs(config, **factory_kwargs, medicalnet_checkpoint_sha256=None)
+        with pytest.raises(ValueError, match="SHA-256 mismatch"):
+            build_stage_inputs(config, **factory_kwargs, medicalnet_checkpoint_sha256="0" * 64)
+        inputs = build_stage_inputs(config, **factory_kwargs, medicalnet_checkpoint_sha256=checkpoint_sha)
+        provenance = inputs.model.frontend.semantic_prior.backbone_provenance
+        assert provenance is not None
+        assert provenance.checkpoint_path == str(checkpoint.resolve())
+        assert provenance.sha256 == checkpoint_sha
+        assert provenance.integrity_verified is True
+        assert provenance.source_input_channels == 1
+        assert provenance.adapted_input_channels == 3
+        assert provenance.input_conv_adapted is True
+        assert provenance.official_pretrained_verified is False
+        assert provenance.source_state_dict_key_count > 0
+        assert provenance.loaded_backbone_key_count > 0
+    finally:
+        shutil.rmtree(root, ignore_errors=True)

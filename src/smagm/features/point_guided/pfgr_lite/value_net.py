@@ -7,12 +7,12 @@ target volume, updater, decoder, or teacher is imported or called.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import copy
 import math
 import sys
 import time
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 import torch
 from torch import Tensor, nn

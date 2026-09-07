@@ -18,13 +18,13 @@ from pathlib import Path
 import re
 import shutil
 import tempfile
-from typing import Any, Iterable, Iterator, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Mapping
 
 import torch
 from torch import Tensor
 
 from .config import ValueModelConfig
-from .provenance import ProducerCompatibility, SourceProvenance, canonical_digest, canonical_json, tensor_digest
+from .provenance import ProducerCompatibility, SourceProvenance, canonical_digest, tensor_digest
 from .types import (
     DESCRIPTOR_SCHEMA,
     GainLabel,
@@ -690,9 +690,14 @@ class ValueBankRow:
 
         if isinstance(action, Mapping):
             source = action
-            getter = lambda key, default=None: _get(source, key, default=default)
+
+            def getter(key: str, default: Any = None) -> Any:
+                return _get(source, key, default=default)
+
         else:
-            getter = lambda key, default=None: getattr(action, key, default)
+
+            def getter(key: str, default: Any = None) -> Any:
+                return getattr(action, key, default)
         o270 = getter("o270")
         v126 = getter("v126")
         delta = getter("delta", getter("actual_delta"))

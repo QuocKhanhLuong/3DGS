@@ -8,11 +8,10 @@ No target or segmentation object is reachable from :class:`TargetFreeSample`.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field, fields, replace
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, fields
 import hashlib
 import inspect
-import json
 import math
 from pathlib import Path
 from types import MappingProxyType

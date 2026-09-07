@@ -5,7 +5,7 @@ import torch
 
 from smagm.features.point_guided.pfgr_lite.config import PFGRLiteConfig, PFGRPolicyConfig
 from smagm.features.point_guided.pfgr_lite.action_proposal import ACTION_GENERATOR_VERSION
-from smagm.features.point_guided.pfgr_lite.calibration import CalibrationEvidence, CalibrationWinner, TraceReceipt, attach_calibration_evidence, calibration_evidence, fit_calibration
+from smagm.features.point_guided.pfgr_lite.calibration import CalibrationEvidence, CalibrationWinner, TraceReceipt, attach_calibration_evidence, calibration_evidence
 from smagm.features.point_guided.pfgr_lite.policy import (
     EffectivePolicy,
     load_effective_policy,

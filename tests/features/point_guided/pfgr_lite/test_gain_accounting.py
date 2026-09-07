@@ -274,7 +274,8 @@ def test_signed_gain_telescopes_for_sequential_reference_writes() -> None:
     final_prediction = decoder.mlp(
         lattice.query(state_after2, all_ids, chunk_size=8)
     ).reshape(-1)
-    rho = lambda values: torch.sqrt(values.square() + 1e-6)
+    def rho(values: torch.Tensor) -> torch.Tensor:
+        return torch.sqrt(values.square() + 1e-6)
     first_gain = (
         rho(before_prediction - target.reshape(-1))
         - rho(after_prediction - target.reshape(-1))
@@ -377,7 +378,8 @@ def test_same_action_local_positive_but_global_footprint_negative() -> None:
         EffectTeacherConfig(mode="exact_footprint"),
         chunk_size=37,
     )[0]
-    rho = lambda value: torch.sqrt(value.square() + 1e-6)
+    def rho(value: torch.Tensor) -> torch.Tensor:
+        return torch.sqrt(value.square() + 1e-6)
     local_gain = (
         rho(before_values[sphere] - target.reshape(-1)[sphere])
         - rho(after_values[sphere] - target.reshape(-1)[sphere])
@@ -427,7 +429,8 @@ def test_teacher_labels_telescope_actual_sequential_states() -> None:
         chunk_size=5,
     )[0]
     ids = _full_ids(output.shape_dhw)
-    rho = lambda value: torch.sqrt(value.square() + 1e-6)
+    def rho(value: torch.Tensor) -> torch.Tensor:
+        return torch.sqrt(value.square() + 1e-6)
     prediction0 = decoder.mlp(lattice.query(state0.planes, ids, chunk_size=5)).reshape(
         -1
     )
