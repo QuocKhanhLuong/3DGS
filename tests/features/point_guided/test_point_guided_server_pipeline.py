@@ -298,7 +298,14 @@ def test_server_configs_keep_locked_constants() -> None:
     assert serialized["reward_ranking_min_target_gap"] == pytest.approx(0.001)
     assert main_model.trajectory.config.lambda_travel == pytest.approx(0.05)
     assert main_model.trajectory.config.lambda_overlap == pytest.approx(0.20)
-    assert main_model.trajectory.config.lambda_step == pytest.approx(0.05)
+    # Commit 8988d35 corrected the 4070 route-step cost and enabled the
+    # bounded/separate-halt exploration controls; this test must track that
+    # historical config rather than silently changing the legacy file.
+    assert main_model.trajectory.config.lambda_step == pytest.approx(0.025)
+    assert main_model.trajectory.config.bounded_travel_cost is True
+    assert main_model.trajectory.config.separate_halt_from_utility is True
+    assert main_model.trajectory.config.training_exploration_steps == 1
+    assert main_supervision.supervise_terminal_state is True
 
 
 def test_normalization_policy_controls_metric_range_and_space_label() -> None:
