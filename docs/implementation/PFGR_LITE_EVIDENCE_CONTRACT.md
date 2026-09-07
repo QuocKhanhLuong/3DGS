@@ -331,3 +331,41 @@ the actual service artifacts, retain required producer/split/loss identities,
 and permit absent learned results for pre-ValueNet correction/selection
 headroom decisions. Whole-route oracle-minus-learned gain is a route gap,
 not top-1 regret at a single measured candidate state.
+
+## Concrete calibration runner
+
+W5 CLI owns `calibration_runner.py` and its dedicated tests. W3b delegates
+`run_calibration(inputs, CalibrationRunOptions, output_dir)` directly. Options
+use `pfgr-lite-calibration-run-v1`: `confirmation_mode` (`exact`, default, or
+`iid_fixed_q`), `confirmation_q_draws` (zero for exact, at least two for sampled),
+`confirmation_seed`, `collection_seed`, `value_input_variant` (366 default),
+`max_subjects` (positive integer or null), and `engineering_only`. Roles come
+from the immutable manifest, not configurable role-name aliases. The factory
+has explicit `subject_role="calibration"` for the union of training-only fit
+and allowance subjects; the CLI must not inherit a validation role for S5.
+
+Inputs carry actual model, samples, manifest, deferred subject-ID target
+provider, and the existing value-model/fit-identity/scale metadata. Concrete
+defaults construct W4 forced learned K4 routes and real subject/context
+bindings, then measure their stored winners through W2. Callback-only
+production defaults and fabricated public synthetic winners are prohibited.
+Collection completes before teacher measurement. Producers remain frozen and
+run without autograd; cohort GPU contexts/graphs are not retained. CPU staging
+or exact bounded replay must preserve identity and account for memory and any
+additional encodings. A required new compact validation seam needs an explicit
+planner amendment to W4.
+
+The result carries `schema_version`, `calibration_evidence`, `fit_winners`,
+`allowance_winners`, `completed_traces`, `collection_policy`, `calibration`,
+`artifacts`, and `metrics`. Bounded engineering collection uses actual subjects
+and labels; insufficient data yields INCONCLUSIVE, `calibration=None`, and no
+adaptive artifact. It never fabricates subjects to meet minimum data counts.
+Actual action-derived confirmation seeds remain distinct from the parent
+confirmation seed; exact labels use Q=0, seed=null and zero MC uncertainty.
+
+The legacy frontend import test permits the authorized staged data boundary
+only for `load_point_guided_subject` and `load_point_guided_split` imported from
+`smagm.data.brats21_point_guided` in the exact PFGR `data.py` and `stages.py`
+paths. Inference/model/routing modules and all other forbidden imports retain
+the original restriction. W3b owns this narrowly scoped test amendment and
+negative sibling-path/symbol coverage.
