@@ -184,6 +184,15 @@ class StageOptions:
             _nonnegative_int("max_updates", self.max_updates, maximum=10_000_000)
         if not isinstance(self.device, str) or not self.device.strip():
             raise ValueError("device must be a nonempty string")
+        # Stage services may be called directly (without the CLI resolver),
+        # so resolve their operational placement at the same typed boundary.
+        # An unavailable CUDA request fails closed; CPU aliases are
+        # canonicalized to ``cpu`` while the CLI receipt retains the original
+        # requested spelling separately.
+        from .device import resolve_device
+
+        resolved_device = resolve_device(self.device, None)
+        object.__setattr__(self, "device", resolved_device.effective)
         if not math.isfinite(float(self.learning_rate)) or float(self.learning_rate) <= 0.0:
             raise ValueError("learning_rate must be finite and positive")
         if not math.isfinite(float(self.weight_decay)) or float(self.weight_decay) < 0.0:
@@ -1521,7 +1530,11 @@ def _resolve_execution(stage: str, config: object, inputs: StageInputs) -> Stage
         config = PFGRLiteConfig.from_dict(config)
     if not isinstance(config, PFGRLiteConfig):
         raise TypeError("config must be PFGRLiteConfig or strict mapping")
-    options = inputs.stage_options or StageOptions(stage=stage, engineering_only=config.engineering_only)
+    options = inputs.stage_options or StageOptions(
+        stage=stage,
+        device=config.device or "cpu",
+        engineering_only=config.engineering_only,
+    )
     if options.stage != stage:
         raise ValueError("StageOptions stage does not match run_stage stage")
     if options.semantic_objective and stage != "S0":
@@ -2240,6 +2253,75 @@ def _s2_teacher_config(config: PFGRLiteConfig, options: StageOptions) -> object:
     return teacher_config
 
 
+def _headroom_gate(inputs: StageInputs, execution: StageExecutionConfig) -> Mapping[str, Any]:
+    """Require accepted R4B evidence before any production bank work."""
+
+    metadata = inputs.metadata if isinstance(inputs.metadata, Mapping) else {}
+    decision = metadata.get("headroom_decision")
+    hydrated_engineering_model = bool(getattr(inputs.model, "_engineering_only", False))
+    if hydrated_engineering_model and not (execution.stage_options.engineering_only or execution.config.engineering_only):
+        raise ValueError("engineering-hydrated model cannot authorize MAIN stage banking")
+    if execution.stage_options.engineering_only or execution.config.engineering_only:
+        # Synthetic/engineering bypass is explicit and remains visibly
+        # non-final; it must not be mistaken for a scientific R4B permit.
+        if decision is None:
+            # ``engineering_only`` itself is the explicit capability flag;
+            # callers cannot reach this branch from a production StageOptions
+            # envelope.
+            return {"status": "ENGINEERING_BYPASS", "authorizes_main": False, "scientific_status": "NOT_EVALUATED", "explicit_capability": True}
+        from .headroom import validate_headroom_decision
+
+        parsed = validate_headroom_decision(decision, allow_engineering=True)
+        return {"status": "ENGINEERING_EVIDENCE", "authorizes_main": False, "decision": parsed.as_dict()}
+    current_source_status = metadata.get("source_provenance_status")
+    if not isinstance(current_source_status, str) or current_source_status.upper() not in {"CLEAN", "VERIFIED", "PRODUCTION_VERIFIED"}:
+        raise ValueError("production headroom gate requires current execution source provenance CLEAN/verified status")
+    expected: dict[str, str] = {}
+    producer = inputs.producer
+    producer_hash = getattr(producer, "compatibility_hash", None)
+    if producer_hash is None:
+        producer_hash = getattr(getattr(producer, "compatibility", None), "digest", None)
+    if producer_hash:
+        expected["producer_compatibility_hash"] = str(producer_hash)
+    role_manifest = inputs.role_manifest
+    split_identity = metadata.get("baseline_split_hash")
+    if split_identity is None and role_manifest is not None:
+        split_identity = role_manifest.baseline_split_hash
+    if not isinstance(split_identity, str) or not split_identity.strip():
+        raise ValueError("production headroom gate requires the reviewed baseline split identity")
+    expected["split_hash"] = split_identity
+    # These are mandatory producer-side joins.  Do not accept a user-editable
+    # alias, filename, or absent value as an authority for MAIN admission.
+    for field_name in (
+        "source_manifest_hash",
+        "base_checkpoint_hash",
+        "updater_checkpoint_hash",
+        "teacher_identity_hash",
+        "subject_set_hash",
+    ):
+        value = metadata.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"production headroom gate requires computed metadata identity {field_name}")
+        expected[field_name] = value
+    model = inputs.model
+    if not isinstance(model, nn.Module):
+        raise ValueError("production headroom gate requires the live PFGR nn.Module for model identity")
+    expected["frozen_model_digest"] = module_state_digest(model)
+    from .headroom import require_main_headroom_decision
+
+    parsed = require_main_headroom_decision(decision, expected=expected)
+    if parsed.source_provenance_status.upper() != current_source_status.upper():
+        raise ValueError("headroom decision source provenance does not match current execution source status")
+    return {
+        "status": "ACCEPTED",
+        "authorizes_main": True,
+        "decision": parsed.as_dict(),
+        # Keep the strict stage-provenance envelope unchanged; these computed
+        # joins are passed to the bank writer as a separate gate payload.
+        "expected_identities": expected | {"source_provenance_status": current_source_status.upper()},
+    }
+
+
 def _run_s2(inputs: StageInputs, execution: StageExecutionConfig, output_dir: Path) -> tuple[dict[str, Any], tuple[str, ...], int, int, int]:
     """Run S2 with producer modules frozen and in evaluation mode."""
 
@@ -2276,7 +2358,13 @@ def _run_s2(inputs: StageInputs, execution: StageExecutionConfig, output_dir: Pa
 
 def _run_s2_impl(inputs: StageInputs, execution: StageExecutionConfig, output_dir: Path) -> tuple[dict[str, Any], tuple[str, ...], int, int, int]:
     options = execution.stage_options
+    headroom_receipt = _headroom_gate(inputs, execution)
     stage_provenance = inputs.metadata.get("stage_provenance") if isinstance(inputs.metadata, Mapping) else None
+    # Keep the canonical stage-provenance envelope unchanged.  The parsed
+    # headroom permit and the computed identity joins are passed separately to
+    # the bank writer so checkpoint/stage schemas remain strict and reusable.
+    headroom_decision = headroom_receipt.get("decision") if headroom_receipt.get("authorizes_main") else None
+    headroom_expected = headroom_receipt.get("expected_identities") if headroom_receipt.get("authorizes_main") else None
     if not options.engineering_only and not isinstance(stage_provenance, Mapping):
         raise ValueError("production S2 requires the verified completed producer-stage provenance receipt")
     if isinstance(stage_provenance, Mapping) and not options.engineering_only:
@@ -2432,6 +2520,8 @@ def _run_s2_impl(inputs: StageInputs, execution: StageExecutionConfig, output_di
                     config=execution.config.value,
                     engineering_only=options.engineering_only,
                     stage_provenance=stage_provenance,
+                    headroom_decision=headroom_decision,
+                    headroom_expected=headroom_expected,
                 )
         selected: list[object] = []
         seen_subject_actions: set[str] = set()
@@ -2623,11 +2713,25 @@ def _run_s2_impl(inputs: StageInputs, execution: StageExecutionConfig, output_di
                 config=execution.config.value,
                 engineering_only=options.engineering_only,
                 stage_provenance=stage_provenance,
+                headroom_decision=headroom_decision,
+                headroom_expected=headroom_expected,
             )
         streaming_writer.append(adapted_items)
     if inputs.bank_writer is not None:
         producer_bundle = inputs.producer
-        streamed_manifest = generate_value_bank(rows, producer_bundle, None, execution.config, output_dir / "bank", role_manifest=inputs.role_manifest, writer=inputs.bank_writer, engineering_only=options.engineering_only, stage_provenance=stage_provenance)
+        streamed_manifest = generate_value_bank(
+            rows,
+            producer_bundle,
+            None,
+            execution.config,
+            output_dir / "bank",
+            role_manifest=inputs.role_manifest,
+            writer=inputs.bank_writer,
+            engineering_only=options.engineering_only,
+            stage_provenance=stage_provenance,
+            headroom_decision=headroom_decision,
+            headroom_expected=headroom_expected,
+        )
     elif streaming_writer is not None:
         try:
             streamed_manifest = streaming_writer.finalize()
@@ -2641,6 +2745,7 @@ def _run_s2_impl(inputs: StageInputs, execution: StageExecutionConfig, output_di
     manifest = streamed_manifest
     effective_teacher = _s2_teacher_config(execution.config, options)
     metrics = {
+        "headroom_gate": _jsonable(headroom_receipt),
         "trace_count": trace_count,
         "selected_candidate_count": selected_candidate_count,
         "label_count": label_count,
@@ -2670,6 +2775,8 @@ def generate_value_bank(
     effect_measure: Callable[..., Any] | None = None,
     engineering_only: bool = False,
     stage_provenance: Mapping[str, Any] | None = None,
+    headroom_decision: object | None = None,
+    headroom_expected: Mapping[str, str] | None = None,
 ) -> object:
     """Generate an immutable W3a bank from completed target-free traces.
 
@@ -2692,6 +2799,27 @@ def generate_value_bank(
         value_config = ValueModelConfig.from_dict(config)
     else:
         raise TypeError("config must be PFGRLiteConfig, ValueModelConfig, or strict mapping")
+
+    # Public MAIN generation is an admission boundary, not a transparent
+    # adapter around the canonical writer.  Validate the retained typed permit
+    # before joining a target or invoking a supplied writer so a custom writer
+    # cannot bypass the R4B provenance/headroom gate.  Engineering fixtures
+    # remain available only through the explicit capability flag and are
+    # visibly non-final in the downstream writer receipt.
+    if not engineering_only:
+        if headroom_decision is None:
+            raise ValueError("MAIN generate_value_bank requires an accepted headroom decision before target measurement")
+        from .value_bank import _admit_main_headroom
+
+        admitted_headroom = _admit_main_headroom(
+            producer=producer_bundle,
+            role_manifest=role_manifest,
+            supplied_headroom=headroom_decision,
+            expected_headroom=headroom_expected,
+        )
+        # Pass the canonical immutable mapping to adapters as well as the
+        # canonical writer; adapters must be unable to silently replace it.
+        headroom_decision = admitted_headroom.as_dict()
     rows: list[object] = []
     if effect_measure is not None:
         if target_provider is None:
@@ -2719,17 +2847,19 @@ def generate_value_bank(
     if not rows:
         raise ValueError("generate_value_bank produced no measured rows")
     if writer is not None:
-        result = _invoke(
-            writer,
-            rows,
-            destination,
-            output_dir=destination,
-            producer=producer_bundle,
-            config=value_config,
-            role_manifest=role_manifest,
-            engineering_only=engineering_only,
-            stage_provenance=stage_provenance,
-        )
+        writer_kwargs: dict[str, Any] = {
+            "output_dir": destination,
+            "producer": producer_bundle,
+            "config": value_config,
+            "role_manifest": role_manifest,
+            "engineering_only": engineering_only,
+            "stage_provenance": stage_provenance,
+        }
+        if headroom_decision is not None:
+            writer_kwargs["headroom_decision"] = headroom_decision
+        if headroom_expected is not None:
+            writer_kwargs["headroom_expected"] = headroom_expected
+        result = _invoke(writer, rows, destination, **writer_kwargs)
         return result
     from .value_bank import build_value_bank
 
@@ -2745,6 +2875,8 @@ def generate_value_bank(
         config=value_config,
         role_manifest=role_manifest,
         stage_provenance=stage_provenance,
+        headroom_decision=headroom_decision,
+        headroom_expected=headroom_expected,
         engineering_only=bool(engineering_only or (role_manifest.engineering_only if role_manifest is not None else False)),
     )
 
@@ -2944,6 +3076,7 @@ def _validate_s4_source_scale(bank: object, source_scale: object, *, engineering
 
 
 def _run_s4(inputs: StageInputs, execution: StageExecutionConfig, output_dir: Path) -> tuple[dict[str, Any], tuple[str, ...], int, int, int, dict[str, Any]]:
+    headroom_receipt = _headroom_gate(inputs, execution)
     source_scale = inputs.metadata.get("source_scale")
     if source_scale is None:
         raise ValueError("S4 requires source_scale provenance; it cannot silently recompute gain scale")
@@ -2962,6 +3095,7 @@ def _run_s4(inputs: StageInputs, execution: StageExecutionConfig, output_dir: Pa
     if not isinstance(fit_metric_map, Mapping):
         fit_metric_map = {}
     metrics = {
+        "headroom_gate": _jsonable(headroom_receipt),
         "fit": _jsonable(result),
         "source_scale": _jsonable(source_scale),
         "fit_gradient_steps": gradient_steps,
@@ -3194,6 +3328,26 @@ def build_stage_inputs(
         raise FileNotFoundError(checkpoint_path)
     if medicalnet_checkpoint_path is not None and not Path(medicalnet_checkpoint_path).is_file():
         raise FileNotFoundError(medicalnet_checkpoint_path)
+    options = stage_options
+    if options is None:
+        # No explicit stage sidecar means PFGRConfig.device is authoritative;
+        # constructing the StageOptions default (CPU) here would silently
+        # shadow a requested CUDA placement before the shared resolver runs.
+        options = StageOptions(
+            device=resolved_config.device or "cpu",
+            engineering_only=resolved_config.engineering_only,
+        )
+    elif isinstance(options, Mapping):
+        options = StageOptions.from_dict(options)
+    if not isinstance(options, StageOptions):
+        raise TypeError("stage_options must be StageOptions or strict mapping")
+    # A caller may explicitly authorize an engineering service capability via
+    # StageOptions even when the persisted PFGR config remains production
+    # shaped.  Keep that capability at the factory boundary so checkpoint
+    # hydration and source guards use one consistent decision (without
+    # mutating the scientific config or silently downgrading a requested
+    # device).
+    engineering_capability = bool(resolved_config.engineering_only or options.engineering_only)
     supplied_role_manifest = roles_file is not None or role_manifest is not None
     if roles_file is not None:
         payload = json.loads(Path(roles_file).read_text(encoding="utf-8"))
@@ -3201,16 +3355,9 @@ def build_stage_inputs(
     elif role_manifest is not None:
         resolved_roles = TrainingRoleManifest.from_dict(role_manifest) if isinstance(role_manifest, Mapping) else role_manifest
     else:
-        resolved_roles = build_training_role_manifest(split, engineering_only=resolved_config.engineering_only)
+        resolved_roles = build_training_role_manifest(split, engineering_only=engineering_capability)
     if resolved_roles.baseline_split_hash != split.split_hash:
         raise ValueError("training-role manifest baseline split hash does not match reviewed split")
-    options = stage_options
-    if options is None:
-        options = StageOptions(engineering_only=resolved_config.engineering_only)
-    elif isinstance(options, Mapping):
-        options = StageOptions.from_dict(options)
-    if not isinstance(options, StageOptions):
-        raise TypeError("stage_options must be StageOptions or strict mapping")
     from .data import DataAccessCounters
 
     if counters is None:
@@ -3249,7 +3396,7 @@ def build_stage_inputs(
             frontend_config = PointGuidedConfig(
                 num_semantic_classes=3,
                 num_points=resolved_config.num_points,
-                point_candidate_multiplier=3,
+                point_candidate_multiplier=4,
                 offset_hidden_channels=12,
                 medicalnet_checkpoint_path=Path(medicalnet_checkpoint_path).resolve(),
                 medicalnet_checkpoint_sha256=resolved_hash,
@@ -3276,12 +3423,12 @@ def build_stage_inputs(
                 medicalnet_checkpoint_sha256=resolved_hash,
                 require_pretrained_backbone=bool(frontend_config.require_pretrained_backbone),
             )
-    if frontend_config is not None and not resolved_config.engineering_only:
+    if frontend_config is not None and not engineering_capability:
         source_path = getattr(frontend_config, "medicalnet_checkpoint_path", None)
         source_hash = getattr(frontend_config, "medicalnet_checkpoint_sha256", None)
         if source_path is None or source_hash is None:
             raise ValueError("production StageInputs require a verified MedicalNet checkpoint path and SHA-256")
-    if frontend_config is None and not resolved_config.engineering_only and checkpoint_path is None:
+    if frontend_config is None and not engineering_capability and checkpoint_path is None:
         raise ValueError("production StageInputs require frontend_config with verified MedicalNet provenance or checkpoint_path")
     # Resolve the concrete loader recipe first, then bind the PFGR producer to
     # its derived identity.  The legacy PFGR config's historical default is a
@@ -3374,11 +3521,13 @@ def build_stage_inputs(
     if checkpoint_bundle is not None:
         from .checkpoint import hydrate_inference_model
 
-        model = hydrate_inference_model(
-            checkpoint_bundle,
-            model_factory=model_factory,
-            query_lattice_factory=query_lattice_factory,
-        )
+        hydration_kwargs: dict[str, Any] = {
+            "model_factory": model_factory,
+            "query_lattice_factory": query_lattice_factory,
+        }
+        if engineering_capability:
+            hydration_kwargs["engineering_only"] = True
+        model = hydrate_inference_model(checkpoint_bundle, **hydration_kwargs)
         # The checkpoint bundle is the source of truth for this model's
         # MedicalNet provenance; an external path must not silently replace it.
     elif model is None and model_factory is not None:
@@ -3401,7 +3550,7 @@ def build_stage_inputs(
             query_lattice_factory = _canonical_lattice_factory()
         if query_lattice_factory is not None:
             setter(query_lattice_factory)
-    if not resolved_config.engineering_only:
+    if not engineering_capability:
         prior = getattr(getattr(model, "frontend", None), "semantic_prior", None)
         source = getattr(prior, "backbone_provenance", None)
         integrity = bool(getattr(source, "integrity_verified", getattr(source, "checkpoint_integrity_verified", False))) if source is not None else False
@@ -3497,6 +3646,7 @@ def build_stage_inputs(
             "checkpoint_id": str(Path(checkpoint_path).resolve()) if checkpoint_path is not None else "none",
             "support_legal_mask": default_support_legal_mask,
             "stage_provenance": hydrated_stage_provenance if checkpoint_path is not None else None,
+            "engineering_hydration": bool(engineering_capability and checkpoint_path is not None and not resolved_config.engineering_only),
         },
         producer=hydrated_producer if checkpoint_path is not None else None,
     )

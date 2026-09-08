@@ -62,7 +62,11 @@ def _tensor_digest(value: Tensor) -> str:
 
 
 def _normalise_volume(
-    name: str, value: Tensor, *, dtype: torch.dtype | None = None
+    name: str,
+    value: Tensor,
+    *,
+    dtype: torch.dtype | None = None,
+    device: torch.device | None = None,
 ) -> Tensor:
     if not isinstance(value, Tensor) or not value.is_floating_point():
         raise TypeError(f"{name} must be a floating tensor")
@@ -83,6 +87,8 @@ def _normalise_volume(
         raise ValueError(f"{name} must be finite")
     if dtype is not None and value.dtype != dtype:
         value = value.to(dtype=dtype)
+    if device is not None and value.device != device:
+        value = value.to(device=device)
     return value.detach().clone()
 
 
@@ -104,7 +110,7 @@ def _normalise_mask(
     if tuple(value.shape) != (1, *shape):
         raise ValueError("observation_mask shape must match target geometry")
     if value.dtype == torch.bool:
-        return value.detach().clone()
+        return value.to(device=device).detach().clone()
     if not value.is_floating_point() and value.dtype not in (
         torch.int8,
         torch.int16,
@@ -117,7 +123,7 @@ def _normalise_mask(
         raise ValueError("observation_mask must be finite and nonempty")
     if not bool(((value == 0) | (value == 1)).all()):
         raise ValueError("observation_mask must contain only exact binary 0/1 values")
-    return value.to(dtype=torch.bool).detach().clone()
+    return value.to(device=device, dtype=torch.bool).detach().clone()
 
 
 @dataclass(frozen=True)
@@ -599,7 +605,22 @@ def validate_target(
                 )
             observation_mask = supplied_mask
 
-    target_owned = _normalise_volume("target", target)
+    # The target boundary is entered only after a legal target-free context
+    # has been bound. Align target dtype/device to that context before
+    # normalising the supplied mask; target-free inference never reaches here.
+    context_dtype = None
+    context_device = None
+    if observation_context is not None:
+        context_planes = getattr(observation_context, "initial_planes", None)
+        context_xy = getattr(context_planes, "xy", None)
+        context_dtype = getattr(context_xy, "dtype", None)
+        context_device = getattr(context_mask, "device", None)
+    target_owned = _normalise_volume(
+        "target",
+        target,
+        dtype=context_dtype,
+        device=context_device,
+    )
     mask_owned = _normalise_mask(
         observation_mask,
         shape=tuple(int(value) for value in target_owned.shape[-3:]),

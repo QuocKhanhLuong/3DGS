@@ -78,6 +78,13 @@ def test_same_work_reference_sparse_parity_and_actual_rows(tmp_path) -> None:
     assert all(row["sampling_law"] == "iid_fixed_q_plane_mixture_c_over_S_v1" for row in rows)
     assert all(row["query_draws"] == 64 for row in rows)
     assert all(row["gain_error_max"] is not None and row["parity_failure"] is None for row in rows)
+    benchmark = json.loads((tmp_path / "benchmark" / "benchmark.json").read_text())
+    timing = benchmark["timing"]
+    assert timing["optimized_p50_seconds"] is not None
+    assert timing["optimized_p95_seconds"] is not None
+    assert timing["end_to_end_p50_seconds"] is not None
+    assert timing["end_to_end_p95_seconds"] is not None
+    assert timing["methodology"]["raw_rows_path"] == "rows.jsonl"
     assert decoder.training is True
     assert all(parameter.grad is None for parameter in decoder.parameters())
 

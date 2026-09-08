@@ -609,6 +609,7 @@ _BENCHMARK_ROW_KEYS = {
     "reference_gain",
     "shared_before_elapsed_seconds",
     "optimized_elapsed_seconds",
+    "optimized_end_to_end_elapsed_seconds",
     "reference_elapsed_seconds",
     "parity_failure",
     "dtype",
@@ -635,6 +636,10 @@ _BENCHMARK_ROW_KEYS = {
     "effective_policy_hash",
     "lattice_counter_delta",
     "sampling_probability_digest",
+    "subject_harness_elapsed_seconds",
+    # Historical R2 rows used this name for the subject harness.  Accept it
+    # as a read-only/deprecated alias while requiring new producers to emit
+    # the explicit subject_harness_elapsed_seconds key as well.
     "full_pipeline_elapsed_seconds",
     "pipeline_counters",
     "pipeline_counter_scope",

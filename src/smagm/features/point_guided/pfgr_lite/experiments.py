@@ -582,6 +582,17 @@ def _context_for_sample(
         batched = observations.unsqueeze(0) if observations.ndim == 4 else observations
         mask = getattr(sample, "brain_mask", getattr(sample, "mask", None))
         geometry = getattr(sample, "geometry", None)
+        # Samples are immutable CPU records by design.  Model placement is the
+        # single operational authority for every service; align observation
+        # and mask before entering the encoder instead of relying on a CPU
+        # default in a service caller.
+        try:
+            model_device = next(model.parameters()).device
+        except (StopIteration, AttributeError):
+            model_device = batched.device
+        batched = batched.to(device=model_device)
+        if isinstance(mask, Tensor):
+            mask = mask.to(device=model_device)
         # Production StageInputs use the concrete PFGR model contract.  The
         # model performs its own shape/geometry/provenance validation; do not
         # signature-filter this call or silently select an alternate encoder.

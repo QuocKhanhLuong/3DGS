@@ -1163,6 +1163,7 @@ def hydrate_inference_model(
     *,
     model_factory: Callable[..., Any] | None = None,
     query_lattice_factory: Any | None = None,
+    engineering_only: bool | None = None,
 ) -> Any:
     """Construct PFGRLiteModel from the strict sidecar and load exact state.
 
@@ -1185,19 +1186,25 @@ def hydrate_inference_model(
         from .model import PFGRLiteModel
 
         model_factory = PFGRLiteModel
-    if query_lattice_factory is None:
-        model = model_factory(pfgr_config, frontend_config=frontend_config)
-    else:
-        try:
-            model = model_factory(
-                pfgr_config,
-                frontend_config=frontend_config,
-                query_lattice_factory=query_lattice_factory,
-            )
-        except TypeError as exc:
+    factory_kwargs: dict[str, Any] = {"frontend_config": frontend_config}
+    if query_lattice_factory is not None:
+        factory_kwargs["query_lattice_factory"] = query_lattice_factory
+    if engineering_only is not None:
+        # This is a capability assertion, not a config mutation.  Historical
+        # width-128 bundles may be hydrated only for an explicit engineering
+        # diagnostic; MAIN callers omit/false this flag and retain the strict
+        # width-12 constructor guard.
+        factory_kwargs["engineering_only"] = bool(engineering_only)
+    try:
+        model = model_factory(pfgr_config, **factory_kwargs)
+    except TypeError as exc:
+        if engineering_only is not None and "engineering_only" in factory_kwargs:
+            raise TypeError("model_factory must accept explicit engineering_only capability for checkpoint hydration") from exc
+        if query_lattice_factory is not None:
             raise TypeError(
                 "model_factory must accept the explicit query_lattice_factory injection"
             ) from exc
+        raise
     if not hasattr(model, "load_state_dict") or not hasattr(model, "state_dict"):
         raise TypeError("model_factory must return a torch module with state_dict/load_state_dict")
     model.load_state_dict(dict(bundle.state_dict), strict=True)

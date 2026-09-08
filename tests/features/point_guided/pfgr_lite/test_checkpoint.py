@@ -324,6 +324,63 @@ def test_hydrate_inference_model_uses_frontend_sidecar_and_strict_state(tmp_path
     assert set(hydrated.state_dict()) == set(model.state_dict())
 
 
+def test_historical_width128_engineering_hydration_roundtrips_exact_state_and_main_denies(tmp_path) -> None:
+    """Hydration must use the retained legacy sidecar without widening MAIN."""
+
+    historical_pfgr = PFGRLiteConfig(num_points=2048, engineering_only=False)
+    historical_frontend = PointGuidedConfig(
+        num_semantic_classes=3,
+        num_points=2048,
+        point_candidate_multiplier=4,
+        offset_hidden_channels=128,
+        detach_backbone_features=False,
+    )
+    model = PFGRLiteModel(
+        historical_pfgr,
+        frontend_config=historical_frontend,
+        engineering_only=True,
+    ).eval()
+    geometry = (15, 15, 15)
+    context = model.encode_observations(
+        torch.zeros(1, 3, *geometry),
+        None,
+        geometry,
+    )
+    config = {
+        "schema_version": CHECKPOINT_CONFIG_SCHEMA,
+        "pfgr_config": historical_pfgr.as_dict(),
+        "frontend_config": frontend_config_to_dict(historical_frontend),
+        "stage": "inference",
+        "split_roles": {
+            "producer_fit": "producer-role",
+            "calibration_fit": "fit-role",
+            "calibration_allowance": "allowance-role",
+        },
+        "value_fit_identity_hash": None,
+        "gain_scale_hash": None,
+        "effective_policy_hash": None,
+    }
+    bundle = InferenceBundle(
+        state_dict=model.state_dict(),
+        producer=context.producer,
+        config=config,
+        capability="static",
+        split_hash="split",
+        frontend_config=config["frontend_config"],
+    )
+    path = tmp_path / "historical-width128.pt"
+    save_inference_bundle(path, bundle)
+    loaded = load_inference_bundle(path)
+    hydrated = hydrate_inference_model(loaded, engineering_only=True).eval()
+    assert hydrated._engineering_only is True
+    assert hydrated.frontend_config.offset_hidden_channels == 128
+    assert set(hydrated.state_dict()) == set(model.state_dict())
+    for name, value in model.state_dict().items():
+        assert torch.equal(value, hydrated.state_dict()[name]), name
+    with pytest.raises(ValueError, match="offset_hidden_channels is locked to 12"):
+        hydrate_inference_model(loaded)
+
+
 def test_hydrated_model_roundtrips_target_free_decode_with_canonical_lattice(tmp_path) -> None:
     pfgr = PFGRLiteConfig(num_points=4, engineering_only=True, decode_chunk_size=40)
     frontend = PointGuidedConfig(

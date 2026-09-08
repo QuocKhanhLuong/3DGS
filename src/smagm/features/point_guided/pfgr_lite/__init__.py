@@ -27,6 +27,8 @@ from .provenance import (
     module_state_digest,
     tensor_digest,
 )
+from .device import DEVICE_SCHEMA, DeviceResolution, resolve_device
+from .headroom import HEADROOM_SCHEMA, HeadroomDecision, require_main_headroom_decision, validate_headroom_decision
 from .static_geometry import (
     FeatureLattice,
     MultiScaleFeatureGeometry,
@@ -79,12 +81,16 @@ __all__ = [
     "CalibrationIdentity",
     "CompletedBehaviorTrace",
     "Decision",
+    "DEVICE_SCHEMA",
+    "DeviceResolution",
     "DescriptorBundle",
     "EffectTeacherConfig",
     "FRONTEND_CONFIG_SCHEMA",
     "FeatureLattice",
     "GainCalibration",
     "GainLabel",
+    "HEADROOM_SCHEMA",
+    "HeadroomDecision",
     "InferenceBundle",
     "MultiScaleFeatureGeometry",
     "ObservationContext",
@@ -119,8 +125,11 @@ __all__ = [
     "module_parameter_digest",
     "module_state_digest",
     "resample_plane_between_lattices",
+    "require_main_headroom_decision",
+    "resolve_device",
     "sample_source_to_lattice",
     "tensor_digest",
+    "validate_headroom_decision",
     "frontend_config_from_dict",
     "frontend_config_to_dict",
 ]

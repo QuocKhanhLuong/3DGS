@@ -82,6 +82,7 @@ class PFGRLiteModel(nn.Module):
         *,
         frontend_config: PointGuidedConfig | None = None,
         query_lattice_factory: QueryLatticeFactory | None = None,
+        engineering_only: bool | None = None,
     ) -> None:
         super().__init__()
         self.config = PFGRLiteConfig() if config is None else config
@@ -93,9 +94,15 @@ class PFGRLiteModel(nn.Module):
             frontend_config = PointGuidedConfig(
                 num_semantic_classes=3,
                 num_points=self.config.num_points,
-                point_candidate_multiplier=3,
+                point_candidate_multiplier=4,
                 offset_hidden_channels=12,
             )
+        # A historical checkpoint may carry the retired width-128 refiner.
+        # Keep its serialized PFGR config/weights byte-for-byte intact while
+        # accepting it only when the caller explicitly supplies the
+        # engineering capability.  Production construction remains locked to
+        # width 12/multiplier 4.
+        self._engineering_only = bool(self.config.engineering_only if engineering_only is None else engineering_only)
         self._validate_frontend_contract(frontend_config)
         self.frontend_config = frontend_config
         # No TrajectoryConfig: this legacy instance owns only the existing
@@ -154,8 +161,17 @@ class PFGRLiteModel(nn.Module):
             raise ValueError("PFGR displacement bound must be exactly 2 mm")
         if frontend_config.num_points != self.config.num_points:
             raise ValueError("frontend_config.num_points must match PFGRLiteConfig.num_points")
-        if self.config.num_points != 2048 and not self.config.engineering_only:
+        if self.config.num_points != 2048 and not self._engineering_only:
             raise ValueError("reduced N requires explicit PFGR engineering_only capability")
+        # Production PFGR deliberately uses the locked small refiner width
+        # and retained multiplier-4 deterministic initializer.  Historical
+        # width-128 sidecars remain an explicit engineering diagnostic only;
+        # no producer is silently reshaped at hydration time.
+        if not self._engineering_only:
+            if frontend_config.offset_hidden_channels != 12:
+                raise ValueError("production PFGR frontend offset_hidden_channels is locked to 12")
+            if frontend_config.point_candidate_multiplier != 4:
+                raise ValueError("production PFGR point_candidate_multiplier is locked to 4")
 
     @staticmethod
     def _validate_mask(mask: Tensor | None, x: Tensor) -> Tensor:

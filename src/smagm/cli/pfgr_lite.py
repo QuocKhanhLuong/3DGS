@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import hashlib
 import json
 import math
@@ -35,6 +35,7 @@ ENVIRONMENT_SCHEMA = "pfgr-lite-environment-v1"
 COMMANDS = (
     "preflight",
     "smoke",
+    "headroom-evaluate",
     "benchmark",
     "static-train",
     "updater-train",
@@ -371,44 +372,61 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+SOURCE_SCOPE_VERSION = "pfgr-lite-executable-source-scope-v2"
+# Producer source identity is deliberately an executable superset: imported
+# legacy modules under ``src`` are included, as are PFGR configs and package
+# dependency/build manifests.  Runbooks, reports and unrelated documentation
+# are evidence artifacts, not producer bytes, and are excluded from this
+# compatibility scope.
 _SOURCE_SCOPE_ROOTS = (
-    "src/smagm/cli/pfgr_lite.py",
-    "src/smagm/features/point_guided/pfgr_lite/",
-    "tests/features/point_guided/pfgr_lite/",
+    "src/",
     "configs/pfgr_lite/",
-    "RUNBOOK_PFGR_LITE.md",
-    "README.md",
-    "docs/README.md",
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "requirements.txt",
+    "requirements-dev.txt",
+    "requirements/",
+    "uv.lock",
+    "Pipfile",
+    "Pipfile.lock",
+    "poetry.lock",
 )
-_SOURCE_SCOPE_SUFFIXES = {".py", ".json", ".md"}
+_SOURCE_SCOPE_SUFFIXES = {".py", ".pyi", ".json", ".toml", ".cfg", ".ini", ".txt", ".lock", ".yaml", ".yml", ".xml", ".so", ".dylib", ".dll"}
 
 
 def _scoped_source_paths(repo: Path) -> list[str]:
     """Resolve the reproducibility scope without including run artifacts.
 
-    ``git ls-files --cached --others`` intentionally includes relevant
-    untracked implementation/config/documentation files, while the explicit
-    roots and suffix allow-list exclude user data, checkpoints, run outputs,
-    ``.DS_Store`` and arbitrary untracked files elsewhere in the worktree.
+    ``git ls-files --cached --others`` intentionally includes tracked and
+    untracked implementation/config/dependency files.  The explicit roots and
+    suffix allow-list exclude user data, checkpoints, run outputs, reports,
+    runbooks, ``.DS_Store`` and arbitrary untracked files elsewhere.
     """
 
-    try:
-        result = subprocess.run(
-            ["git", "ls-files", "--cached", "--others", "--exclude-standard", "--", *_SOURCE_SCOPE_ROOTS],
-            cwd=repo,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        candidates = result.stdout.splitlines() if result.returncode == 0 else []
-    except OSError:
-        candidates = []
+    # Enumerate the live filesystem rather than relying on Git's untracked
+    # visibility.  An ignored importable ``src/*.py`` still changes execution
+    # and must either be hashed or make the producer non-final.
+    candidates: list[str] = []
+    for root in _SOURCE_SCOPE_ROOTS:
+        base = repo / root
+        if root.endswith("/"):
+            if not base.is_dir():
+                continue
+            for item in base.rglob("*"):
+                if item.is_file():
+                    candidates.append(item.relative_to(repo).as_posix())
+        elif base.is_file():
+            candidates.append(base.relative_to(repo).as_posix())
     resolved: list[str] = []
     for item in candidates:
         path = item.strip().replace("\\", "/")
         if not path or Path(path).name.startswith("."):
             continue
-        if Path(path).suffix.lower() not in _SOURCE_SCOPE_SUFFIXES:
+        # Explicit root manifests such as Pipfile are valid even though they
+        # are extensionless; recursive source/config files still use the
+        # allow-list to avoid accidentally archiving run/data bytes.
+        if path not in {root.rstrip("/") for root in _SOURCE_SCOPE_ROOTS} and Path(path).suffix.lower() not in _SOURCE_SCOPE_SUFFIXES:
             continue
         if not any(path == root.rstrip("/") or path.startswith(root) for root in _SOURCE_SCOPE_ROOTS):
             continue
@@ -417,12 +435,41 @@ def _scoped_source_paths(repo: Path) -> list[str]:
     return sorted(set(resolved))
 
 
+def _source_manifest(repo: Path, paths: Sequence[str]) -> tuple[dict[str, Any], ...]:
+    """Return the deterministic executable manifest without retaining bytes."""
+
+    entries: list[dict[str, Any]] = []
+    repo_root = repo.resolve()
+    for relative in sorted(paths):
+        path = repo / relative
+        if not path.is_file():
+            continue
+        try:
+            if not path.resolve().is_relative_to(repo_root):
+                # A source symlink escaping the checkout is not a
+                # reconstructable manifest entry; provenance marks the
+                # receipt non-final instead of reading arbitrary outside
+                # bytes.
+                continue
+        except (OSError, RuntimeError):
+            continue
+        entries.append({"path": relative, "size": int(path.stat().st_size), "sha256": _sha256(path)})
+    return tuple(entries)
+
+
 def _scoped_source_digest(repo: Path, paths: Sequence[str]) -> str:
     digest = hashlib.sha256()
+    repo_root = repo.resolve()
     for relative in paths:
+        path = repo / relative
+        try:
+            if not path.resolve().is_relative_to(repo_root):
+                raise ValueError(f"scoped source symlink escapes repository: {relative}")
+        except (OSError, RuntimeError) as error:
+            raise ValueError(f"scoped source path cannot be resolved: {relative}") from error
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
-        with (repo / relative).open("rb") as handle:
+        with path.open("rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
         digest.update(b"\0")
@@ -430,7 +477,7 @@ def _scoped_source_digest(repo: Path, paths: Sequence[str]) -> str:
 
 
 def _scoped_dirty_diff(repo: Path) -> tuple[str, bool]:
-    """Hash tracked diff bytes and report dirty state for the same scope."""
+    """Hash tracked/untracked executable-scope changes and report dirty state."""
 
     try:
         diff = subprocess.run(
@@ -446,17 +493,19 @@ def _scoped_dirty_diff(repo: Path) -> tuple[str, bool]:
             capture_output=True,
         )
         payload = diff.stdout if diff.returncode == 0 else b""
-        dirty = bool(status.stdout.strip()) or bool(payload)
+        status_bytes = status.stdout if status.returncode == 0 else b""
+        payload = payload + b"\0" + status_bytes
+        dirty = bool(status_bytes.strip()) or bool(diff.stdout.strip())
     except OSError:
         payload = b""
         dirty = True
     return hashlib.sha256(payload).hexdigest(), dirty
 
 
-def _source_receipt() -> dict[str, Any]:
+def _source_receipt(repo: Path | None = None) -> dict[str, Any]:
     """Return source identity without dumping arbitrary environment values."""
 
-    repo = Path(__file__).resolve().parents[3]
+    repo = Path(repo).resolve() if repo is not None else Path(__file__).resolve().parents[3]
 
     try:
         result = subprocess.run(
@@ -469,32 +518,165 @@ def _source_receipt() -> dict[str, Any]:
         source_sha = result.stdout.strip() if result.returncode == 0 else "unknown"
     except OSError:
         source_sha = "unknown"
+    def _git_value(*arguments: str) -> str | None:
+        try:
+            result = subprocess.run(["git", *arguments], cwd=repo, check=False, capture_output=True, text=True)
+        except OSError:
+            return None
+        value = result.stdout.strip() if result.returncode == 0 else ""
+        return value or None
+
+    branch = _git_value("branch", "--show-current")
+    origin_sha = _git_value("rev-parse", "origin/main")
+    try:
+        whole_status = subprocess.run(["git", "status", "--porcelain"], cwd=repo, check=False, capture_output=True, text=True)
+        whole_tree_dirty = bool(whole_status.stdout.strip()) if whole_status.returncode == 0 else True
+    except OSError:
+        whole_tree_dirty = True
     try:
         diff_hash, dirty = _scoped_dirty_diff(repo)
     except OSError:
         diff_hash, dirty = hashlib.sha256(b"").hexdigest(), True
     paths = _scoped_source_paths(repo)
+    # Resolve tracking/ignore state in bounded batched Git calls.  The source
+    # scope can contain hundreds of imported legacy files; invoking Git once
+    # per path made every receipt needlessly expensive and introduced a large
+    # subprocess surface.
+    tracked_paths: set[str] = set()
+    ignored_paths: set[str] = set()
+    tracking_query_failed = False
+    ignore_query_failed = False
+    try:
+        tracked_result = subprocess.run(
+            ["git", "ls-files", "--cached", "-z", "--", *_SOURCE_SCOPE_ROOTS],
+            cwd=repo,
+            check=False,
+            capture_output=True,
+        )
+        if tracked_result.returncode == 0:
+            tracked_paths = {
+                item.decode("utf-8", errors="surrogateescape")
+                for item in tracked_result.stdout.split(b"\0")
+                if item
+            }
+        else:
+            tracking_query_failed = True
+    except OSError:
+        tracking_query_failed = True
+    if paths:
+        try:
+            ignore_result = subprocess.run(
+                ["git", "check-ignore", "--stdin", "-z", "--no-index"],
+                cwd=repo,
+                check=False,
+                input=b"\0".join(path.encode("utf-8") for path in paths) + b"\0",
+                capture_output=True,
+            )
+            # check-ignore returns 1 when no path is ignored; both 0 and 1
+            # are valid query outcomes.  Other codes indicate an unavailable
+            # provenance query and therefore a non-final receipt.
+            if ignore_result.returncode in (0, 1):
+                ignored_paths = {
+                    item.decode("utf-8", errors="surrogateescape")
+                    for item in ignore_result.stdout.split(b"\0")
+                    if item
+                }
+            else:
+                ignore_query_failed = True
+        except OSError:
+            ignore_query_failed = True
+    untracked_paths = sorted(set(paths) - tracked_paths)
+    ignored_paths = sorted(ignored_paths)
+    symlink_paths: list[str] = []
+    repo_root = repo.resolve()
+    for relative in paths:
+        path = repo / relative
+        try:
+            if path.is_symlink() and not path.resolve().is_relative_to(repo_root):
+                symlink_paths.append(relative)
+        except (OSError, RuntimeError):
+            symlink_paths.append(relative)
     try:
         source_scope_hash = _scoped_source_digest(repo, paths)
-    except OSError:
+        manifest = _source_manifest(repo, paths)
+        manifest_hash = hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    except (OSError, ValueError):
         source_scope_hash = "unknown"
+        manifest = ()
+        manifest_hash = "unknown"
+    manifest_complete = bool(manifest) and len(manifest) == len(paths) and manifest_hash != "unknown" and not symlink_paths
+    status = "ENGINEERING_NONFINAL" if whole_tree_dirty or dirty or source_sha == "unknown" or not manifest_complete or untracked_paths or ignored_paths or tracking_query_failed or ignore_query_failed else "CLEAN"
     return {
+        "schema_version": "pfgr-lite-source-receipt-v2",
+        "source_scope_version": SOURCE_SCOPE_VERSION,
         "source_sha": source_sha,
+        "git_sha": source_sha,
+        "git_branch": branch,
+        "origin_main_sha": origin_sha,
+        "source_git_sha": source_sha,
+        "source_branch": branch,
+        "whole_tree_dirty": bool(whole_tree_dirty),
         "working_tree_dirty": bool(dirty),
+        "provenance_status": status,
         "dirty_diff_sha256": diff_hash,
+        "scoped_diff_sha256": diff_hash,
         "source_scope_sha256": source_scope_hash,
+        "scoped_source_sha256": source_scope_hash,
+        "scoped_dirty_diff_sha256": diff_hash,
+        "executable_manifest_sha256": manifest_hash,
+        "executable_manifest": list(manifest),
         "source_scope_file_count": len(paths),
         "source_scope_roots": list(_SOURCE_SCOPE_ROOTS),
+        "source_scope_manifest_complete": bool(manifest_complete),
+        "source_scope_untracked_paths": sorted(untracked_paths),
+        "source_scope_ignored_paths": sorted(ignored_paths),
+        "source_scope_symlink_paths": sorted(symlink_paths),
     }
 
 
-def _environment_receipt(device: str | None) -> dict[str, Any]:
+def _receipt_source(args: argparse.Namespace) -> dict[str, Any]:
+    """Use the pre-run source snapshot and flag any mid-run drift.
+
+    Output receipts are often created under ``runs/`` in the checkout.  The
+    snapshot is therefore captured by ``_reserve_run`` before output creation;
+    a completion-time comparison detects concurrent source edits without
+    archiving source/data/secret bytes.
+    """
+
+    current = _source_receipt()
+    start = getattr(args, "_source_at_start", None)
+    if not isinstance(start, Mapping):
+        return current
+    changed = any(
+        start.get(key) != current.get(key)
+        for key in ("source_git_sha", "source_branch", "scoped_source_sha256", "scoped_dirty_diff_sha256", "executable_manifest_sha256")
+    )
+    receipt = dict(start)
+    receipt["source_changed_during_run"] = bool(changed)
+    receipt["source_snapshot_phase"] = "before_output_reservation"
+    receipt["completion_source_git_sha"] = current.get("source_git_sha")
+    receipt["completion_scoped_source_sha256"] = current.get("scoped_source_sha256")
+    receipt["completion_scoped_dirty_diff_sha256"] = current.get("scoped_dirty_diff_sha256")
+    if changed:
+        receipt["provenance_status"] = "ENGINEERING_NONFINAL"
+    return receipt
+
+
+def _environment_receipt(
+    device: str | None,
+    *,
+    configured: str | None = None,
+    resolution: Any | None = None,
+) -> dict[str, Any]:
+    from smagm.features.point_guided.pfgr_lite.device import resolve_device
+
+    requested = device
     values: dict[str, Any] = {
         "schema_version": ENVIRONMENT_SCHEMA,
         "python": sys.executable,
         "python_version": platform.python_version(),
         "platform": platform.platform(),
-        "device_requested": device or "cpu",
+        "device_requested": requested or configured or "cpu",
         "amp": False,
     }
     try:
@@ -507,6 +689,14 @@ def _environment_receipt(device: str | None) -> dict[str, Any]:
                 "cuda_device_count": int(torch.cuda.device_count()),
             }
         )
+        try:
+            resolved = resolution or resolve_device(requested, configured)
+            values["device_resolution"] = resolved.as_dict()
+            values["device_effective"] = resolved.effective
+        except Exception as error:
+            # Keep the failure receipt writeable while preserving the clear
+            # resolver error for the command boundary/traceback.
+            values["device_resolution_error"] = f"{type(error).__name__}: {error}"
     except Exception as error:  # pragma: no cover - import diagnostics only
         values["torch_error"] = f"{type(error).__name__}: {error}"
     return values
@@ -519,13 +709,23 @@ def _add_common(parser: argparse.ArgumentParser, *, config_required: bool = Fals
     parser.add_argument("--roles-file", type=Path)
     parser.add_argument("--medicalnet-checkpoint", type=Path)
     parser.add_argument("--medicalnet-sha256")
+    parser.add_argument("--base-checkpoint", type=Path, help="matching base/D/B checkpoint snapshot for strict R4B provenance joins")
     parser.add_argument("--output-root", type=Path, default=Path("runs/pfgr-lite"))
     parser.add_argument("--run-name")
-    parser.add_argument("--device", default="cpu")
+    # ``None`` means no CLI override; the strict config's device is resolved
+    # at one shared boundary for every stage/service command.
+    parser.add_argument("--device", default=None)
     parser.add_argument("--no-amp", action="store_true", default=False)
     parser.add_argument("--synthetic", action="store_true", default=False)
+    parser.add_argument(
+        "--engineering-only",
+        action="store_true",
+        default=False,
+        help="explicit non-final diagnostic capability; never authorizes MAIN banking",
+    )
     parser.add_argument("--dry-manifest", action="store_true", default=False)
     parser.add_argument("--review-receipt", type=Path)
+    parser.add_argument("--headroom-decision", type=Path, help="accepted R4B HeadroomDecision JSON required for production bank entry")
     parser.add_argument("--wandb", action="store_true", default=False)
     parser.add_argument("--wandb-entity", default=WandB_ENTITY)
     parser.add_argument("--wandb-project", default=WandB_PROJECT)
@@ -555,6 +755,11 @@ def _parser() -> argparse.ArgumentParser:
 
     smoke = subparsers.add_parser("smoke", help="run bounded static/updater engineering smoke")
     _add_common(smoke)
+
+    headroom = subparsers.add_parser("headroom-evaluate", help="run bounded R4B NEXT-1 headroom diagnostic")
+    _add_common(headroom)
+    headroom.add_argument("--checkpoint", type=Path, help="updater checkpoint whose full bytes/lineage are sealed in the R4B receipt")
+    headroom.add_argument("--practical-margin", type=float, default=0.0)
 
     benchmark = subparsers.add_parser("benchmark", help="benchmark same-work full/sparse teacher parity")
     _add_common(benchmark, config_required=False)
@@ -649,6 +854,10 @@ def _default_run_name(command: str) -> str:
 
 def _reserve_run(args: argparse.Namespace, command: str) -> Path:
     global _LAST_RESERVED_RUN_DIR
+    if not isinstance(getattr(args, "_source_at_start", None), Mapping):
+        # Capture executable provenance before creating a run directory (which
+        # may itself live below the checkout and appear in whole-tree status).
+        setattr(args, "_source_at_start", _source_receipt())
     output_root = Path(args.output_root).expanduser()
     output_root.mkdir(parents=True, exist_ok=True)
     name = args.run_name or _default_run_name(command)
@@ -663,7 +872,11 @@ def _reserve_run(args: argparse.Namespace, command: str) -> Path:
     return run_dir
 
 
-def _config_document(path: Path | None) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+def _config_document(
+    path: Path | None,
+    *,
+    device_override: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Load strict execution config and return PFGR/frontend/normalization/options maps."""
 
     if path is None:
@@ -701,7 +914,16 @@ def _config_document(path: Path | None) -> tuple[dict[str, Any], dict[str, Any],
         # config is supplied, validate its version and fields here.
         if isinstance(frontend, Mapping) and "schema_version" in frontend and "config" in frontend:
             frontend_config_from_dict(frontend)
-    stage_options = StageOptions.from_dict(options) if options else StageOptions(engineering_only=resolved.engineering_only)
+    # Resolve the execution-sidecar device at the same boundary as the PFGR
+    # config.  In particular, an explicit CLI ``--device cpu`` must be able to
+    # override a stale/unavailable CUDA value embedded in ``stage_options``;
+    # constructing StageOptions with that CUDA value first would fail before
+    # the authoritative override can be applied.
+    stage_options_payload = dict(options)
+    configured_device = getattr(resolved, "device", None) or "cpu"
+    stage_options_payload["device"] = device_override if device_override is not None else configured_device
+    stage_options_payload.setdefault("engineering_only", resolved.engineering_only)
+    stage_options = StageOptions.from_dict(stage_options_payload)
     execution = StageExecutionConfig(
         config=resolved,
         frontend_sidecar=frontend,
@@ -720,9 +942,73 @@ def _config_for_command(args: argparse.Namespace, *, stage: str | None = None) -
     )
 
     path = args.config if getattr(args, "config", None) is not None else None
-    raw, frontend_sidecar, normalization, execution = _config_document(path)
+    raw, frontend_sidecar, normalization, execution = _config_document(
+        path,
+        device_override=getattr(args, "device", None),
+    )
     config = PFGRLiteConfig.from_dict(raw)
+    # Explicit engineering hydration is the only supported way to run a
+    # historical/non-production checkpoint whose serialized PFGR recipe
+    # differs from the current MAIN defaults (for example the retired
+    # width-128 fixture).  Load the checkpoint config as the authoritative
+    # scientific envelope; do not mutate its sidecar/state to fit today's
+    # production defaults.  The explicit CLI capability remains in the
+    # StageOptions receipt below and can never authorize MAIN publication.
+    hydration_checkpoint = getattr(args, "checkpoint", None)
+    engineering_hydration = bool(getattr(args, "engineering_only", False) and hydration_checkpoint is not None)
+    if engineering_hydration:
+        from smagm.features.point_guided.pfgr_lite.checkpoint import load_inference_bundle
+
+        try:
+            hydration_bundle = load_inference_bundle(hydration_checkpoint)
+            hydration_pfgr = hydration_bundle.config.get("pfgr_config")
+            if not isinstance(hydration_pfgr, Mapping):
+                raise TypeError("checkpoint config missing pfgr_config mapping")
+            config = PFGRLiteConfig.from_dict(hydration_pfgr)
+            hydrated_frontend = hydration_bundle.config.get("frontend_config")
+            if hydrated_frontend is None:
+                hydrated_frontend = getattr(hydration_bundle, "frontend_config", None)
+            if not isinstance(hydrated_frontend, Mapping):
+                raise TypeError("checkpoint config missing typed frontend_config mapping")
+            # Preserve the checkpoint's exact legacy frontend recipe for the
+            # explicit engineering diagnostic.  The sidecar is later passed
+            # through the normal strict frontend parser, so a width-128
+            # profile is hydrated by the real model constructor and rejected
+            # by MAIN PFGRLiteModel validation rather than being represented by
+            # a metadata-only flag.
+            frontend_sidecar = dict(hydrated_frontend)
+            execution["frontend_sidecar"] = dict(frontend_sidecar)
+            setattr(args, "_engineering_hydration", True)
+        except Exception as error:
+            raise CLIError(f"engineering checkpoint hydration failed: {type(error).__name__}: {error}") from error
+    # Resolve the requested/effective device once for the complete command.
+    # Explicit CLI ``--device`` wins; omitted CLI values inherit the strict
+    # PFGR config and never silently fall back from an unavailable CUDA index.
+    from smagm.features.point_guided.pfgr_lite.device import resolve_device
+
+    existing_resolution = getattr(args, "_device_resolution", None)
+    if existing_resolution is None:
+        resolution = resolve_device(getattr(args, "device", None), config.device)
+        # An omitted CLI flag still has a concrete request: the configured
+        # PFGR device.  Preserve that value in receipts instead of emitting
+        # ``null`` while the effective resolver result remains canonical.
+        setattr(args, "_device_requested", getattr(args, "device", None) or config.device)
+        setattr(args, "_device_resolution", resolution)
+        # Downstream service/factory callers consume only this resolved value.
+        setattr(args, "device", resolution.effective)
+    else:
+        resolution = existing_resolution
+    # Keep the persisted PFGR config immutable while binding every operational
+    # stage/service sidecar to the single resolved effective placement.  Raw
+    # requested spelling is retained only in the receipt metadata.
+    if isinstance(execution.get("stage_options"), Mapping):
+        execution["stage_options"] = {
+            **dict(execution["stage_options"]),
+            "device": resolution.effective,
+        }
     if stage == "S0" and getattr(args, "base", None) is not None:
+        if engineering_hydration:
+            raise CLIError("--base cannot override a hydrated checkpoint PFGR configuration")
         variant_by_flag = {
             "b0": "b0_legacy_v1",
             "b1": "b1_multiscale_v1",
@@ -734,6 +1020,11 @@ def _config_for_command(args: argparse.Namespace, *, stage: str | None = None) -
         except KeyError as error:  # argparse choices should make this unreachable
             raise CLIError(f"unknown static base variant: {args.base!r}") from error
         config = dataclass_replace(config, static=dataclass_replace(config.static, variant=variant))
+    if getattr(args, "engineering_only", False) and not engineering_hydration:
+        # This is an explicit capability declaration.  It may relax only the
+        # production-vs-engineering gate; no checkpoint sidecar/state is
+        # converted or rewritten.
+        config = dataclass_replace(config, engineering_only=True)
     if getattr(args, "synthetic", False):
         # Small N is a capability marker, never a production default.
         config = PFGRLiteConfig(
@@ -751,13 +1042,13 @@ def _config_for_command(args: argparse.Namespace, *, stage: str | None = None) -
             build_chunk_size=min(config.build_chunk_size, 128),
             decode_chunk_size=min(config.decode_chunk_size, 128),
             device=getattr(args, "device", None),
-            num_points=min(config.num_points, 4),
+            num_points=(32 if getattr(args, "command", None) == "headroom-evaluate" else min(config.num_points, 4)),
             engineering_only=True,
             observation_normalization=config.observation_normalization,
         )
     if stage is not None:
         opts_raw = dict(execution.get("stage_options", {}))
-        opts_raw.update({"stage": stage, "device": getattr(args, "device", "cpu"), "engineering_only": config.engineering_only})
+        opts_raw.update({"stage": stage, "engineering_only": bool(config.engineering_only or getattr(args, "engineering_only", False))})
         if getattr(args, "epochs", None) is not None:
             opts_raw["epochs"] = args.epochs
         if getattr(args, "max_steps", None) is not None:
@@ -802,6 +1093,15 @@ def _config_for_command(args: argparse.Namespace, *, stage: str | None = None) -
         # Do not mutate the source config: execution sidecar is serialized in
         # the run receipt and strict PFGRLiteConfig remains authoritative.
         execution["stage_options"] = options.as_dict()
+    else:
+        # Services (benchmark/evaluate/oracle/value) use the same resolved
+        # execution envelope even though they do not select a training stage.
+        from smagm.features.point_guided.pfgr_lite.stages import StageOptions
+
+        service_options = dict(execution.get("stage_options", {}))
+        service_options["device"] = resolution.effective
+        service_options["engineering_only"] = bool(config.engineering_only or getattr(args, "engineering_only", False))
+        execution["stage_options"] = StageOptions.from_dict(service_options).as_dict()
     # Command-level controls (notably ``--base`` and the explicit synthetic
     # capability) are part of the strict execution envelope; never leave the
     # stale PFGR document nested inside StageExecutionConfig.
@@ -836,6 +1136,12 @@ def _input_missing(args: argparse.Namespace, *, require_real: bool = True) -> li
         checkpoint_bundle = getattr(args, "checkpoint", None)
         if checkpoint_bundle is not None and not checkpoint_bundle.is_file():
             missing.append(f"checkpoint path does not exist: {checkpoint_bundle}")
+        if getattr(args, "command", None) == "headroom-evaluate":
+            base_checkpoint = getattr(args, "base_checkpoint", None)
+            if base_checkpoint is None:
+                missing.append("--base-checkpoint")
+            elif not base_checkpoint.is_file():
+                missing.append(f"base checkpoint path does not exist: {base_checkpoint}")
         checkpoint = getattr(args, "medicalnet_checkpoint", None)
         expected = getattr(args, "medicalnet_sha256", None)
         if checkpoint is not None and checkpoint.is_file() and expected:
@@ -846,6 +1152,8 @@ def _input_missing(args: argparse.Namespace, *, require_real: bool = True) -> li
 
 
 def _receipt_base(args: argparse.Namespace, command: str, *, status: str, run_dir: Path, scientific_status: str = "NOT_EVALUATED") -> dict[str, Any]:
+    resolution = getattr(args, "_device_resolution", None)
+    requested_device = getattr(args, "_device_requested", getattr(args, "device", None))
     return {
         "schema_version": RECEIPT_SCHEMA,
         "cli_schema": CLI_SCHEMA,
@@ -858,13 +1166,15 @@ def _receipt_base(args: argparse.Namespace, command: str, *, status: str, run_di
         "scientific_status": scientific_status,
         "scientific_claim": "NOT_EVALUATED",
         "run_dir": str(run_dir.resolve()),
-        "source": _source_receipt(),
-        "environment": _environment_receipt(getattr(args, "device", None)),
+        "source": _receipt_source(args),
+        "environment": _environment_receipt(requested_device, resolution=resolution),
+        "requested_device": requested_device,
+        "effective_device": getattr(resolution, "effective", None),
         "config_hash": None,
         "effective_policy_hash": None,
         "stage": None,
         "role": getattr(args, "split_role", None),
-        "capability": "engineering_only" if getattr(args, "synthetic", False) else "production_pending",
+        "capability": "engineering_only" if (getattr(args, "synthetic", False) or getattr(args, "engineering_only", False)) else "production_pending",
         "counts": {},
         "metrics": {},
     }
@@ -953,6 +1263,12 @@ def _wandb_receipt(args: argparse.Namespace, *, command: str, run_dir: Path, met
 def _publish_receipt(args: argparse.Namespace, command: str, run_dir: Path, *, status: str = "SOFTWARE_PASS", scientific_status: str = "NOT_EVALUATED", **updates: Any) -> dict[str, Any]:
     receipt = _receipt_base(args, command, status=status, run_dir=run_dir, scientific_status=scientific_status)
     receipt.update(updates)
+    source = receipt.get("source")
+    if isinstance(source, Mapping) and source.get("source_changed_during_run"):
+        # A completion receipt must not retain a scientific-looking status
+        # when executable source drifted after the pre-output snapshot.
+        receipt["scientific_status"] = "INCONCLUSIVE"
+        receipt["scientific_claim"] = "ENGINEERING_NONFINAL_SOURCE_DRIFT"
     receipt["wandb"] = _wandb_receipt(args, command=command, run_dir=run_dir, metrics=receipt.get("metrics"), counts=receipt.get("counts"))
     _write_json(run_dir / "receipt.json", receipt)
     return receipt
@@ -993,8 +1309,11 @@ def _dry_manifest(args: argparse.Namespace, command: str, run_dir: Path, *, plan
         "config": config_payload,
         "config_hash": config_hash,
         "execution": _jsonable(details.get("execution")),
-        "environment": _environment_receipt(getattr(args, "device", None)),
-        "source": _source_receipt(),
+        "environment": _environment_receipt(
+            getattr(args, "_device_requested", getattr(args, "device", None)),
+            resolution=getattr(args, "_device_resolution", None),
+        ),
+        "source": _receipt_source(args),
     }
     _write_json(run_dir / "dry_manifest.json", payload)
     _publish_receipt(args, command, run_dir, status="BLOCKED" if missing else "SOFTWARE_PASS", manifest_only=True, missing_inputs=missing, config_hash=config_hash, planned=_jsonable(planned_payload))
@@ -1024,8 +1343,13 @@ def _synthetic_inputs(args: argparse.Namespace, config: Any, *, stage: str | Non
         np.random.seed(seed % (2**32 - 1))
     except ImportError:  # pragma: no cover - NumPy is a PFGR runtime dependency
         pass
-    n = min(int(config.num_points), 4)
-    frontend = PointGuidedConfig(num_semantic_classes=3, num_points=n, point_candidate_multiplier=2, offset_hidden_channels=12, detach_backbone_features=False)
+    is_headroom = getattr(args, "command", None) == "headroom-evaluate"
+    # The updater emits one proposal per live point.  Keep the tiny fixture
+    # bounded for ordinary stages, while NEXT-1 explicitly materializes the
+    # locked 32-candidate pool (engineering-only, never a production recipe).
+    n = 32 if is_headroom else min(int(config.num_points), 4)
+    candidate_multiplier = 2
+    frontend = PointGuidedConfig(num_semantic_classes=3, num_points=n, point_candidate_multiplier=candidate_multiplier, offset_hidden_channels=12, detach_backbone_features=False)
     model = PFGRLiteModel(config, frontend_config=frontend, query_lattice_factory=PFGRQueryLattice).to(torch.device(getattr(args, "device", "cpu"))).train()
     checkpoint_path = getattr(args, "checkpoint", None)
     if checkpoint_path is not None:
@@ -1034,7 +1358,16 @@ def _synthetic_inputs(args: argparse.Namespace, config: Any, *, stage: str | Non
         bundle = load_inference_bundle(checkpoint_path)
         if bundle.config.get("pfgr_config") != config.as_dict():
             raise CLIError("synthetic checkpoint PFGR config does not match the supplied config")
-        model = hydrate_inference_model(bundle, query_lattice_factory=PFGRQueryLattice).to(torch.device(getattr(args, "device", "cpu"))).train()
+        model = hydrate_inference_model(
+            bundle,
+            query_lattice_factory=PFGRQueryLattice,
+            # Synthetic configs are explicitly engineering-only even when
+            # the caller omits the redundant CLI capability flag.  Preserve
+            # that typed capability during checkpoint hydration; a
+            # production config still passes ``False`` and retains the
+            # width-12/MAIN constructor guard.
+            engineering_only=bool(config.engineering_only or getattr(args, "engineering_only", False)),
+        ).to(torch.device(getattr(args, "device", "cpu"))).train()
     geometry = VolumeGeometry.from_spacing((9, 9, 9), (1.0, 1.0, 1.0))
     counters = DataAccessCounters()
     operation_counters = OperationCounters()
@@ -1046,10 +1379,18 @@ def _synthetic_inputs(args: argparse.Namespace, config: Any, *, stage: str | Non
     # and calibration evidence.
     producer_subject_ids = ("synthetic-00", "synthetic-01")
     calibration_subject_ids = ("synthetic-02", "synthetic-03")
-    selected_subject_ids = calibration_subject_ids if stage == "S5" else producer_subject_ids
+    if getattr(args, "command", None) == "headroom-evaluate":
+        selected_subject_ids = producer_subject_ids + calibration_subject_ids
+    else:
+        selected_subject_ids = calibration_subject_ids if stage == "S5" else producer_subject_ids
     observation_generator = torch.Generator(device="cpu")
     observation_generator.manual_seed(seed + 7919)
-    selected_count = max(1, min(int(getattr(args, "max_subjects", None) or 1), len(selected_subject_ids)))
+    if is_headroom:
+        # NEXT-1 is a locked four-subject diagnostic; omitting --max-subjects
+        # must not silently shrink the independent cohort to one subject.
+        selected_count = len(selected_subject_ids)
+    else:
+        selected_count = max(1, min(int(getattr(args, "max_subjects", None) or 1), len(selected_subject_ids)))
     for index, subject_id in enumerate(selected_subject_ids[:selected_count]):
         observations = torch.randn((3, 9, 9, 9), dtype=torch.float32, generator=observation_generator)
         mask = torch.ones((1, 9, 9, 9), dtype=torch.bool)
@@ -1103,6 +1444,7 @@ def _synthetic_inputs(args: argparse.Namespace, config: Any, *, stage: str | Non
         "lattice_factory": PFGRQueryLattice,
         "legal_mask_builder": legal_mask,
         "synthetic": True,
+        "headroom_engineering_bypass": True,
         "initialization_id": "synthetic-cli-v1",
         # Stage provenance requires complete source/checkpoint identities even
         # for the explicit engineering fixture.  These names describe the
@@ -1111,6 +1453,9 @@ def _synthetic_inputs(args: argparse.Namespace, config: Any, *, stage: str | Non
         "source_id": str(Path(checkpoint_path).resolve()) if checkpoint_path is not None else "synthetic-untrained-initialization-v1",
         "checkpoint_id": str(Path(checkpoint_path).resolve()) if checkpoint_path is not None else "synthetic-untrained-initialization-v1",
     }
+    decision_path = getattr(args, "headroom_decision", None)
+    if decision_path is not None:
+        metadata["headroom_decision"] = _load_json(decision_path)
     options = StageOptions(stage=stage or "S0", device=getattr(args, "device", "cpu"), epochs=max(1, int(getattr(args, "epochs", None) or 1)), max_updates=getattr(args, "max_steps", None), engineering_only=True, query_chunk_size=min(config.decode_chunk_size, 128), candidate_chunk_size=max(1, int(getattr(args, "candidate_chunk_size", 1))))
     return StageInputs(
         samples=tuple(samples),
@@ -1156,7 +1501,7 @@ def _production_inputs(args: argparse.Namespace, config: Any, *, stage: str | No
     # S5 collection must see both disjoint calibration roles before any target
     # join; W3b's factory exposes this as the explicit combined role.
     subject_role = "calibration" if stage == "S5" else (args.split_role if stage not in {"S0", "S1", "S2"} else "producer_fit")
-    return build_stage_inputs(
+    inputs = build_stage_inputs(
         config,
         data_root=args.data_root,
         split_file=args.split_file,
@@ -1170,6 +1515,77 @@ def _production_inputs(args: argparse.Namespace, config: Any, *, stage: str | No
         max_subjects=args.max_subjects,
         subject_role=subject_role,
     )
+    metadata = dict(getattr(inputs, "metadata", {}) or {})
+    source_snapshot = getattr(args, "_source_at_start", {})
+    if isinstance(source_snapshot, Mapping):
+        metadata.setdefault("source_manifest_hash", source_snapshot.get("executable_manifest_sha256"))
+        metadata.setdefault("source_provenance_status", source_snapshot.get("provenance_status"))
+    role_manifest = getattr(inputs, "role_manifest", None)
+    if role_manifest is not None:
+        metadata.setdefault("split_hash", getattr(role_manifest, "baseline_split_hash", None))
+    base_checkpoint = getattr(args, "base_checkpoint", None)
+    if base_checkpoint is not None and Path(base_checkpoint).is_file():
+        metadata["base_checkpoint_hash"] = _sha256(Path(base_checkpoint))
+    if checkpoint_path is not None and Path(checkpoint_path).is_file():
+        metadata["updater_checkpoint_hash"] = _sha256(Path(checkpoint_path))
+    # R4B's independent development cohort is the reviewed validation
+    # allocation, not the S2 producer-fit samples used to build the bank.
+    # When a decision artifact is supplied, bind its retained evidence IDs
+    # only after verifying the evidence bytes/hash and requiring membership in
+    # that same validation allocation.
+    headroom_subject_ids: tuple[str, ...] = ()
+    role_validation_ids = tuple(str(item) for item in getattr(role_manifest, "baseline_validation_subject_ids", ())) if role_manifest is not None else ()
+    decision_path = getattr(args, "headroom_decision", None)
+    if decision_path is not None and Path(decision_path).is_file():
+        decision_payload = _load_json(Path(decision_path))
+        evidence_path_value = decision_payload.get("evidence_artifact_path") if isinstance(decision_payload, Mapping) else None
+        if isinstance(evidence_path_value, str) and Path(evidence_path_value).is_file():
+            evidence_path = Path(evidence_path_value)
+            if decision_payload.get("evidence_artifact_hash") == _sha256(evidence_path):
+                evidence_payload = _load_json(evidence_path)
+                evidence_ids = tuple(str(item) for item in evidence_payload.get("subject_ids", ())) if isinstance(evidence_payload, Mapping) else ()
+                if evidence_ids and len(set(evidence_ids)) == len(evidence_ids) and (not role_validation_ids or set(evidence_ids).issubset(set(role_validation_ids))):
+                    headroom_subject_ids = evidence_ids
+    if not headroom_subject_ids:
+        headroom_subject_ids = role_validation_ids[:4]
+    if headroom_subject_ids:
+        from smagm.features.point_guided.pfgr_lite.provenance import canonical_digest
+
+        metadata["subject_set_hash"] = canonical_digest(headroom_subject_ids, prefix="pfgr-lite-headroom-subjects-v1|")
+        metadata["headroom_subject_ids"] = headroom_subject_ids
+    # Keep the teacher identity independently reproducible at every Stage S2/
+    # S4 gate; it is computed from the locked NEXT-1 options, never copied
+    # from a user-editable decision JSON.
+    from smagm.features.point_guided.pfgr_lite.oracle import OracleOptions
+    from smagm.features.point_guided.pfgr_lite.provenance import canonical_digest
+
+    engineering = bool(getattr(args, "synthetic", False) or getattr(args, "engineering_only", False))
+    diagnostic_split_role = "validation"
+    metadata.setdefault(
+        "teacher_identity_hash",
+        canonical_digest(
+            {
+                "screening": OracleOptions(mode="sampled_one", budget=1, candidate_count=32, teacher_mode="iid_fixed_q", query_count=1024, max_subjects=1, seed=17, split_role=diagnostic_split_role, confirmation_mode="exact_footprint", confirmation_query_count=1024, practical_margin=0.0, engineering_only=engineering).as_dict(),
+                "confirmation": OracleOptions(mode="sampled_one", budget=1, candidate_count=1, teacher_mode="exact_footprint", query_count=1024, max_subjects=1, seed=10017, split_role=diagnostic_split_role, confirmation_mode="none", confirmation_query_count=1024, practical_margin=0.0, engineering_only=engineering).as_dict(),
+            },
+            prefix="pfgr-lite-headroom-teacher-v1|",
+        ),
+    )
+    producer = getattr(inputs, "producer", None)
+    producer_hash = getattr(producer, "compatibility_hash", getattr(producer, "digest", None))
+    if producer_hash:
+        metadata.setdefault("producer_compatibility_hash", str(producer_hash))
+    model = getattr(inputs, "model", None)
+    if model is not None:
+        from smagm.features.point_guided.pfgr_lite.provenance import module_state_digest
+
+        metadata.setdefault("frozen_model_digest", module_state_digest(model))
+    inputs = replace(inputs, metadata=metadata)
+    decision_path = getattr(args, "headroom_decision", None)
+    if decision_path is not None:
+        metadata["headroom_decision"] = _load_json(decision_path)
+        inputs = replace(inputs, metadata=metadata)
+    return inputs
 
 
 def _inputs(args: argparse.Namespace, config: Any, *, stage: str | None = None) -> Any:
@@ -2115,7 +2531,7 @@ def _calibrate_command(args: argparse.Namespace) -> dict[str, Any]:
         collection_seed=args.seed,
         value_input_variant=value_artifact.value_fit_identity.input_variant,
         max_subjects=args.max_subjects,
-        engineering_only=bool(args.synthetic),
+        engineering_only=bool(args.synthetic or getattr(args, "engineering_only", False)),
     )
     if args.synthetic:
         inputs = _synthetic_inputs(args, config, stage="S5")
@@ -2608,6 +3024,247 @@ def _smoke_command(args: argparse.Namespace) -> dict[str, Any]:
     return _stage_command(args, "smoke", stage="S0")
 
 
+def _validate_headroom_checkpoint_lineage(args: argparse.Namespace, config: Any) -> None:
+    """Validate the real R4B updater/base checkpoint join before hydration.
+
+    ``--checkpoint`` is the frozen U+spectral updater artifact and
+    ``--base-checkpoint`` is its preceding static D/B artifact.  The files'
+    byte hashes and typed bundle envelopes are checked here; path names alone
+    are never accepted as lineage evidence.  Synthetic/engineering fixtures
+    intentionally skip this real-data check and remain non-final.
+    """
+
+    if bool(getattr(args, "synthetic", False) or getattr(args, "engineering_only", False)):
+        return
+    updater_path = getattr(args, "checkpoint", None)
+    base_path = getattr(args, "base_checkpoint", None)
+    if updater_path is None or base_path is None:
+        raise CLIError("production R4B requires both --checkpoint (updater) and --base-checkpoint (static base)")
+    updater_path = Path(updater_path)
+    base_path = Path(base_path)
+    if not updater_path.is_file() or not base_path.is_file():
+        raise CLIError("R4B checkpoint lineage files must exist before headroom evaluation")
+    updater_hash = _sha256(updater_path)
+    base_hash = _sha256(base_path)
+    if updater_hash == base_hash:
+        raise CLIError("R4B updater and base checkpoints must be distinct byte artifacts")
+    from smagm.features.point_guided.pfgr_lite.checkpoint import load_inference_bundle
+
+    try:
+        base_bundle = load_inference_bundle(base_path)
+        updater_bundle = load_inference_bundle(updater_path)
+    except Exception as error:
+        raise CLIError(f"R4B checkpoint lineage could not hydrate typed bundles: {type(error).__name__}: {error}") from error
+    base_config = base_bundle.config.get("pfgr_config") if isinstance(base_bundle.config, Mapping) else None
+    updater_config = updater_bundle.config.get("pfgr_config") if isinstance(updater_bundle.config, Mapping) else None
+    if not isinstance(base_config, Mapping) or not isinstance(updater_config, Mapping):
+        raise CLIError("R4B checkpoint lineage bundles must retain strict pfgr_config envelopes")
+    # Device placement, query/decode chunking and the explicit engineering
+    # capability are operational envelope fields.  They may differ between a
+    # CPU lineage check and the eventual CUDA execution, while all scientific
+    # PFGR dimensions must remain bound.  Normalization is the one factory-
+    # resolved field allowed to differ from the unresolved CLI policy label.
+    def _scientific_config(value: Mapping[str, Any]) -> dict[str, Any]:
+        payload = dict(value)
+        for operational in ("device", "build_chunk_size", "decode_chunk_size", "engineering_only"):
+            payload.pop(operational, None)
+        return payload
+
+    def _assert_scientific_config_match(left: Mapping[str, Any], right: Mapping[str, Any], *, label: str) -> None:
+        left_payload = _scientific_config(left)
+        right_payload = _scientific_config(right)
+        try:
+            _validate_resolved_pfgr_config(left_payload, right_payload)
+        except CLIError as first_error:
+            # A serialized checkpoint may carry the measured normalization
+            # recipe while the opposite side still carries the explicit
+            # unresolved policy label.  Try the reverse orientation solely
+            # for that documented normalization resolution.
+            try:
+                _validate_resolved_pfgr_config(right_payload, left_payload)
+            except CLIError as second_error:
+                raise CLIError(f"R4B {label} scientific PFGR configuration mismatch: {second_error}") from first_error
+
+    _assert_scientific_config_match(base_config, updater_config, label="base/updater")
+    _assert_scientific_config_match(base_config, config.as_dict(), label="base/resolved")
+    if base_bundle.frontend_config != updater_bundle.frontend_config:
+        raise CLIError("R4B base/updater checkpoint frontend sidecars do not match")
+    if base_bundle.split_hash != updater_bundle.split_hash:
+        raise CLIError("R4B base/updater checkpoint split identities do not match")
+    if base_bundle.role_manifest is None or updater_bundle.role_manifest is None or base_bundle.role_manifest.digest != updater_bundle.role_manifest.digest:
+        raise CLIError("R4B base/updater checkpoint role manifests do not match")
+    stage = updater_bundle.stage_provenance
+    if not isinstance(stage, Mapping) or stage.get("completed") is not True:
+        raise CLIError("R4B updater checkpoint lacks a completed typed producer-stage receipt")
+    if stage.get("producer_compatibility_hash") != updater_bundle.producer.compatibility_hash:
+        raise CLIError("R4B updater stage receipt producer identity does not match its bundle")
+    # A path/checkpoint_id and matching metadata are insufficient lineage
+    # evidence: the updater artifact must retain byte-identical frozen
+    # components from the static base.  S1 is allowed to update only the
+    # updater network and shared spectral projector; every other common state
+    # tensor is compared by dtype/shape/bytes below.
+    base_state = getattr(base_bundle, "state_dict", None)
+    updater_state = getattr(updater_bundle, "state_dict", None)
+    if not isinstance(base_state, Mapping) or not isinstance(updater_state, Mapping):
+        raise CLIError("R4B base/updater checkpoint bundles must expose typed state_dict mappings")
+    mutable_prefixes = (
+        "updater.",
+        "update_net.",
+        # S1 may update only the learned shared band projector.  Fixed SWT
+        # Haar buffers under the spectral-anchor module remain frozen.
+        "frontend.spectral_anchor_builder.band_projector.",
+        "spectral_anchor_builder.band_projector.",
+        "spectral_projector.band_projector.",
+    )
+    mutable_exact = {
+        "spectral_projector.weight",
+        "spectral_projector.bias",
+    }
+
+    def _is_mutable(name: object) -> bool:
+        return isinstance(name, str) and (name in mutable_exact or name.startswith(mutable_prefixes))
+    from smagm.features.point_guided.pfgr_lite.provenance import tensor_digest
+
+    missing_frozen = [
+        name
+        for name in base_state
+        if isinstance(name, str) and not _is_mutable(name) and name not in updater_state
+    ]
+    if missing_frozen:
+        raise CLIError(f"R4B updater checkpoint is missing frozen base components: {missing_frozen[:8]}")
+    changed_frozen: list[str] = []
+    for name, base_tensor in base_state.items():
+        if not isinstance(name, str) or _is_mutable(name) or name not in updater_state:
+            continue
+        updater_tensor = updater_state[name]
+        if not hasattr(base_tensor, "dtype") or not hasattr(updater_tensor, "dtype"):
+            raise CLIError(f"R4B checkpoint frozen component {name!r} is not a typed tensor")
+        if tensor_digest(base_tensor) != tensor_digest(updater_tensor):
+            changed_frozen.append(name)
+    if changed_frozen:
+        raise CLIError(f"R4B base/updater frozen component bytes differ: {changed_frozen[:8]}")
+    unexpected_frozen = [
+        name
+        for name in updater_state
+        if isinstance(name, str) and name not in base_state and not _is_mutable(name)
+    ]
+    if unexpected_frozen:
+        raise CLIError(f"R4B updater checkpoint adds unexpected frozen components: {unexpected_frozen[:8]}")
+    parent_id = stage.get("checkpoint_id")
+    if not isinstance(parent_id, str) or not parent_id.strip():
+        raise CLIError("R4B updater stage receipt lacks its base checkpoint lineage identity")
+    parent_path = Path(parent_id)
+    if parent_path.is_file() and _sha256(parent_path) != base_hash:
+        raise CLIError("R4B updater stage receipt checkpoint lineage does not match --base-checkpoint bytes")
+
+
+def _headroom_command(args: argparse.Namespace) -> dict[str, Any]:
+    run_dir = _reserve_run(args, "headroom-evaluate")
+    if args.dry_manifest:
+        return _dry_manifest(
+            args,
+            "headroom-evaluate",
+            run_dir,
+            planned={
+                "scope": "R4B-NEXT-1",
+                "subjects": 4,
+                "random_seeds": [17, 29, 41],
+                "candidate_count": 32,
+                "query_count": 1024,
+                "confirmation": "independent_exact_footprint_same_winner",
+                "target_reads": "post-proposal-seal only",
+            },
+        )
+    from smagm.features.point_guided.pfgr_lite.headroom import HeadroomOptions, run_headroom_evaluation
+
+    # NEXT-1 is intentionally not a generic oracle sweep.  Reject common
+    # flags that would alter its locked four-subject/32-candidate/Q1024
+    # composition instead of silently ignoring user input.
+    if getattr(args, "max_subjects", None) is not None and int(args.max_subjects) != 4:
+        raise CLIError("headroom-evaluate requires --max-subjects 4")
+    if int(getattr(args, "candidate_count", 32)) != 32:
+        raise CLIError("headroom-evaluate requires --candidate-count 32")
+    if int(getattr(args, "query_count", 1024)) != 1024:
+        raise CLIError("headroom-evaluate requires --query-count 1024")
+    if getattr(args, "teacher_mode", "iid_fixed_q") != "iid_fixed_q":
+        raise CLIError("headroom-evaluate screening is locked to --teacher-mode iid_fixed_q")
+    if str(getattr(args, "split_role", "validation")) != "validation":
+        raise CLIError("headroom-evaluate development cohort is locked to the reviewed validation split")
+
+    config, details = _config_for_command(args)
+    _validate_headroom_checkpoint_lineage(args, config)
+    inputs = _inputs(args, config)
+    # Bind the actual source/checkpoint/cohort identities into the in-memory
+    # StageInputs envelope before any context/proposal work.  These values
+    # are byte hashes or reviewed role identities, never caller-provided
+    # labels; missing production values remain missing and fail closed.
+    metadata = dict(getattr(inputs, "metadata", {}) or {})
+    source_snapshot = getattr(args, "_source_at_start", {})
+    if isinstance(source_snapshot, Mapping):
+        metadata.setdefault("source_manifest_hash", source_snapshot.get("executable_manifest_sha256"))
+        metadata.setdefault("source_provenance_status", source_snapshot.get("provenance_status"))
+    role_manifest = getattr(inputs, "role_manifest", None)
+    if role_manifest is not None:
+        metadata.setdefault("split_hash", getattr(role_manifest, "baseline_split_hash", None))
+    if getattr(args, "base_checkpoint", None) is not None and Path(args.base_checkpoint).is_file():
+        metadata["base_checkpoint_hash"] = _sha256(Path(args.base_checkpoint))
+    if getattr(args, "checkpoint", None) is not None and Path(args.checkpoint).is_file():
+        metadata["updater_checkpoint_hash"] = _sha256(Path(args.checkpoint))
+    subject_ids = tuple(str(getattr(sample, "subject_id", "")) for sample in getattr(inputs, "samples", ()))
+    if subject_ids:
+        from smagm.features.point_guided.pfgr_lite.provenance import canonical_digest
+
+        metadata.setdefault("subject_set_hash", canonical_digest(subject_ids, prefix="pfgr-lite-headroom-subjects-v1|"))
+    # A fixed teacher identity is recomputed from the locked options rather
+    # than copied from a decision artifact.  Headroom itself records the same
+    # canonical digest and Stage S2/S4 can later compare both sides.
+    from smagm.features.point_guided.pfgr_lite.oracle import OracleOptions
+    from smagm.features.point_guided.pfgr_lite.provenance import canonical_digest
+
+    teacher_identity = canonical_digest(
+        {
+            "screening": OracleOptions(mode="sampled_one", budget=1, candidate_count=32, teacher_mode="iid_fixed_q", query_count=1024, max_subjects=1, seed=17, split_role="validation", confirmation_mode="exact_footprint", confirmation_query_count=1024, practical_margin=0.0, engineering_only=bool(args.synthetic or args.engineering_only)).as_dict(),
+            "confirmation": OracleOptions(mode="sampled_one", budget=1, candidate_count=1, teacher_mode="exact_footprint", query_count=1024, max_subjects=1, seed=10017, split_role="validation", confirmation_mode="none", confirmation_query_count=1024, practical_margin=0.0, engineering_only=bool(args.synthetic or args.engineering_only)).as_dict(),
+        },
+        prefix="pfgr-lite-headroom-teacher-v1|",
+    )
+    metadata.setdefault("teacher_identity_hash", teacher_identity)
+    producer = getattr(inputs, "producer", None)
+    producer_hash = getattr(producer, "compatibility_hash", getattr(producer, "digest", None))
+    if producer_hash:
+        metadata.setdefault("producer_compatibility_hash", str(producer_hash))
+    model = getattr(inputs, "model", None)
+    if model is not None:
+        from smagm.features.point_guided.pfgr_lite.provenance import module_state_digest
+
+        metadata.setdefault("frozen_model_digest", module_state_digest(model))
+    inputs = replace(inputs, metadata=metadata)
+    options = HeadroomOptions(
+        max_subjects=4,
+        random_seeds=(17, 29, 41),
+        candidate_count=32,
+        query_count=1024,
+        practical_margin=float(args.practical_margin),
+        split_role="validation",
+        engineering_only=bool(args.synthetic or args.engineering_only),
+    )
+    result = run_headroom_evaluation(inputs, options, run_dir / "next1")
+    _write_json(run_dir / "resolved_config.json", details["execution"])
+    service_result = dict(result)
+    service_result.update({"privileged": True, "target_dependent": True})
+    _write_json(run_dir / "service_receipt.json", _jsonable(service_result))
+    return _publish_receipt(
+        args,
+        "headroom-evaluate",
+        run_dir,
+        metrics=_jsonable(dict(result)),
+        counts={"subjects": int(result.get("subject_count", 0)), "target_reads": "post-proposal-seal"},
+        config_hash=hashlib.sha256(json.dumps(_jsonable(config.as_dict()), sort_keys=True).encode()).hexdigest(),
+        scientific_status="INCONCLUSIVE",
+        artifacts={"metrics": str(result.get("metrics_path")), "decision": str(result.get("decision_path"))},
+    )
+
+
 def _preflight(args: argparse.Namespace) -> dict[str, Any]:
     run_dir = _reserve_run(args, "preflight")
     if args.dry_manifest:
@@ -2673,7 +3330,13 @@ def _preflight(args: argparse.Namespace) -> dict[str, Any]:
             "loaded_backbone_key_count": provenance.loaded_backbone_key_count,
             "synthetic_untrained": not provenance.official_pretrained_verified,
         })
-    _write_json(run_dir / "environment.json", _environment_receipt(args.device))
+    _write_json(
+        run_dir / "environment.json",
+        _environment_receipt(
+            getattr(args, "_device_requested", getattr(args, "device", None)),
+            resolution=getattr(args, "_device_resolution", None),
+        ),
+    )
     return _publish_receipt(args, "preflight", run_dir, stage="preflight", counts={"target_reads": 0}, config_hash=hashlib.sha256(json.dumps(config.as_dict(), sort_keys=True).encode()).hexdigest())
 
 
@@ -3025,6 +3688,8 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         return _preflight(args)
     if command == "smoke":
         return _smoke_command(args)
+    if command == "headroom-evaluate":
+        return _headroom_command(args)
     if command == "static-train":
         return _stage_command(args, command, stage="S0")
     if command == "updater-train":

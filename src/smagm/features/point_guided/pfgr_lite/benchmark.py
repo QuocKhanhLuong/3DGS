@@ -45,6 +45,23 @@ def _positive_int(name: str, value: object, *, maximum: int | None = None) -> in
     return int(value)
 
 
+def _percentile(values: list[float], quantile: float) -> float | None:
+    """Deterministic linear-interpolated percentile for retained raw rows."""
+
+    if not values:
+        return None
+    if not 0.0 <= float(quantile) <= 1.0:
+        raise ValueError("benchmark percentile must be in [0,1]")
+    ordered = sorted(float(value) for value in values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * float(quantile)
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    fraction = position - lower
+    return ordered[lower] + fraction * (ordered[upper] - ordered[lower])
+
+
 @dataclass(frozen=True)
 class BenchmarkOptions:
     """Strict bounded benchmark options."""
@@ -267,10 +284,19 @@ def _one_parity_case(
     device = ids.device
     if footprint is None:
         footprint = _build_footprint(lattice, action, chunk_size)
+    # End-to-end optimized timing starts at the first target-vector gather
+    # (when a deferred target is configured) and includes the shared-before
+    # query/decode plus the sparse delta/decode/signed-gain path.  Footprint
+    # construction and iid query sampling are deliberately prebuilt outside
+    # this region; the timer stops before reference reconstruction/parity.
+    _sync(device)
+    end_to_end_started = time.perf_counter()
     target_data = _target_vector(target_context, ids) if target_context is not None else None
+    # Fence deferred target gather/casts before the separately named shared
+    # region so ``shared_before`` cannot inherit pending target work on CUDA.
+    _sync(device)
     # Shared initial query is measured once; both methods consume this exact
     # tensor, while their method-specific timings and calls remain separate.
-    _sync(device)
     shared_started = time.perf_counter()
     before = lattice.query(state.planes, ids, chunk_size=chunk_size)
     before_prediction = _mlp(decoder, before)
@@ -290,6 +316,8 @@ def _one_parity_case(
     )
     _sync(device)
     optimized_elapsed = time.perf_counter() - optimized_started
+    _sync(device)
+    end_to_end_elapsed = time.perf_counter() - end_to_end_started
     _sync(device)
     reference_started = time.perf_counter()
     full_state = reference_full_write(lattice, state.planes, action, chunk_size=chunk_size)
@@ -337,6 +365,11 @@ def _one_parity_case(
         "reference_gain": full_gain,
         "shared_before_elapsed_seconds": float(shared_elapsed),
         "optimized_elapsed_seconds": float(optimized_elapsed),
+        # This timer includes target-vector gather and shared-before query /
+        # decode, then the optimized sparse path through signed gain.  It
+        # stops before reference reconstruction/parity checks; setup,
+        # prebuilt footprint, and iid query sampling remain separate.
+        "optimized_end_to_end_elapsed_seconds": float(end_to_end_elapsed),
         "reference_elapsed_seconds": float(reference_elapsed),
         "parity_failure": parity_failure,
         "dtype": str(sparse_query.dtype),
@@ -676,6 +709,12 @@ def _run_teacher_benchmark_impl(inputs: Any, options: BenchmarkOptions, output_d
                     parity_failures.append(parity)
         sample_elapsed = float(time.perf_counter() - sample_started)
         for row in rows[sample_row_start:]:
+            # A subject-harness duration includes context/route setup and all
+            # case repeats.  Keep that aggregate distinct from the timed
+            # single-action optimized end-to-end path in each raw row.
+            row["subject_harness_elapsed_seconds"] = sample_elapsed
+            # Backward-compatible R2 packaging alias.  This is explicitly a
+            # subject-harness duration, never an end-to-end teacher timer.
             row["full_pipeline_elapsed_seconds"] = sample_elapsed
             row["pipeline_counters"] = dict(pipeline_counters)
             row["pipeline_counter_scope"] = (
@@ -715,6 +754,24 @@ def _run_teacher_benchmark_impl(inputs: Any, options: BenchmarkOptions, output_d
     }
     dtype = rows[0]["dtype"]
     query_atol, query_rtol = ((1e-10, 1e-9) if dtype == "torch.float64" else (1e-6, 1e-5))
+    subject_harness_by_subject: dict[str, float] = {}
+    for row in rows:
+        subject_id = str(row["subject_id"])
+        duration = row.get("subject_harness_elapsed_seconds")
+        if isinstance(duration, (int, float)) and subject_id not in subject_harness_by_subject:
+            subject_harness_by_subject[subject_id] = float(duration)
+    optimized_e2e_values = [row["optimized_end_to_end_elapsed_seconds"] for row in rows]
+    subject_harness_values = list(subject_harness_by_subject.values())
+    cold_e2e_values = [
+        float(row["optimized_end_to_end_elapsed_seconds"])
+        for row in rows
+        if row.get("cache_state") == "cold_lattice_query_cache"
+    ]
+    warm_e2e_values = [
+        float(row["optimized_end_to_end_elapsed_seconds"])
+        for row in rows
+        if row.get("cache_state") == "warm_lattice_query_cache"
+    ]
     parity_payload = {
         "schema_version": BENCHMARK_OPTIONS_SCHEMA,
         "status": "PASS" if not parity_failures else "FAIL",
@@ -752,6 +809,24 @@ def _run_teacher_benchmark_impl(inputs: Any, options: BenchmarkOptions, output_d
             "optimized_mean_seconds": float(sum(row["optimized_elapsed_seconds"] for row in rows) / len(rows)),
             "reference_mean_seconds": float(sum(row["reference_elapsed_seconds"] for row in rows) / len(rows)),
             "shared_before_mean_seconds": float(sum(row["shared_before_elapsed_seconds"] for row in rows) / len(rows)),
+            "end_to_end_mean_seconds": float(sum(optimized_e2e_values) / len(optimized_e2e_values)),
+            "optimized_p50_seconds": _percentile([row["optimized_elapsed_seconds"] for row in rows], 0.50),
+            "optimized_p95_seconds": _percentile([row["optimized_elapsed_seconds"] for row in rows], 0.95),
+            "optimized_end_to_end_p50_seconds": _percentile(optimized_e2e_values, 0.50),
+            "optimized_end_to_end_p95_seconds": _percentile(optimized_e2e_values, 0.95),
+            "optimized_end_to_end_cold_p50_seconds": _percentile(cold_e2e_values, 0.50),
+            "optimized_end_to_end_cold_p95_seconds": _percentile(cold_e2e_values, 0.95),
+            "optimized_end_to_end_warm_p50_seconds": _percentile(warm_e2e_values, 0.50),
+            "optimized_end_to_end_warm_p95_seconds": _percentile(warm_e2e_values, 0.95),
+            "reference_p50_seconds": _percentile([row["reference_elapsed_seconds"] for row in rows], 0.50),
+            "reference_p95_seconds": _percentile([row["reference_elapsed_seconds"] for row in rows], 0.95),
+            "shared_before_p50_seconds": _percentile([row["shared_before_elapsed_seconds"] for row in rows], 0.50),
+            "shared_before_p95_seconds": _percentile([row["shared_before_elapsed_seconds"] for row in rows], 0.95),
+            "end_to_end_p50_seconds": _percentile(optimized_e2e_values, 0.50),
+            "end_to_end_p95_seconds": _percentile(optimized_e2e_values, 0.95),
+            "subject_harness_mean_seconds": (sum(subject_harness_values) / len(subject_harness_values)) if subject_harness_values else None,
+            "subject_harness_p50_seconds": _percentile(subject_harness_values, 0.50) if subject_harness_values else None,
+            "subject_harness_p95_seconds": _percentile(subject_harness_values, 0.95) if subject_harness_values else None,
             "optimized_to_reference_ratio": float(
                 (sum(row["optimized_elapsed_seconds"] for row in rows) / sum(row["reference_elapsed_seconds"] for row in rows))
                 if sum(row["reference_elapsed_seconds"] for row in rows) > 0.0
@@ -759,6 +834,26 @@ def _run_teacher_benchmark_impl(inputs: Any, options: BenchmarkOptions, output_d
             ),
             "matched_work_only": True,
             "speedup_claim": "none_without_stable_independent_repeats",
+            "methodology": {
+                "raw_rows_path": "rows.jsonl",
+                "percentile_method": "linear_interpolation_sorted_retained_rows_v1",
+                "percentile_population": "all_same_work_case_repeats",
+                "repeat_count": len(rows),
+                "cold_warm_labels": ["cold_lattice_query_cache", "warm_lattice_query_cache"],
+                "cuda_synchronization": "before_and_after_each_timed_region_when_cuda",
+                "end_to_end_definition": "optimized_single_action_from_target_vector_gather_and_shared_before_query_through_decoder_and_signed_gain",
+                "end_to_end_excludes": [
+                    "subject_context_and_route_setup",
+                    "prebuilt_footprint_construction",
+                    "precomputed_iid_query_sampling",
+                    "reference_reconstruction",
+                    "parity_assertions",
+                ],
+                "subject_harness_definition": "one_subject_context_route_setup_and_all_case_repeats; reported once per subject",
+                "full_pipeline_elapsed_seconds_alias": "deprecated_subject_harness_elapsed_seconds",
+                "setup_excluded_from_method_regions": True,
+                "scientific_status": "NOT_EVALUATED",
+            },
         },
         "scientific_scope": "CPU/CUDA software parity only; no speedup or real-data claim",
         "effective_policy": {

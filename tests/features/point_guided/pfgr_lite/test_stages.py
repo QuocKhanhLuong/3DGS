@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -331,6 +332,277 @@ def test_s2_materializes_target_free_candidates_before_target_provider(tmp_path)
     assert '"snapshot_kind":"metadata_only"' in replay
     assert '"tensor_payload":"omitted"' in replay
     assert '"raw_target_payload":"omitted"' in replay
+
+
+def test_s2_target_substitution_preserves_frozen_action_choices(tmp_path) -> None:
+    """Changing the deferred target may change labels, never target-free IDs."""
+
+    sample = _sample()
+
+    def run_once(marker: float, output_dir):
+        order: list[str] = []
+
+        def route(_sample, **_kwargs):
+            order.append("route")
+            return SimpleNamespace(states=("state",), context=None)
+
+        def proposals(*_args, **_kwargs):
+            order.append("proposals")
+            return [{"action_id": f"a-{index}", "stratum": "uniform"} for index in range(4)]
+
+        def target_provider(_trace):
+            order.append("target")
+            target = _target_context()
+            target.target = torch.full_like(target.target, marker)
+            return target
+
+        def measure(_trace, selected, target, **_kwargs):
+            order.append("measure")
+            gain = float(target.target.mean().item())
+            return [
+                {
+                    "action_id": row["action_id"],
+                    "raw_gain": gain,
+                    "subject_key": sample.subject_id,
+                    "split_role": "producer_fit",
+                    "label_definition": "signed-conditional-mean-masked-global-charbonnier-v1",
+                    "measurement_mode": "exact_footprint",
+                    "role": "exact_footprint",
+                    "support_provenance": "complete_support_v1",
+                    "inclusion_mechanism": "complete_support_v1",
+                    "sampler_law": "complete_support_v1",
+                    "engineering_only": True,
+                    "diagnostic": True,
+                }
+                for row in selected
+            ]
+
+        def writer(rows, destination, **_kwargs):
+            destination.mkdir(parents=True, exist_ok=True)
+            return {"rows": tuple(rows), "order": tuple(order)}
+
+        result = run_stage(
+            "S2",
+            PFGRLiteConfig(num_points=4, engineering_only=True),
+            StageInputs(
+                samples=(sample,),
+                route_builder=route,
+                proposal_builder=proposals,
+                target_provider=target_provider,
+                effect_measure=measure,
+                bank_writer=writer,
+                stage_options=StageOptions(stage="S2", candidate_count=4, engineering_only=True),
+            ),
+            output_dir,
+        )
+        return result.metrics["bank_manifest"]
+
+    first = run_once(0.1, tmp_path / "target-a")
+    second = run_once(0.9, tmp_path / "target-b")
+    first_rows = tuple(first["rows"])
+    second_rows = tuple(second["rows"])
+    assert [row["action_id"] for row in first_rows] == [row["action_id"] for row in second_rows]
+    assert [row["raw_gain"] for row in first_rows] != [row["raw_gain"] for row in second_rows]
+
+
+def test_s2_propagates_positive_headroom_gate_to_bank_writer(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """A typed accepted gate must reach the S2 bank boundary unchanged."""
+
+    import smagm.features.point_guided.pfgr_lite.stages as stages_module
+
+    gate_decision = {"decision": "HEADROOM_CONFIRMED", "subject_count": 32}
+    expected_identities = {
+        "producer_compatibility_hash": "producer-v1",
+        "source_manifest_hash": "source-v1",
+        "base_checkpoint_hash": "base-v1",
+        "updater_checkpoint_hash": "updater-v1",
+        "split_hash": "split-v1",
+        "subject_set_hash": "subjects-v1",
+        "teacher_identity_hash": "teacher-v1",
+        "frozen_model_digest": "model-v1",
+        "source_provenance_status": "CLEAN",
+    }
+    monkeypatch.setattr(
+        stages_module,
+        "_headroom_gate",
+        lambda _inputs, _execution: {
+            "status": "ACCEPTED",
+            "authorizes_main": True,
+            "decision": gate_decision,
+            "expected_identities": expected_identities,
+        },
+    )
+    captured: dict[str, object] = {}
+
+    class Producer(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(1.0))
+
+    model = Producer()
+    sample = _sample()
+
+    def route(_sample, **_kwargs):
+        return SimpleNamespace(states=("state",), context=None)
+
+    def proposals(*_args, **_kwargs):
+        return [
+            {"action_id": f"a-{index}", "stratum": "uniform", "score": float(index)}
+            for index in range(4)
+        ]
+
+    def target_provider(_subject_id):
+        return _target_context()
+
+    def measure(_trace, selected, _target, **_kwargs):
+        return [
+            {
+                "action_id": item["action_id"],
+                "raw_gain": 0.1,
+                "engineering_only": True,
+                "diagnostic": True,
+            }
+            for item in selected
+        ]
+
+    def bank_writer(rows, output_dir, **kwargs):
+        captured.update(kwargs)
+        captured["rows"] = rows
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return {"row_count": len(rows)}
+
+    result = run_stage(
+        "S2",
+        PFGRLiteConfig(num_points=4, engineering_only=True),
+        StageInputs(
+            samples=(sample,),
+            model=model,
+            route_builder=route,
+            proposal_builder=proposals,
+            target_provider=target_provider,
+            effect_measure=measure,
+            bank_writer=bank_writer,
+            stage_options=StageOptions(stage="S2", candidate_count=4, engineering_only=True),
+        ),
+        tmp_path / "s2-positive-gate",
+    )
+    assert result.stage == "S2"
+    assert captured["headroom_decision"] == gate_decision
+    assert captured["headroom_expected"] == expected_identities
+    assert captured["engineering_only"] is True
+    assert len(captured["rows"]) == 4
+
+
+def test_s2_real_main_permit_reaches_canonical_writer_with_disjoint_cohort(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """Exercise the actual production gate and ValueBankWriter (not a mock gate)."""
+
+    import smagm.features.point_guided.pfgr_lite.stages as stages_module
+    from tests.features.point_guided.pfgr_lite.test_value_bank import (
+        _production_headroom,
+        _production_roles,
+        _producer,
+        _row,
+        _stage,
+    )
+    from smagm.features.point_guided.pfgr_lite.value_bank import ValueBankRow
+    from smagm.features.point_guided.pfgr_lite.types import CompletedBehaviorTrace, PFGRState
+
+    producer = _producer()
+    role_manifest, _ = _production_roles()
+    permit, expected = _production_headroom(tmp_path, producer, role_manifest)
+    # The fixture model is intentionally tiny.  This test binds the reviewed
+    # fixture digest at the real _headroom_gate boundary; the explicit
+    # monkeypatch keeps the typed production seam deterministic without
+    # claiming a live production model identity.
+    class Producer(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(1.0))
+
+    model = Producer()
+    monkeypatch.setattr(stages_module, "module_state_digest", lambda _model: "model-v1")
+    # Production S2 binds an actual ObservationContext before the deferred
+    # target join.  A 15^3 synthetic volume supplies the locked N=2048 valid
+    # centres while keeping the fixture CPU-bounded; this remains a typed
+    # stage-to-canonical-writer integration check, not an experiment.
+    geometry = VolumeGeometry.from_spacing((15, 15, 15))
+    sample = TargetFreeSample(
+        "producer-0",
+        torch.zeros(3, 15, 15, 15),
+        torch.ones(1, 15, 15, 15, dtype=torch.bool),
+        geometry,
+        {},
+        "",
+        "",
+    )
+    frontend = PFGRLiteModel(PFGRLiteConfig()).eval()
+    # The reviewed producer fixture is the writer/gate identity.  Retain the
+    # real frontend's typed context and bind that producer envelope explicitly
+    # so the stage cannot silently mix the live context with an unrelated bank
+    # producer.
+    context = replace(
+        frontend.encode_observations(sample.observations.unsqueeze(0), sample.brain_mask, geometry),
+        producer=producer,
+    )
+    initial_state = PFGRState(
+        planes=context.initial_planes,
+        context_id=context.context_id,
+        producer=producer.compatibility,
+    )
+    completed_trace = CompletedBehaviorTrace(context_id=context.context_id, states=(initial_state,))
+
+    def route(_sample, **_kwargs):
+        return {
+            "states": (initial_state,),
+            "context": context,
+            "trace": completed_trace,
+        }
+
+    def proposals(*_args, **_kwargs):
+        return [{"action_id": f"a-{index}", "stratum": "uniform", "score": float(index)} for index in range(4)]
+
+    def target_provider(_subject_id):
+        return torch.zeros(1, 15, 15, 15)
+
+    def measure(_trace, selected, _target, **_kwargs):
+        rows = []
+        for index, _item in enumerate(selected):
+            row = _row(index, 0.1, subject="producer-0")
+            rows.append(ValueBankRow(**{**row.__dict__, "producer_compatibility_hash": producer.digest, "split_role_hash": role_manifest.digest}))
+        return rows
+
+    inputs = StageInputs(
+        samples=(sample,),
+        model=model,
+        producer=producer,
+        role_manifest=role_manifest,
+        route_builder=route,
+        proposal_builder=proposals,
+        target_provider=target_provider,
+        effect_measure=measure,
+        stage_options=StageOptions(
+            stage="S2",
+            candidate_count=4,
+            candidates_per_state=4,
+            max_states_per_subject=1,
+            engineering_only=False,
+        ),
+        metadata={
+            "source_provenance_status": "CLEAN",
+            "source_manifest_hash": expected["source_manifest_hash"],
+            "base_checkpoint_hash": expected["base_checkpoint_hash"],
+            "updater_checkpoint_hash": expected["updater_checkpoint_hash"],
+            "teacher_identity_hash": expected["teacher_identity_hash"],
+            "subject_set_hash": expected["subject_set_hash"],
+            "baseline_split_hash": role_manifest.baseline_split_hash,
+            "stage_provenance": _stage(producer, role_manifest),
+            "headroom_decision": permit.as_dict(),
+        },
+    )
+    result = run_stage("S2", PFGRLiteConfig(), inputs, tmp_path / "s2-main")
+    assert result.receipt.status == "complete"
+    assert result.metrics["headroom_gate"]["status"] == "ACCEPTED"
+    assert result.metrics["bank_manifest"]["row_count"] == 4
 
 
 def test_s2_freezes_and_restores_producer_training_mode(tmp_path) -> None:

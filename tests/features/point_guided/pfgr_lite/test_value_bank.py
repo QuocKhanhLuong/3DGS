@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import json
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -18,6 +22,10 @@ from smagm.features.point_guided.pfgr_lite.value_bank import (
 from smagm.features.point_guided.pfgr_lite.types import GainLabel
 from smagm.features.point_guided.pfgr_lite.provenance import ProducerCompatibility, SourceProvenance, canonical_digest
 from smagm.features.point_guided.pfgr_lite.types import ProducerDependencies, TrainingRoleManifest
+from smagm.features.point_guided.pfgr_lite.config import PFGRLiteConfig
+from smagm.features.point_guided.pfgr_lite.stages import generate_value_bank
+
+from tests.features.point_guided.pfgr_lite.test_headroom_gate import _permit_fixture
 
 
 def _producer() -> ProducerDependencies:
@@ -103,11 +111,14 @@ def _row(
     )
 
 
-def _production_roles() -> tuple[object, dict[str, str]]:
+def _production_roles(*, validation_ids: tuple[str, ...] | None = None) -> tuple[object, dict[str, str]]:
     producer_ids = ("producer-0",)
     calibration_fit = tuple(f"cal-fit-{index}" for index in range(32))
     calibration_allowance = tuple(f"cal-allow-{index}" for index in range(32))
-    validation = ("validation-0",)
+    # The production permit fixture retains the reviewed 32-subject
+    # validation cohort; writer admission must enforce this subset rather
+    # than accepting a decision from an unrelated one-subject role manifest.
+    validation = validation_ids or tuple(f"validation-{index:02d}" for index in range(32))
     test = ("test-0",)
     baseline_train = producer_ids + calibration_fit + calibration_allowance
     subjects = baseline_train + validation + test
@@ -143,6 +154,55 @@ def _stage(producer: ProducerDependencies, role_manifest: TrainingRoleManifest, 
         "verified_prior_receipt": None,
         "verified_prior_receipt_hash": None,
     }
+
+
+def _production_headroom(tmp_path: Path, producer: ProducerDependencies, role_manifest: TrainingRoleManifest):
+    """Bind the shared typed permit fixture to this production writer."""
+
+    permit_root = tmp_path / "headroom"
+    permit_root.mkdir()
+    decision, _unused, evidence_path, review_path = _permit_fixture(permit_root)
+    expected = {
+        "producer_compatibility_hash": producer.digest,
+        "source_manifest_hash": "source-manifest-v1",
+        "base_checkpoint_hash": "base-checkpoint-v1",
+        "updater_checkpoint_hash": "updater-checkpoint-v1",
+        "split_hash": role_manifest.baseline_split_hash,
+        "subject_set_hash": decision.subject_set_hash,
+        "teacher_identity_hash": decision.teacher_identity_hash,
+        "frozen_model_digest": "model-v1",
+        "source_provenance_status": "CLEAN",
+    }
+    evidence_hash = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    review = json.loads(review_path.read_text(encoding="utf-8"))
+    review["evidence_artifact_hash"] = evidence_hash
+    review["identity_envelope"] = {
+        key: expected[key]
+        for key in (
+            "producer_compatibility_hash",
+            "source_manifest_hash",
+            "base_checkpoint_hash",
+            "updater_checkpoint_hash",
+            "split_hash",
+            "subject_set_hash",
+            "teacher_identity_hash",
+            "frozen_model_digest",
+        )
+    }
+    review_path.write_text(json.dumps(review, sort_keys=True), encoding="utf-8")
+    decision = replace(
+        decision,
+        producer_compatibility_hash=expected["producer_compatibility_hash"],
+        source_manifest_hash=expected["source_manifest_hash"],
+        base_checkpoint_hash=expected["base_checkpoint_hash"],
+        updater_checkpoint_hash=expected["updater_checkpoint_hash"],
+        split_hash=expected["split_hash"],
+        teacher_identity_hash=expected["teacher_identity_hash"],
+        frozen_model_digest=expected["frozen_model_digest"],
+        evidence_artifact_hash=evidence_hash,
+        review_artifact_hash=hashlib.sha256(review_path.read_bytes()).hexdigest(),
+    )
+    return decision, expected
 
 
 def test_variants_share_identical_rows_and_delta() -> None:
@@ -317,6 +377,93 @@ def test_main_bank_requires_full_row_and_stage_identities(tmp_path: Path) -> Non
     assert compatibility.spectral_projector_hash
 
 
+def test_public_generate_value_bank_admission_precedes_custom_adapter(tmp_path: Path) -> None:
+    """A MAIN adapter cannot observe target rows before the typed permit gate."""
+
+    events: list[str] = []
+    traces = (SimpleNamespace(rows=(_row(0, 1.0, subject="producer-0"),)),)
+
+    def provider(_trace):
+        events.append("target")
+        return object()
+
+    def measure(*_args, **_kwargs):
+        events.append("measure")
+        return (_row(0, 1.0, subject="producer-0"),)
+
+    def writer(*_args, **_kwargs):
+        events.append("writer")
+        return {"row_count": 1}
+
+    with pytest.raises(ValueError, match="accepted headroom decision"):
+        generate_value_bank(
+            traces,
+            _producer(),
+            provider,
+            PFGRLiteConfig(),
+            tmp_path / "missing-permit",
+            writer=writer,
+            effect_measure=measure,
+        )
+    assert events == []
+
+
+def test_public_generate_value_bank_rejects_nonfinal_source_before_target(tmp_path: Path) -> None:
+    producer = _producer()
+    role_manifest, _ = _production_roles()
+    headroom, expected = _production_headroom(tmp_path, producer, role_manifest)
+    expected = {**expected, "source_provenance_status": "ENGINEERING_NONFINAL"}
+    events: list[str] = []
+
+    def provider(_trace):
+        events.append("target")
+        return object()
+
+    with pytest.raises(ValueError, match="current CLEAN source provenance"):
+        generate_value_bank(
+            (SimpleNamespace(rows=(_row(0, 1.0, subject="producer-0"),)),),
+            producer,
+            provider,
+            PFGRLiteConfig(),
+            tmp_path / "nonfinal-source",
+            role_manifest=role_manifest,
+            stage_provenance=_stage(producer, role_manifest),
+            headroom_decision=headroom,
+            headroom_expected=expected,
+        )
+    assert events == []
+
+
+def test_public_generate_value_bank_accepts_real_main_permit_and_canonical_writer(tmp_path: Path) -> None:
+    """A valid reviewed permit reaches the real production ValueBankWriter."""
+
+    producer = _producer()
+    role_manifest, _ = _production_roles()
+    headroom, expected = _production_headroom(tmp_path, producer, role_manifest)
+    row = _row(0, 1.0, subject="producer-0")
+    row = ValueBankRow(
+        **{
+            **row.__dict__,
+            "producer_compatibility_hash": producer.digest,
+            "split_role_hash": role_manifest.digest,
+        }
+    )
+    destination = tmp_path / "adapter-main"
+    result = generate_value_bank(
+        (SimpleNamespace(rows=(row,)),),
+        producer,
+        None,
+        PFGRLiteConfig(),
+        destination,
+        role_manifest=role_manifest,
+        stage_provenance=_stage(producer, role_manifest),
+        headroom_decision=headroom,
+        headroom_expected=expected,
+    )
+    assert result.row_count == 1
+    assert ValueBankReader(destination).verify()["status"]["evidence_status"] == "READY"
+
+
 def test_stage_provenance_schema_is_single_canonical_envelope(tmp_path: Path) -> None:
     producer = _producer()
     stage = {
@@ -347,6 +494,7 @@ def test_stage_provenance_schema_is_single_canonical_envelope(tmp_path: Path) ->
 def test_production_typed_role_and_stage_receipt_roundtrip(tmp_path: Path) -> None:
     producer = _producer()
     role_manifest, role_membership = _production_roles()
+    headroom, headroom_expected = _production_headroom(tmp_path, producer, role_manifest)
     row = _row(0, 1.0, subject="producer-0")
     row = ValueBankRow(**{**row.__dict__, "producer_compatibility_hash": producer.digest, "split_role_hash": role_manifest.digest})
     path = tmp_path / "production"
@@ -357,6 +505,8 @@ def test_production_typed_role_and_stage_receipt_roundtrip(tmp_path: Path) -> No
         split_role_hash=role_manifest.digest,
         role_manifest=role_manifest,
         stage_provenance=_stage(producer, role_manifest),
+        headroom_decision=headroom,
+        headroom_expected=headroom_expected,
     )
     reader = ValueBankReader(path / "index.json", expected_role_manifest=role_manifest, expected_baseline_split_hash="baseline-split-v1", expected_producer=producer)
     assert reader.index["role_manifest"]["schema_version"] == "pfgr-lite-training-roles-v1"
@@ -364,9 +514,54 @@ def test_production_typed_role_and_stage_receipt_roundtrip(tmp_path: Path) -> No
     assert role_membership["producer-0"] == "producer_fit"
 
 
+def test_production_headroom_cohort_must_be_validation_subset(tmp_path: Path) -> None:
+    producer = _producer()
+    unrelated_validation = tuple(f"unrelated-validation-{index:02d}" for index in range(32))
+    role_manifest, _ = _production_roles(validation_ids=unrelated_validation)
+    headroom, headroom_expected = _production_headroom(tmp_path, producer, role_manifest)
+    row = _row(0, 1.0, subject="producer-0")
+    row = ValueBankRow(**{**row.__dict__, "producer_compatibility_hash": producer.digest, "split_role_hash": role_manifest.digest})
+    with pytest.raises(ValueError, match="validation allocation"):
+        build_value_bank(
+            [row],
+            tmp_path / "wrong-cohort",
+            producer=producer,
+            split_role_hash=role_manifest.digest,
+            role_manifest=role_manifest,
+            stage_provenance=_stage(producer, role_manifest),
+            headroom_decision=headroom,
+            headroom_expected=headroom_expected,
+        )
+
+
+def test_production_headroom_cohort_rejects_duplicate_related_groups(tmp_path: Path) -> None:
+    producer = _producer()
+    role_manifest, _ = _production_roles()
+    duplicate_groups = tuple(
+        (subject, "validation-shared" if subject.startswith("validation-") else group)
+        for subject, group in role_manifest.subject_group_ids
+    )
+    role_manifest = replace(role_manifest, subject_group_ids=duplicate_groups)
+    headroom, headroom_expected = _production_headroom(tmp_path, producer, role_manifest)
+    row = _row(0, 1.0, subject="producer-0")
+    row = ValueBankRow(**{**row.__dict__, "producer_compatibility_hash": producer.digest, "split_role_hash": role_manifest.digest})
+    with pytest.raises(ValueError, match="one subject per distinct related group"):
+        build_value_bank(
+            [row],
+            tmp_path / "duplicate-groups",
+            producer=producer,
+            split_role_hash=role_manifest.digest,
+            role_manifest=role_manifest,
+            stage_provenance=_stage(producer, role_manifest),
+            headroom_decision=headroom,
+            headroom_expected=headroom_expected,
+        )
+
+
 def test_production_stage_and_role_mismatches_fail_closed(tmp_path: Path) -> None:
     producer = _producer()
     role_manifest, _ = _production_roles()
+    headroom, headroom_expected = _production_headroom(tmp_path, producer, role_manifest)
     row = _row(0, 1.0, subject="producer-0")
     row = ValueBankRow(**{**row.__dict__, "producer_compatibility_hash": producer.digest, "split_role_hash": role_manifest.digest})
     with pytest.raises(ValueError, match="projector"):
@@ -389,7 +584,7 @@ def test_production_stage_and_role_mismatches_fail_closed(tmp_path: Path) -> Non
             stage_provenance=fake_prior,
         )
     path = tmp_path / "production"
-    build_value_bank([row], path, producer=producer, split_role_hash=role_manifest.digest, role_manifest=role_manifest, stage_provenance=_stage(producer, role_manifest))
+    build_value_bank([row], path, producer=producer, split_role_hash=role_manifest.digest, role_manifest=role_manifest, stage_provenance=_stage(producer, role_manifest), headroom_decision=headroom, headroom_expected=headroom_expected)
     with pytest.raises(ValueError, match="baseline"):
         ValueBankReader(path, expected_baseline_split_hash="other-baseline")
     with pytest.raises(ValueError, match="role manifest"):
@@ -400,6 +595,7 @@ def test_production_stage_and_role_mismatches_fail_closed(tmp_path: Path) -> Non
 def test_verified_prior_requires_hashed_original_receipt(tmp_path: Path) -> None:
     producer = _producer()
     role_manifest, _ = _production_roles()
+    headroom, headroom_expected = _production_headroom(tmp_path, producer, role_manifest)
     original = _stage(producer, role_manifest)
     prior = _stage(producer, role_manifest, spectral_arm="verified_prior")
     prior["projector_gradient_evidence"] = {"l2_norm_max": 0.0, "nonzero_steps": 0, "measured_steps": 0}
@@ -409,7 +605,7 @@ def test_verified_prior_requires_hashed_original_receipt(tmp_path: Path) -> None
     row = _row(0, 1.0, subject="producer-0")
     row = ValueBankRow(**{**row.__dict__, "producer_compatibility_hash": producer.digest, "split_role_hash": role_manifest.digest})
     path = tmp_path / "verified-prior"
-    build_value_bank([row], path, producer=producer, split_role_hash=role_manifest.digest, role_manifest=role_manifest, stage_provenance=prior)
+    build_value_bank([row], path, producer=producer, split_role_hash=role_manifest.digest, role_manifest=role_manifest, stage_provenance=prior, headroom_decision=headroom, headroom_expected=headroom_expected)
     assert ValueBankReader(path).stage_provenance["spectral_arm"] == "verified_prior"
 
 
@@ -438,9 +634,18 @@ def test_verified_prior_rejects_invalid_original_receipt(tmp_path: Path, mutatio
 def test_production_row_identity_and_atomic_index_last_are_enforced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     producer = _producer()
     role_manifest, _ = _production_roles()
+    headroom, headroom_expected = _production_headroom(tmp_path, producer, role_manifest)
     incomplete = _row(0, 1.0, subject="producer-0")
     with pytest.raises(ValueError, match="immutable identities"):
-        writer = ValueBankWriter(tmp_path / "missing-row-id", producer=producer, split_role_hash=role_manifest.digest, role_manifest=role_manifest, stage_provenance=_stage(producer, role_manifest))
+        writer = ValueBankWriter(
+            tmp_path / "missing-row-id",
+            producer=producer,
+            split_role_hash=role_manifest.digest,
+            role_manifest=role_manifest,
+            stage_provenance=_stage(producer, role_manifest),
+            headroom_decision=headroom,
+            headroom_expected=headroom_expected,
+        )
         writer.append(ValueBankRow(**{**incomplete.__dict__, "producer_compatibility_hash": producer.digest, "split_role_hash": ""}))
     destination = tmp_path / "streamed"
     replace = value_bank_module.os.replace

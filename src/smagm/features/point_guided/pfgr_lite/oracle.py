@@ -398,7 +398,7 @@ def _oracle_advance(
     writer: object | None,
     state_index: int,
     route: object,
-    target_context: object,
+    target_context: object | None = None,
 ) -> object:
     """Apply exactly the winning stored proposal from the current state."""
 
@@ -409,16 +409,17 @@ def _oracle_advance(
     if apply_callback is None:
         apply_callback = getattr(inputs, "oracle_apply", None)
     if apply_callback is not None:
-        return _invoke(
-            apply_callback,
-            state,
-            action,
-            state_index=state_index,
-            context=context,
-            observation_context=context,
-            target_context=target_context,
-            route=route,
-        )
+        kwargs = {
+            "state_index": state_index,
+            "context": context,
+            "observation_context": context,
+            "route": route,
+        }
+        # Target-free controls must not even receive a target_context keyword;
+        # callback fixtures use this boundary to detect accidental label leaks.
+        if target_context is not None:
+            kwargs["target_context"] = target_context
+        return _invoke(apply_callback, state, action, **kwargs)
     from .action_proposal import apply_scored_action
 
     if context is None or writer is None:

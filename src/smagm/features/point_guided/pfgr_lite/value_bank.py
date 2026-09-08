@@ -1115,6 +1115,80 @@ def _role_subject_map(role_manifest: TrainingRoleManifest) -> dict[str, str]:
     return mapping
 
 
+def _admit_main_headroom(
+    *,
+    producer: ProducerCompatibility | ProducerDependencies,
+    role_manifest: TrainingRoleManifest | None,
+    supplied_headroom: object | None,
+    expected_headroom: Mapping[str, str] | None,
+) -> object:
+    """Validate one canonical MAIN headroom admission envelope.
+
+    This helper is shared by ``ValueBankWriter`` and the public
+    ``generate_value_bank`` adapter.  Keeping producer/source/cohort checks in
+    one boundary prevents an adapter from accepting a permit that the writer
+    would reject later (or from invoking target measurement before rejection).
+    """
+
+    from .headroom import require_main_headroom_decision
+
+    if not isinstance(producer, ProducerDependencies):
+        raise ValueError("MAIN headroom admission requires typed ProducerDependencies")
+    if producer.source_provenance.synthetic_untrained:
+        raise ValueError("synthetic/untrained source provenance cannot authorize MAIN headroom")
+    if role_manifest is None or role_manifest.engineering_only:
+        raise ValueError("MAIN headroom admission requires the authoritative production role manifest")
+    if not isinstance(expected_headroom, Mapping):
+        raise ValueError("MAIN headroom admission requires computed headroom expected identities")
+    expected: dict[str, str] = {"producer_compatibility_hash": _producer_hash(producer)}
+    for key, value in expected_headroom.items():
+        if not isinstance(key, str) or not isinstance(value, str) or not value.strip():
+            raise ValueError("headroom expected identities must be nonempty strings")
+        if key == "producer_compatibility_hash" and value != expected["producer_compatibility_hash"]:
+            raise ValueError("headroom expected producer identity does not match the live producer")
+        expected[key] = value
+    required_keys = (
+        "source_manifest_hash",
+        "base_checkpoint_hash",
+        "updater_checkpoint_hash",
+        "split_hash",
+        "subject_set_hash",
+        "teacher_identity_hash",
+        "frozen_model_digest",
+    )
+    for key in required_keys:
+        if key not in expected:
+            raise ValueError(f"MAIN headroom admission requires headroom identity {key}")
+    current_source_status = expected.get("source_provenance_status")
+    if not isinstance(current_source_status, str) or current_source_status.upper() not in {"CLEAN", "VERIFIED", "PRODUCTION_VERIFIED"}:
+        raise ValueError("MAIN headroom admission requires current CLEAN source provenance status")
+    admitted = require_main_headroom_decision(supplied_headroom, expected=expected)
+    if admitted.source_provenance_status.upper() != current_source_status.upper():
+        raise ValueError("MAIN headroom source provenance does not match current execution status")
+    if admitted.split_hash != role_manifest.baseline_split_hash:
+        raise ValueError("MAIN headroom split identity does not match the role manifest baseline split")
+    evidence_path = admitted.evidence_artifact_path
+    try:
+        evidence_payload = json.loads(Path(evidence_path).read_text(encoding="utf-8")) if evidence_path else None
+    except (OSError, ValueError) as error:
+        raise ValueError("MAIN headroom cohort evidence cannot be loaded") from error
+    retained_subjects = evidence_payload.get("subject_ids") if isinstance(evidence_payload, Mapping) else None
+    if not isinstance(retained_subjects, list) or not retained_subjects:
+        raise ValueError("MAIN headroom cohort evidence lacks retained subject identities")
+    if len(set(retained_subjects)) != len(retained_subjects):
+        raise ValueError("MAIN headroom cohort contains duplicate subject identities")
+    validation_subjects = set(role_manifest.baseline_validation_subject_ids)
+    if any(not isinstance(subject, str) or subject not in validation_subjects for subject in retained_subjects):
+        raise ValueError("MAIN headroom cohort is not a subset of the role manifest validation allocation")
+    groups = dict(role_manifest.subject_group_ids)
+    retained_groups = [groups.get(subject) for subject in retained_subjects]
+    if any(group is None for group in retained_groups):
+        raise ValueError("MAIN headroom cohort subject lacks a reviewed subject-group identity")
+    if len(set(retained_groups)) != len(retained_groups):
+        raise ValueError("MAIN headroom cohort must contain one subject per distinct related group")
+    return admitted
+
+
 class ValueBankWriter:
     """Append detached rows and atomically publish a versioned bank."""
 
@@ -1135,6 +1209,8 @@ class ValueBankWriter:
         diagnostic: bool = False,
         stage_provenance: Mapping[str, Any] | None = None,
         source_scale: GainScale | Mapping[str, Any] | None = None,
+        headroom_decision: object | None = None,
+        headroom_expected: Mapping[str, str] | None = None,
     ) -> None:
         self.destination = Path(destination)
         if self.destination.exists():
@@ -1215,6 +1291,54 @@ class ValueBankWriter:
             role_manifest_digest=role_digest_for_stage,
             engineering_only=self.engineering_only,
         )
+        self.headroom_decision: dict[str, Any] | None = None
+        if headroom_decision is not None:
+            if hasattr(headroom_decision, "as_dict"):
+                headroom_payload = headroom_decision.as_dict()
+            elif isinstance(headroom_decision, Mapping):
+                headroom_payload = dict(headroom_decision)
+            else:
+                raise TypeError("headroom_decision must be HeadroomDecision or mapping")
+            self.headroom_decision = _jsonable(headroom_payload)
+        if not engineering_only:
+            # MAIN bank publication is downstream of reviewed R4B evidence;
+            # a completed updater/stage receipt alone is not an admission.
+            # Keep this gate after the producer/role/stage structural checks so
+            # malformed legacy envelopes still report their concrete schema
+            # failure instead of being masked by the higher-level admission
+            # requirement.
+            supplied_headroom = headroom_decision
+            if supplied_headroom is None and isinstance(self.stage_provenance, Mapping):
+                supplied_headroom = self.stage_provenance.get("headroom_decision")
+            if supplied_headroom is None:
+                raise ValueError("MAIN value-bank publication requires an accepted HeadroomDecision")
+            expected_headroom: dict[str, str] = {"producer_compatibility_hash": self.producer_hash}
+            if headroom_expected is not None:
+                if not isinstance(headroom_expected, Mapping):
+                    raise TypeError("headroom_expected must be a mapping")
+                expected_headroom.update(dict(headroom_expected))
+            elif isinstance(self.stage_provenance, Mapping):
+                # Backward-compatible path for early receipts that carried
+                # the joins inline; new S2 code uses headroom_expected.
+                for key in (
+                    "source_manifest_hash",
+                    "base_checkpoint_hash",
+                    "updater_checkpoint_hash",
+                    "split_hash",
+                    "subject_set_hash",
+                    "teacher_identity_hash",
+                    "frozen_model_digest",
+                    "source_provenance_status",
+                ):
+                    value = self.stage_provenance.get(key)
+                    if isinstance(value, str) and value.strip():
+                        expected_headroom[key] = value
+            admitted_headroom = _admit_main_headroom(
+                producer=producer,
+                role_manifest=self.role_manifest,
+                supplied_headroom=supplied_headroom,
+                expected_headroom=expected_headroom,
+            )
         if source_scale is not None:
             if isinstance(source_scale, Mapping):
                 source_data = dict(source_scale)
@@ -1463,6 +1587,7 @@ class ValueBankWriter:
                 "role_manifest_digest": self.role_membership_digest,
                 "label_definition_provenance": LABEL_PROVENANCE,
                 "stage_provenance": self.stage_provenance,
+                "headroom_decision": self.headroom_decision,
                 "source_scale_hash": None if self.source_scale is None else self.source_scale.digest,
                 "status": {"evidence_status": status, "reasons": reasons},
                 "producer": {"compatibility_hash": self.producer_hash, "training_role": self.training_role, **self.producer_metadata},
@@ -1603,6 +1728,7 @@ class ValueBankReader:
             "role_manifest_digest",
             "label_definition_provenance",
             "stage_provenance",
+            "headroom_decision",
             "source_scale_hash",
             "status",
             "producer",
@@ -1613,6 +1739,9 @@ class ValueBankReader:
             raise ValueError(f"unknown value-bank index keys: {sorted(unknown)}")
         if index.get("descriptor_schema") != DESCRIPTOR_SCHEMA:
             raise ValueError("unknown descriptor schema")
+        if "headroom_decision" in index and index["headroom_decision"] is not None and not isinstance(index["headroom_decision"], Mapping):
+            raise ValueError("headroom_decision index envelope must be a mapping or null")
+        self.headroom_decision = None if index.get("headroom_decision") is None else dict(index["headroom_decision"])
         manifest_required = {field.name for field in fields(ValueBankManifest)}
         if not isinstance(index.get("manifest"), Mapping) or set(index["manifest"]) != manifest_required:
             raise ValueError("invalid ValueBankManifest envelope")

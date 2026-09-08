@@ -22,6 +22,16 @@ MedicalNet pretrained thật, dữ liệu bệnh nhân, checkpoint huấn luyệ
 smoke SHA cũ chưa được xác minh. Các run Reward/trajectory cũ chỉ là tài liệu
 lịch sử; dùng runbook này làm entrypoint PFGR-Lite.
 
+### Quick decision path (locked)
+
+Run the bounded software path in this order: **R0 → R1 → R2 → R3
+engineering → R4A → R4B → human review → conditional R5 → R6 → R7 → R8 →
+R9**. **R4A exit code 0 does not mean R4 scientific PASS.** The four-subject
+R4B NEXT-1 receipt remains **INCONCLUSIVE** and cannot
+authorize MAIN S2/S4 or R5. Only a separately named, human-reviewed later-cohort
+permit with Oracle > Z0 and Oracle > Random under the predeclared precision/CI
+rule may open R5.
+
 ## 0. Quy tắc an toàn, thứ tự môi trường và biến chung
 
 Trước hết bảo toàn thay đổi địa phương; không `reset`, `clean`, checkout hoặc
@@ -86,6 +96,19 @@ PFGR_STATIC_CHECKPOINT="$PFGR_STATIC_DIR/inference.pt"
 PFGR_R4_DIR="$OUTPUT_ROOT/R4-updater-$PFGR_RUN_ID"
 PFGR_BASE_CHECKPOINT="$PFGR_R4_DIR/inference.pt"
 PFGR_U_ONLY_CHECKPOINT="$OUTPUT_ROOT/R4-u-only-$PFGR_RUN_ID/inference.pt"
+PFGR_HEADROOM_DIR="$OUTPUT_ROOT/R4B-headroom-$PFGR_RUN_ID"
+PFGR_HEADROOM_EVIDENCE="$PFGR_HEADROOM_DIR/next1/next1_evidence.json"
+PFGR_HEADROOM_DECISION="$PFGR_HEADROOM_DIR/next1/headroom_decision.json"
+# This is deliberately distinct from the early four-subject decision above:
+# a human reviewer must create/bind this later-cohort permit after reviewing
+# retained evidence, positive margin and confidence intervals.
+PFGR_HEADROOM_ACCEPTED_DECISION="${PFGR_HEADROOM_ACCEPTED_DECISION:-$OUTPUT_ROOT/review/headroom-approved-$PFGR_RUN_ID.json}"
+# Optional historical producer/base pair used only for an explicit engineering
+# NEXT-1 diagnostic.  Its serialized width-128 sidecar/state stays byte-for-
+# byte intact and is never a MAIN-compatible producer.
+PFGR_HISTORICAL_WIDTH128_CHECKPOINT="${PFGR_HISTORICAL_WIDTH128_CHECKPOINT:-}"
+PFGR_HISTORICAL_BASE_CHECKPOINT="${PFGR_HISTORICAL_BASE_CHECKPOINT:-}"
+PFGR_HISTORICAL_R4B_DIR="$OUTPUT_ROOT/R4B-historical-width128-$PFGR_RUN_ID"
 PFGR_R5_DIR="$OUTPUT_ROOT/R5-bank-$PFGR_RUN_ID"
 PFGR_BANK_INDEX="$PFGR_R5_DIR/s2/bank/index.json"
 PFGR_R6_DIR="$OUTPUT_ROOT/R6-v366-$PFGR_RUN_ID"
@@ -411,7 +434,7 @@ capacity/affine/modality hoặc frozen ownership sai; scientific
 **INCONCLUSIVE** cho pilot. **Tiếp:** chọn static producer bằng review rồi R4;
 static-only không cung cấp ValueBank producer MAIN.
 
-## R4 -- updater, correction headroom và Oracle scope
+## R4A bootstrap / R4B diagnostic -- updater, correction headroom và Oracle scope
 
 **Mục đích.** Train hai arm có provenance riêng: `u_plus_spectral` MAIN và
 `u_only` control. Mọi correction/headroom/random/oracle control chính dùng
@@ -433,6 +456,95 @@ require_artifact "$PFGR_STATIC_CHECKPOINT"
 require_artifact "$PFGR_BASE_CHECKPOINT"
 require_artifact "$PFGR_U_ONLY_CHECKPOINT"
 ```
+
+### R4B -- frozen correction-headroom diagnostic
+
+**WARNING: R4A exit code 0 does not mean R4 scientific PASS.** R4B is a
+frozen correction-headroom diagnostic and does not authorize MAIN S2/S4.
+Run NEXT-1 only after PFGR_BASE_CHECKPOINT exists; this fixes four development
+subjects, seeds 17/29/41, 32 candidates, Q1024 screening, and independent
+EXACT FOOTPRINT confirmation of the same winner.
+
+```bash
+require_artifact "$PFGR_BASE_CHECKPOINT"
+require_artifact "$PFGR_STATIC_CHECKPOINT"
+"$POINT_GUIDED_PYTHON" -m smagm.cli.pfgr_lite headroom-evaluate \
+  --config "$REPO_ROOT/configs/pfgr_lite/main.json" \
+  --data-root "$BRATS21_ROOT" --split-file "$BASELINE_SPLIT" \
+  --roles-file "$PFGR_ROLES" --checkpoint "$PFGR_BASE_CHECKPOINT" \
+  --base-checkpoint "$PFGR_STATIC_CHECKPOINT" \
+  --split-role validation --max-subjects 4 --candidate-count 32 \
+  --query-count 1024 --practical-margin 0.0 \
+  --output-root "$OUTPUT_ROOT" --run-name "R4B-headroom-$PFGR_RUN_ID" \
+  --device "$PFGR_DEVICE" --no-amp
+require_file "$PFGR_HEADROOM_EVIDENCE" NEXT-1-evidence
+require_file "$PFGR_HEADROOM_DECISION" NEXT-1-decision
+```
+
+The four-subject run uses a zero practical margin as a descriptive early
+screening threshold; it remains **INCONCLUSIVE**. A later human-reviewed
+conditional R5 permit must freeze a positive practical margin and CI rule in
+the review receipt before any MAIN bank entry.
+
+R4B retains candidate IDs/positions/delta hashes, dense screening rows,
+within-subject random averages, separate no-op, exact confirmation, M/Q/
+uncertainty, real correction/write norms, and write_saturation =
+not_applicable for the additive unclipped writer. Four subjects remain early
+INCONCLUSIVE and cannot open MAIN. Human review must independently bind all
+source/producer/base/updater/split/teacher identities, n>=32 subjects, and the
+predeclared positive margin/CI before conditional R5.
+
+The early `PFGR_HEADROOM_DECISION` is never passed to a MAIN bank command. A
+reviewer must write the separately named `PFGR_HEADROOM_ACCEPTED_DECISION`
+receipt (including the retained later-cohort evidence path/hash and all source,
+producer, base, updater, split and teacher identities) before opening R5.
+
+For a retained historical width-128 producer, use this explicit engineering
+recipe only. It hydrates the checkpoint's exact serialized frontend sidecar and
+state, writes a visibly non-final receipt, and cannot authorize MAIN; leave the
+variable empty when no historical checkpoint is available. The compliant R4B
+recipe above uses matching width-12 base/updater artifacts and produces early
+evidence; only a later MAIN R5 run requires the separately named,
+human-reviewed accepted permit.
+
+```bash
+if [ -n "$PFGR_HISTORICAL_WIDTH128_CHECKPOINT" ]; then
+  require_file "$PFGR_HISTORICAL_WIDTH128_CHECKPOINT" HISTORICAL_WIDTH128_CHECKPOINT
+  require_file "$PFGR_HISTORICAL_BASE_CHECKPOINT" HISTORICAL_BASE_CHECKPOINT
+  "$POINT_GUIDED_PYTHON" -m smagm.cli.pfgr_lite headroom-evaluate \
+    --engineering-only --config "$REPO_ROOT/configs/pfgr_lite/main.json" \
+    --data-root "$BRATS21_ROOT" --split-file "$BASELINE_SPLIT" \
+    --roles-file "$PFGR_ROLES" --checkpoint "$PFGR_HISTORICAL_WIDTH128_CHECKPOINT" \
+    --base-checkpoint "$PFGR_HISTORICAL_BASE_CHECKPOINT" \
+    --split-role validation --max-subjects 4 --candidate-count 32 \
+    --query-count 1024 --practical-margin 0.0 \
+    --output-root "$OUTPUT_ROOT" --run-name "R4B-historical-width128-$PFGR_RUN_ID" \
+    --device "$PFGR_DEVICE" --no-amp
+else
+  echo "bỏ qua historical width128 NEXT-1; PFGR_HISTORICAL_WIDTH128_CHECKPOINT chưa đặt"
+fi
+```
+
+| Case | Action |
+| --- | --- |
+| R4A exit 0 without R4B | Stop; not scientific PASS. |
+| NEXT-1 four-subject output | Keep INCONCLUSIVE; deny MAIN S2/S4. |
+| Winner/confirmation mismatch or target before freeze | FAIL; discard artifact. |
+| Missing identity/source/review or wide CI | DENY; rerun with a new run-name. |
+| Complete real evidence, n>=32, positive margin/CI | Human Gate may open conditional R5. |
+
+Scientific decision cases (reported explicitly in the later reviewed receipt):
+
+| Case | Observed result | Interpretation | Next action |
+| --- | --- | --- | --- |
+| A | Oracle ≈ Z0 and Random ≈ Z0 | `NO_HEADROOM_OBSERVED`; this is an observed no-headroom case, not a universal stop rule. | Keep correction/adaptive banking closed; review the bounded evidence. |
+| B | Random > Z0 and Oracle ≈ Random within the frozen equivalence margin | `CORRECTION_USEFUL_SELECTION_NOT_NEEDED`; correction may be useful, but learned selection remains closed. | Keep adaptive selection closed and review correction-only follow-up. |
+| C | Oracle > Z0 and Oracle > Random with precise positive bounds | `HEADROOM_CONFIRMED`; Human Gate and matching identities are still mandatory before MAIN. | Human review may open conditional R5 only after all identity/cohort checks pass. |
+| Uncertain | Four-subject/underpowered, stale, noisy or incomplete | `INCONCLUSIVE`; deny MAIN. | Rerun only with a new reviewed receipt and frozen margins. |
+
+--engineering-only is an explicit typed fixture bypass; receipts must say
+authorizes_main=false and it never converts synthetic/untrained evidence to
+MAIN.
 
 Các controls sau đây là lệnh độc lập, không phải matrix ngầm; mọi control
 chính dùng `PFGR_BASE_CHECKPOINT`:
@@ -564,20 +676,35 @@ oracle>random nhưng learned kém thì kiểm bank/V/ranking; learned hữu ích
 
 **Mục đích.** Hoàn tất forced target-free traces rồi mới đo labels; candidate
 subset có scope rõ, exact/fixed-Q version, shard/index/replay bất biến.
-**Tiền đề.** R4 **U+spectral trained** `PFGR_BASE_CHECKPOINT`, roles R0.
+**Tiền đề.** Clean source checkout; matching R4 static base
+`PFGR_STATIC_CHECKPOINT` and **U+spectral trained updater**
+`PFGR_BASE_CHECKPOINT`; roles R0; and a separately named, human-reviewed
+accepted `HEADROOM_CONFIRMED` decision whose source/producer/base/updater/
+split/teacher identities match.
 
 ```bash
 require_artifact "$PFGR_BASE_CHECKPOINT"
+require_artifact "$PFGR_STATIC_CHECKPOINT"
+require_artifact "$PFGR_HEADROOM_ACCEPTED_DECISION"
 "$POINT_GUIDED_PYTHON" -m smagm.cli.pfgr_lite bank-build "${PFGR_COMMON[@]}" \
   --roles-file "$PFGR_ROLES" --checkpoint "$PFGR_BASE_CHECKPOINT" \
+  --base-checkpoint "$PFGR_STATIC_CHECKPOINT" \
   --teacher-mode iid_fixed_q --query-count 1024 --candidate-count 32 \
-  --max-states 3 --max-subjects 2 --run-name "R5-bank-$PFGR_RUN_ID"
+  --max-states 3 --max-subjects 2 --run-name "R5-bank-$PFGR_RUN_ID" \
+  --headroom-decision "$PFGR_HEADROOM_ACCEPTED_DECISION"
 require_artifact "$PFGR_BANK_INDEX"
 "$POINT_GUIDED_PYTHON" -m smagm.cli.pfgr_lite bank-verify "${PFGR_COMMON[@]}" \
   --bank-index "$PFGR_BANK_INDEX" --checkpoint "$PFGR_BASE_CHECKPOINT" \
   --split-file "$BASELINE_SPLIT" --roles-file "$PFGR_ROLES" \
   --replay-count 2 --run-name "R5-verify-$PFGR_RUN_ID"
 ```
+
+The `--headroom-decision` receipt is mandatory for this MAIN entrypoint and
+must be the separately named, human-reviewed later-cohort permit with
+`HEADROOM_CONFIRMED` and matching identities, never the early four-subject
+`PFGR_HEADROOM_DECISION`. An engineering-only decision is accepted only by an
+explicit `--engineering-only` fixture invocation and remains
+`authorizes_main=false`; it cannot mint a MAIN bank or scientific PASS.
 
 `index.json`, shard hashes, role/split/producer/writer/query/lattice hashes,
 gain scale và replay outcomes phải khớp. Q1024 là pilot, không phải bằng chứng

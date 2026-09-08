@@ -4,9 +4,15 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from smagm.features.point_guided.pfgr_lite.calibration_runner import CalibrationRunOptions, run_calibration
 from smagm.features.point_guided.pfgr_lite.config import PFGRLiteConfig
+from smagm.features.point_guided import PointGuidedConfig
+from smagm.features.point_guided.contracts import VolumeGeometry
+from smagm.features.point_guided.pfgr_lite.calibration_runner import _context_for_sample
+from smagm.features.point_guided.pfgr_lite.data import TargetFreeSample
+from smagm.features.point_guided.pfgr_lite.model import PFGRLiteModel
 
 
 def test_calibration_options_default_to_exact_reference() -> None:
@@ -51,3 +57,29 @@ def test_runner_rejects_unknown_options_and_missing_production_callbacks(tmp_pat
     )
     with pytest.raises(ValueError, match="TrainingRoleManifest"):
         run_calibration(inputs, CalibrationRunOptions(engineering_only=False), tmp_path / "missing")
+
+
+def test_calibration_context_uses_one_resolved_model_device() -> None:
+    config = PFGRLiteConfig(num_points=2, engineering_only=True, device="cpu")
+    model = PFGRLiteModel(
+        config,
+        frontend_config=PointGuidedConfig(
+            num_points=2,
+            num_semantic_classes=3,
+            point_candidate_multiplier=2,
+            offset_hidden_channels=12,
+        ),
+    )
+    sample = TargetFreeSample(
+        "calibration-device",
+        torch.zeros((3, 9, 9, 9), dtype=torch.float32),
+        torch.ones((1, 9, 9, 9), dtype=torch.bool),
+        VolumeGeometry.from_spacing((9, 9, 9)),
+        {},
+        "",
+        "",
+    )
+    inputs = SimpleNamespace(config=config, execution=None, model=model)
+    context = _context_for_sample(inputs, sample)
+    assert context.initial_planes.xy.device == torch.device("cpu")
+    assert next(model.parameters()).device == torch.device("cpu")

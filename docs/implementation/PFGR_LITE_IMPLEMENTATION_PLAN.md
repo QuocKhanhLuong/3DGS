@@ -375,3 +375,33 @@ Only after final GREEN: coordinator fresh-fetches origin, reconciles main withou
 Top risks: multiscale affine misalignment; deep-tap accidentally replacing spectral prepool; hidden second traversal; target-bearing adapter object leaking into inference; shared-tensor mutation defeating frozen metadata; same-action drift; incomplete interpolation footprint; mask/sample denominator bias; optional-stop label bias; U gradients killed by frozen-D no_grad; random frozen spectral bottleneck; stale bank/calibration; ambiguous false-continuation scope; V fit reintroducing online teacher; parameter-count/base-quality confounding; CLI that only writes manifests; CPU evidence mislabeled real/CUDA; operation-count speedup claims using valid instead of decoded slots.
 
 At phase-zero completion: source and primary attachment verified; user amendments resolved; tensor/config/action/teacher/gradient/bank/policy/checkpoint interfaces and ownership frozen; runbook/CLI/test/review contracts specified. **Implementation, CLI execution, new numerical benchmarks, scientific headroom and real/CUDA results remain pending.** Coordinator acceptance is the next dependency, followed by W1 interface/navigation work. Any change to locked dimensions, teacher target, calibration role/statistic, stage ownership, policy semantics or CLI/artifact family requires a versioned amendment here before dependent implementation diverges.
+
+## 14. Implementation amendment 2026-09-09 (PFGR-Lite correctness patch)
+
+This dated amendment records the accepted configuration/provenance correction
+without rewriting the frozen historical sections above. The PFGR MAIN
+frontend is **width 12** (`offset_hidden_channels=12`) with the retained
+production deterministic point multiplier **4**; the legacy frontend's
+width-128 default remains unchanged. A serialized width-128 checkpoint may be
+hydrated only when an explicit engineering capability is supplied, with its
+exact PFGR/frontend sidecars and state bytes preserved; the production
+constructor and MAIN stage/bank gates reject that profile.
+
+All PFGR CLI stages/services resolve one requested/effective device envelope;
+an explicit CLI value wins over config, unavailable CUDA/index values fail
+closed, and receipts record both values. R4B's callable NEXT-1 remains the
+four-subject engineering diagnostic, while lower-level typed headroom options
+may represent a reviewed cohort of at least four subjects; a MAIN permit still
+requires the retained adequately precise cohort and one subject per related
+group. MAIN S2/S4/value-bank entrypoints must consume a separately named,
+human-reviewed typed `HeadroomDecision`; the early four-subject decision is
+never an automatic permit. The scientific decision enum is closed to
+`HEADROOM_CONFIRMED`, `CORRECTION_USEFUL_SELECTION_NOT_NEEDED`,
+`NO_HEADROOM_OBSERVED`, and `INCONCLUSIVE`; engineering capability and source
+errors are status fields, not scientific outcomes.
+
+The amendment is implemented by the correctness patch paths in
+`src/smagm/features/point_guided/pfgr_lite/`, the CLI/runbook, and their
+targeted CPU tests. No architecture, teacher algebra, loss, route, or
+checkpoint tensor is redesigned, and no real training, bank generation, CUDA
+execution, or scientific acceptance is implied.

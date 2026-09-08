@@ -27,6 +27,7 @@ from .calibration import (
 )
 from .config import PFGRLiteConfig
 from .provenance import canonical_digest
+from .device import resolve_device
 
 
 CALIBRATION_RUN_SCHEMA = "pfgr-lite-calibration-run-v1"
@@ -202,13 +203,44 @@ def _context_for_sample(inputs: Any, sample: Any, *, counters: Any | None = None
     """Encode one observation-only sample through the already-built model."""
 
     model = getattr(inputs, "model", None)
-    encode = getattr(model, "encode_observations", None)
-    if not callable(encode):
+    if model is None:
         raise ValueError("S5 default collection requires PFGRLiteModel.encode_observations")
     execution = getattr(inputs, "execution", None)
     options = getattr(execution, "stage_options", None)
-    device = getattr(options, "device", "cpu")
-    observations = sample.observations.unsqueeze(0).to(device=device)
+    if options is None:
+        options = getattr(inputs, "stage_options", None)
+    config = _config(inputs)
+    requested_device = getattr(options, "device", None) if options is not None else None
+    configured_device = getattr(config, "device", None)
+    # Direct S5 callers may omit a StageExecutionConfig.  Resolve the same
+    # requested/configured placement used by the CLI, then fall back to the
+    # model's actual parameter device only when neither envelope declares one.
+    if requested_device is None:
+        requested_device = configured_device
+        configured_device = None
+    if requested_device is None:
+        try:
+            requested_device = next(model.parameters()).device
+        except (AttributeError, StopIteration):
+            requested_device = "cpu"
+    resolution = resolve_device(str(requested_device), configured_device)
+    # Place the model once at the same resolved boundary as its observation
+    # tensors.  ``nn.Module.to`` mutates in place; custom factories may return
+    # a replacement object, which is propagated back into StageInputs when it
+    # is mutable so subsequent lattice/query calls share the same placement.
+    to_device = getattr(model, "to", None)
+    if callable(to_device):
+        moved = to_device(resolution.effective)
+        if moved is not None:
+            model = moved
+            try:
+                setattr(inputs, "model", moved)
+            except (AttributeError, TypeError):
+                pass
+    encode = getattr(model, "encode_observations", None)
+    if not callable(encode):
+        raise ValueError("S5 default collection requires PFGRLiteModel.encode_observations")
+    observations = sample.observations.unsqueeze(0).to(device=resolution.effective)
     mask = sample.brain_mask.to(device=observations.device)
     with torch.no_grad():
         context = encode(observations, mask, sample.geometry)
