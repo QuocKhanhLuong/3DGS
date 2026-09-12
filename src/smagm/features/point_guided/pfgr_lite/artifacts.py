@@ -103,6 +103,7 @@ _EXACT_JSON_CATEGORIES: dict[str, str] = {
     "service_receipt.json": "receipt",
     "bank_verify.json": "bank_index_metadata",
     "value_fit.json": "metrics_summary",
+    "value_fit_incomplete.json": "metrics_summary",
     "value_evaluate.json": "metrics_summary",
     "value_evaluate_pairs.json": "value_evaluation_pairs",
     "calibration_evidence.json": "calibration_manifest_metadata",
@@ -111,6 +112,7 @@ _EXACT_JSON_CATEGORIES: dict[str, str] = {
     "fit_winners.json": "paired_action_rows",
     "allowance_winners.json": "paired_action_rows",
     "review_context.json": "provenance",
+    "execution_authorization.json": "execution_authorization",
     "stage_state.json": "receipt",
     "stage_receipt.json": "receipt",
     "stage_runtime.json": "stage_runtime_metadata",
@@ -121,6 +123,10 @@ _EXACT_JSON_CATEGORIES: dict[str, str] = {
     "next1_evidence.json": "headroom_evidence",
     "pipeline_manifest.json": "pipeline_metadata",
     "pipeline_summary.json": "pipeline_metadata",
+    "value_join.json": "full_pipeline_join",
+    "control_join.json": "full_pipeline_join",
+    "resume_comparison.json": "full_pipeline_join",
+    "adaptive_availability.json": "full_pipeline_join",
     "changes.json": "config_changes",
     "provenance.json": "provenance",
     "metrics.json": "metrics_summary",
@@ -621,6 +627,12 @@ _PIPELINE_FILE_SCHEMAS = {
 }
 _PIPELINE_KNOWN_SCHEMAS = set(_PIPELINE_FILE_SCHEMAS.values()) | {
     "pfgr-lite-pipeline-event-v1", "pfgr-lite-pipeline-command-v1", "pfgr-lite-pipeline-exit-v1",
+}
+_FULL_JOIN_SCHEMAS = {
+    "value_join.json": "pfgr-lite-full-value-join-v1",
+    "control_join.json": "pfgr-lite-full-control-join-v1",
+    "resume_comparison.json": "pfgr-lite-full-resume-comparison-v1",
+    "adaptive_availability.json": "pfgr-lite-full-adaptive-availability-v1",
 }
 _HEADROOM_NUMERIC_VECTOR_LIMITS = {
     "oracle": 16384, "random": 16384, "z0": 16384,
@@ -1180,6 +1192,38 @@ def _validate_json_value(
             )
     elif isinstance(value, (list, tuple)):
         list_key = parent_key or ""
+        if category in {"receipt", "metrics_summary"} and list_key == "resume_keys":
+            if len(value) > 128 or not all(isinstance(item, str) for item in value):
+                raise UnsafeEvidenceError(f"invalid bounded resume field names in {source}: {key_path}")
+            for index, child in enumerate(value):
+                _validate_json_value(child, source=source, key_path=f"{key_path}[{index}]", category=category)
+            return
+        if category == "pipeline_metadata" and list_key == "errors":
+            if len(value) > 512 or not all(
+                isinstance(item, Mapping) and set(item) == {"stage", "status", "error"}
+                and all(isinstance(entry, str) or entry is None for entry in item.values())
+                for item in value
+            ):
+                raise UnsafeEvidenceError(f"invalid full pipeline error rows in {source}: {key_path}")
+            for index, child in enumerate(value):
+                _validate_json_value(child, source=source, key_path=f"{key_path}[{index}]", category=category)
+            return
+        if category == "full_pipeline_join" and list_key in {"committed_updates", "cursor_fields_compared", "difference_paths", "unavailable"}:
+            if list_key == "committed_updates":
+                valid = len(value) == 3 and all(type(item) is int and item >= 0 for item in value)
+            elif list_key == "cursor_fields_compared":
+                valid = len(value) == 3 and all(
+                    isinstance(row, (list, tuple)) and len(row) <= 64 and all(isinstance(item, str) for item in row)
+                    for row in value
+                )
+            else:
+                valid = len(value) <= 16384 and all(isinstance(item, str) for item in value)
+            if not valid:
+                raise UnsafeEvidenceError(f"invalid bounded full pipeline comparison vector in {source}: {key_path}")
+            for index, child in enumerate(value):
+                for item in child if list_key == "cursor_fields_compared" else [child]:
+                    _validate_json_value(item, source=source, key_path=f"{key_path}[{index}]", category=category)
+            return
         if category == "stage_runtime_metadata" and list_key in {"sample_order", "rng_streams"}:
             limit = 16384 if list_key == "sample_order" else 64
             if len(value) > limit or not all(isinstance(item, str) for item in value):
@@ -1447,6 +1491,8 @@ def _load_json(path: Path, *, category: str) -> object:
         "headroom_evidence",
         "pipeline_metadata",
         "stage_runtime_metadata",
+        "execution_authorization",
+        "full_pipeline_join",
     } and not isinstance(value, Mapping):
         raise EvidenceValidationError(
             f"allow-listed metadata evidence must be a JSON object: {path}"
@@ -1457,6 +1503,15 @@ def _load_json(path: Path, *, category: str) -> object:
         raise EvidenceValidationError(f"unexpected pipeline metadata schema: {path}")
     if category == "stage_runtime_metadata" and value.get("schema_version") != "pfgr-lite-stage-runtime-v1":
         raise EvidenceValidationError(f"unexpected stage runtime metadata schema: {path}")
+    if category == "execution_authorization" and (
+        value.get("schema_version") != "pfgr-lite-execution-authorization-v1"
+        or value.get("decision") != "EXPLORATORY_EXECUTION"
+        or value.get("authorizes_main") is not False
+        or value.get("human_reviewed") is not False
+    ):
+        raise EvidenceValidationError(f"invalid exploratory execution authorization: {path}")
+    if category == "full_pipeline_join" and value.get("schema_version") != _FULL_JOIN_SCHEMAS.get(path.name.lower()):
+        raise EvidenceValidationError(f"invalid full pipeline join schema: {path}")
     if category in {
         "metrics_summary",
         "metrics_history",

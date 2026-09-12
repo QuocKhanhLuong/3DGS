@@ -1,5 +1,10 @@
 # Chạy PFGR R0–R4B và gửi lại một ZIP bằng chứng
 
+**Muốn chạy đến R cuối (R10):** dùng
+[hướng dẫn full pipeline](RUN_PFGR_FULL_PIPELINE.md) và
+`scripts/run_pfgr_full_pipeline.py`. Script trong trang này chỉ giữ mục đích
+chạy riêng R0–R4B để tương thích các lệnh trước.
+
 Entrypoint: `scripts/run_pfgr_r4_evidence.py`. Script dùng Python standard
 library để điều phối CLI hiện có, ghi log và gom metric. Môi trường server
 phải có sẵn dependencies của repository, BraTS21 thật, checkpoint MedicalNet

@@ -58,7 +58,10 @@ def test_experiment_options_are_strict_and_versioned() -> None:
     assert ExperimentOptions.from_dict({"local_footprint_audit": True}).local_footprint_audit is True
 
 
-def test_evaluation_routes_before_deferred_target_and_writes_paired_artifacts(tmp_path) -> None:
+def test_evaluation_routes_before_deferred_target_and_writes_paired_artifacts(tmp_path, monkeypatch) -> None:
+    from smagm.features.point_guided.pfgr_lite import experiments
+
+    monkeypatch.setattr(experiments, "scientific_decision", lambda *_a, **_k: {"decision": "PASS"})
     order: list[str] = []
     sample = _sample()
     initial = torch.ones((1, 1, 3, 3, 3), dtype=torch.float32)
@@ -82,6 +85,10 @@ def test_evaluation_routes_before_deferred_target_and_writes_paired_artifacts(tm
     )
     assert order == ["route", "target"]
     assert result["software_status"] == "SOFTWARE_PASS"
+    recorded = json.loads((tmp_path / "evaluation" / "metrics.json").read_text())
+    assert recorded["scientific_status"] == "INCONCLUSIVE"
+    assert recorded["scientific_decision"]["decision"] == "PASS"
+    assert "statistical_rule_only" in recorded["scientific_decision_scope"]
     assert (tmp_path / "evaluation" / "metrics.json").exists()
     assert (tmp_path / "evaluation" / "paired_subjects.jsonl").read_text().count("\n") == 1
     assert (tmp_path / "evaluation" / "action_metrics.jsonl").read_text() == ""

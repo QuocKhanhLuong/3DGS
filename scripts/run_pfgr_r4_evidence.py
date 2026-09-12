@@ -415,8 +415,17 @@ def build_plan(args: argparse.Namespace, destination: Path) -> list[Stage]:
     return plan
 
 
-def validate_live_flags(plan: list[Stage]) -> None:
-    """Inspect literal current argparse contracts without importing torch or running CLI."""
+def validate_live_flags(
+    plan: list[Stage],
+    *,
+    allowed: set[str] | None = None,
+    static_only: bool = True,
+) -> None:
+    """Validate argv against live source; callers explicitly opt into broader DAGs.
+
+    Defaults preserve the R4 compatibility runner's command/static-only boundary.
+    """
+    allowed = ALLOWED if allowed is None else allowed
     tree = ast.parse((REPO / "src/smagm/cli/pfgr_lite.py").read_text())
     common: set[str] = set()
     commands: dict[str, set[str]] = {}
@@ -461,7 +470,7 @@ def validate_live_flags(plan: list[Stage]) -> None:
             elif isinstance(call.func, ast.Name) and call.func.id == "_add_common":
                 commands[variables[call.args[0].id]].update(common)
     for stage in plan:
-        if stage.command not in ALLOWED or stage.command not in commands:
+        if stage.command not in allowed or stage.command not in commands:
             raise ValueError(f"unsupported current CLI command: {stage.command}")
         unknown = {arg for arg in stage.argv[5:] if arg.startswith("--")} - commands[
             stage.command
@@ -470,9 +479,13 @@ def validate_live_flags(plan: list[Stage]) -> None:
             raise ValueError(
                 f"current CLI contract mismatch for {stage.name}: {sorted(unknown)}"
             )
-        if stage.command == "evaluate" and (
-            stage.argv[stage.argv.index("--scenario") + 1] != "noop"
-            or stage.argv[stage.argv.index("--budget") + 1] != "0"
+        if (
+            static_only
+            and stage.command == "evaluate"
+            and (
+                stage.argv[stage.argv.index("--scenario") + 1] != "noop"
+                or stage.argv[stage.argv.index("--budget") + 1] != "0"
+            )
         ):
             raise ValueError(
                 "runner evaluation is restricted to final static noop budget 0"
@@ -927,6 +940,144 @@ def package_stage(
     )
 
 
+def launch_stage(
+    stage: Stage,
+    *,
+    args: argparse.Namespace,
+    destination: Path,
+    logs: Path,
+    emit: Callable[..., None],
+    manifest: dict[str, Any],
+    dependencies: dict[str, str | None],
+    input_hashes: dict[str, str | None],
+    executor: Callable[..., int] = execute,
+    runner_path: Path | None = None,
+) -> dict[str, Any]:
+    """Execute one reserved stage with immutable dependency hashes and raw logs.
+
+    Reusable by the full runner; scheduling and scientific status belong to callers.
+    """
+    runner_path = runner_path or Path(__file__)
+    started = time.perf_counter()
+    # Packaging logs are outside its source directory, so source metadata
+    # remains frozen while the CLI hashes and archives it.
+    stage_logs = (
+        destination / "package_logs"
+        if stage.command == "package"
+        else logs / stage.name
+    )
+    stage_logs.mkdir()
+    stage_emit = (
+        Events(stage_logs / "pipeline_events.jsonl")
+        if stage.command == "package"
+        else emit
+    )
+    record: dict[str, Any] = {
+        "stage": stage.name,
+        "command": stage.command,
+        "arm": stage.arm,
+        "argv": stage.argv,
+        "status": "running",
+        "started_at": utc_now(),
+        "run_dir": stage.run_dir,
+        "exit_code": None,
+        "duration_seconds": None,
+        "stdout": str(stage_logs / "stdout.txt"),
+        "stderr": str(stage_logs / "stderr.txt"),
+        "artifacts": [],
+    }
+    json_write(
+        stage_logs / "command.json",
+        {
+            "schema_version": PREFIX + "command-v1",
+            "argv": stage.argv,
+            "cwd": str(REPO),
+            "runner_sha256": manifest["runner_sha256"],
+            "cli_sha256": manifest["cli_sha256"],
+            "input_sha256": {p: dependencies.get(p) for p in stage.requires},
+        },
+    )
+    stage_emit("stage_start", stage=stage.name, argv=stage.argv)
+    print(f"[{utc_now()}] {stage.name} started", flush=True)
+    try:
+        if Path(stage.run_dir).exists() or Path(stage.run_dir).is_symlink():
+            raise FileExistsError(f"refusing to overwrite stage: {stage.run_dir}")
+        for path in stage.requires:
+            actual = sha256(Path(path))
+            if path not in dependencies or actual != dependencies[path]:
+                raise ValueError(
+                    f"dependency missing from verified predecessor or changed: {path}"
+                )
+        for path, digest in input_hashes.items():
+            if sha256(Path(path)) != digest:
+                raise ValueError(f"input bytes changed since planning: {path}")
+        if sha256(runner_path) != manifest["runner_sha256"]:
+            raise ValueError("runner source changed during pipeline")
+        if sha256(REPO / "src/smagm/cli/pfgr_lite.py") != manifest["cli_sha256"]:
+            raise ValueError("CLI source changed during pipeline")
+        record["exit_code"] = executor(
+            stage, stage_logs, stage_emit, args.stage_timeout_seconds
+        )
+        record["process_exit_code"] = record["exit_code"]
+        if record["exit_code"] != 0:
+            raise RuntimeError(f"{stage.name} exited with code {record['exit_code']}")
+        if stage.command in {"smoke", "static-train", "updater-train"}:
+            effective = json_read(Path(stage.run_dir) / "resolved_config.json")
+            if effective.get("stage_options", {}).get("seed") != args.seed:
+                raise ValueError(
+                    "published StageOptions seed differs from requested training seed"
+                )
+        for item in stage.produces:
+            digest = sha256(Path(item))
+            dependencies[item] = digest
+            record["artifacts"].append(
+                {
+                    "path": item,
+                    "sha256": digest,
+                    "size_bytes": Path(item).stat().st_size,
+                }
+            )
+        required = set(stage.produces)
+        for path in sorted(Path(stage.run_dir).rglob("*")):
+            if path.is_file() and not path.is_symlink() and str(path) not in required:
+                record["artifacts"].append(
+                    {
+                        "path": str(path),
+                        "sha256": sha256(path),
+                        "size_bytes": path.stat().st_size,
+                    }
+                )
+        record["status"] = "succeeded"
+    except BaseException as error:  # noqa: BLE001 - boundary records failures/interrupts before packaging
+        record["status"] = "failed"
+        record["error"] = f"{type(error).__name__}: {error}"
+        record["traceback"] = traceback.format_exc()
+        (stage_logs / "traceback.txt").write_text(record["traceback"], encoding="utf-8")
+        if record["exit_code"] in (None, 0):
+            record["exit_code"] = (
+                130
+                if isinstance(error, KeyboardInterrupt)
+                else 124
+                if isinstance(error, subprocess.TimeoutExpired)
+                else 1
+            )
+    finally:
+        record["duration_seconds"] = time.perf_counter() - started
+        record["finished_at"] = utc_now()
+        record["runner_sha256_at_exit"] = sha256(runner_path)
+        record["cli_sha256_at_exit"] = sha256(REPO / "src/smagm/cli/pfgr_lite.py")
+        json_write(
+            stage_logs / "exit.json",
+            {"schema_version": PREFIX + "exit-v1", **record},
+        )
+        stage_emit("stage_exit", **record)
+        print(
+            f"[{utc_now()}] {stage.name} {record['status']} ({record['duration_seconds']:.2f}s)",
+            flush=True,
+        )
+    return record
+
+
 def run(
     args: argparse.Namespace, executor: Callable[..., int] = execute
 ) -> tuple[int, Path]:
@@ -995,130 +1146,17 @@ def run(
     cohort: list[str] | None = None
 
     def launch(stage: Stage) -> dict[str, Any]:
-        started = time.perf_counter()
-        # Packaging logs are outside its source directory, so source metadata
-        # remains frozen while the CLI hashes and archives it.
-        stage_logs = (
-            destination / "package_logs"
-            if stage.command == "package"
-            else logs / stage.name
+        return launch_stage(
+            stage,
+            args=args,
+            destination=destination,
+            logs=logs,
+            emit=emit,
+            manifest=manifest,
+            dependencies=dependencies,
+            input_hashes=input_hashes,
+            executor=executor,
         )
-        stage_logs.mkdir()
-        stage_emit = (
-            Events(stage_logs / "pipeline_events.jsonl")
-            if stage.command == "package"
-            else emit
-        )
-        record: dict[str, Any] = {
-            "stage": stage.name,
-            "command": stage.command,
-            "arm": stage.arm,
-            "argv": stage.argv,
-            "status": "running",
-            "started_at": utc_now(),
-            "run_dir": stage.run_dir,
-            "exit_code": None,
-            "duration_seconds": None,
-            "stdout": str(stage_logs / "stdout.txt"),
-            "stderr": str(stage_logs / "stderr.txt"),
-            "artifacts": [],
-        }
-        json_write(
-            stage_logs / "command.json",
-            {
-                "schema_version": PREFIX + "command-v1",
-                "argv": stage.argv,
-                "cwd": str(REPO),
-                "runner_sha256": manifest["runner_sha256"],
-                "cli_sha256": manifest["cli_sha256"],
-                "input_sha256": {p: dependencies.get(p) for p in stage.requires},
-            },
-        )
-        stage_emit("stage_start", stage=stage.name, argv=stage.argv)
-        print(f"[{utc_now()}] {stage.name} started", flush=True)
-        try:
-            if Path(stage.run_dir).exists() or Path(stage.run_dir).is_symlink():
-                raise FileExistsError(f"refusing to overwrite stage: {stage.run_dir}")
-            for path in stage.requires:
-                actual = sha256(Path(path))
-                if path not in dependencies or actual != dependencies[path]:
-                    raise ValueError(
-                        f"dependency missing from verified predecessor or changed: {path}"
-                    )
-            for path, digest in input_hashes.items():
-                if sha256(Path(path)) != digest:
-                    raise ValueError(f"input bytes changed since planning: {path}")
-            if sha256(REPO / "src/smagm/cli/pfgr_lite.py") != manifest["cli_sha256"]:
-                raise ValueError("CLI source changed during pipeline")
-            record["exit_code"] = executor(
-                stage, stage_logs, stage_emit, args.stage_timeout_seconds
-            )
-            record["process_exit_code"] = record["exit_code"]
-            if record["exit_code"] != 0:
-                raise RuntimeError(
-                    f"{stage.name} exited with code {record['exit_code']}"
-                )
-            if stage.command in {"smoke", "static-train", "updater-train"}:
-                effective = json_read(Path(stage.run_dir) / "resolved_config.json")
-                if effective.get("stage_options", {}).get("seed") != args.seed:
-                    raise ValueError(
-                        "published StageOptions seed differs from requested training seed"
-                    )
-            for item in stage.produces:
-                digest = sha256(Path(item))
-                dependencies[item] = digest
-                record["artifacts"].append(
-                    {
-                        "path": item,
-                        "sha256": digest,
-                        "size_bytes": Path(item).stat().st_size,
-                    }
-                )
-            required = set(stage.produces)
-            for path in sorted(Path(stage.run_dir).rglob("*")):
-                if (
-                    path.is_file()
-                    and not path.is_symlink()
-                    and str(path) not in required
-                ):
-                    record["artifacts"].append(
-                        {
-                            "path": str(path),
-                            "sha256": sha256(path),
-                            "size_bytes": path.stat().st_size,
-                        }
-                    )
-            record["status"] = "succeeded"
-        except BaseException as error:  # noqa: BLE001 - boundary records failures/interrupts before packaging
-            record["status"] = "failed"
-            record["error"] = f"{type(error).__name__}: {error}"
-            record["traceback"] = traceback.format_exc()
-            (stage_logs / "traceback.txt").write_text(
-                record["traceback"], encoding="utf-8"
-            )
-            if record["exit_code"] in (None, 0):
-                record["exit_code"] = (
-                    130
-                    if isinstance(error, KeyboardInterrupt)
-                    else 124
-                    if isinstance(error, subprocess.TimeoutExpired)
-                    else 1
-                )
-        finally:
-            record["duration_seconds"] = time.perf_counter() - started
-            record["finished_at"] = utc_now()
-            record["runner_sha256_at_exit"] = sha256(Path(__file__))
-            record["cli_sha256_at_exit"] = sha256(REPO / "src/smagm/cli/pfgr_lite.py")
-            json_write(
-                stage_logs / "exit.json",
-                {"schema_version": PREFIX + "exit-v1", **record},
-            )
-            stage_emit("stage_exit", **record)
-            print(
-                f"[{utc_now()}] {stage.name} {record['status']} ({record['duration_seconds']:.2f}s)",
-                flush=True,
-            )
-        return record
 
     def summarize(package: dict[str, Any] | None = None) -> None:
         summary = {

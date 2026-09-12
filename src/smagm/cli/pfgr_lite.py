@@ -292,13 +292,13 @@ def _dry_review_context(
         )
         return {
             "schema_version": "pfgr-lite-review-context-v1",
-            "status": "REVIEW_REQUIRED",
+            "status": "EXPLORATORY_WORKLOAD_PLANNED" if getattr(args, "exploratory_run", False) else "REVIEW_REQUIRED",
             "scope": scope,
             "context": context,
             "cohort_hash": _review_context_hash(context),
             "config_hash": config_hash,
             "expected_artifacts": expected_artifacts,
-            "decision_required": True,
+            "decision_required": not bool(getattr(args, "exploratory_run", False)),
             "scientific_status": "NOT_EVALUATED",
         }, []
     except (OSError, TypeError, ValueError, KeyError, CLIError) as error:
@@ -370,6 +370,47 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _authorize_execution(
+    args: argparse.Namespace, *, run_dir: Path, scope: str,
+    config_hash: str, context: Mapping[str, Any], artifacts: Mapping[str, str],
+) -> dict[str, Any]:
+    """Bind an explicit exploratory workload without inventing a human review.
+
+    The flag authorizes execution only. Existing headroom, calibration,
+    checkpoint/source and target-after-inference contracts remain authoritative.
+    """
+
+    exploratory = bool(getattr(args, "exploratory_run", False))
+    review_path = getattr(args, "review_receipt", None)
+    if exploratory:
+        if not bool(getattr(args, "engineering_only", False)):
+            raise CLIError("--exploratory-run requires explicit --engineering-only")
+        if review_path is not None:
+            raise CLIError("choose explicit exploratory execution or --review-receipt, not both")
+        payload = {
+            "schema_version": "pfgr-lite-execution-authorization-v1",
+            "scope": scope,
+            "decision": "EXPLORATORY_EXECUTION",
+            "request_source": "explicit_cli_exploratory_run_flag",
+            "authorizes_main": False,
+            "human_reviewed": False,
+            "scientific_status": "NOT_EVALUATED",
+            "config_hash": config_hash,
+            "cohort_hash": _review_context_hash(context),
+            "context": dict(context),
+            "artifacts": dict(artifacts),
+        }
+        _write_json(run_dir / "execution_authorization.json", payload)
+        args._execution_authorization = payload
+        return payload
+    if review_path is None:
+        raise CLIError("calibration/held-out evaluation requires --review-receipt or explicit --engineering-only --exploratory-run")
+    return _validate_review_receipt(
+        review_path, synthetic=bool(args.synthetic), config_hash=config_hash,
+        expected_context=context, expected_scope=scope, expected_artifacts=artifacts,
+    )
 
 
 SOURCE_SCOPE_VERSION = "pfgr-lite-executable-source-scope-v2"
@@ -770,6 +811,7 @@ def _add_common(parser: argparse.ArgumentParser, *, config_required: bool = Fals
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--seed", type=int, default=20260907, action=_ExplicitSeed, help="override execution seed for model initialization and stage/service options")
+    parser.add_argument("--exploratory-run", action="store_true", help="explicitly execute a nonfinal calibration/held-out workload; requires --engineering-only and never mints scientific approval")
     parser.add_argument("--query-count", type=int, default=1024)
     parser.add_argument("--candidate-count", type=int, default=32)
     parser.add_argument("--teacher-mode", choices=("exact_footprint", "iid_fixed_q"), default="iid_fixed_q")
@@ -976,6 +1018,11 @@ def _config_document(
 def _config_for_command(args: argparse.Namespace, *, stage: str | None = None) -> tuple[Any, dict[str, Any]]:
     from dataclasses import replace as dataclass_replace
 
+    if getattr(args, "exploratory_run", False) and not getattr(args, "engineering_only", False):
+        raise CLIError("--exploratory-run requires explicit --engineering-only")
+    if getattr(args, "exploratory_run", False) and getattr(args, "review_receipt", None) is not None:
+        raise CLIError("choose explicit exploratory execution or --review-receipt, not both")
+
     from smagm.features.point_guided.pfgr_lite.config import (
         PFGRLiteConfig,
         frontend_config_from_dict,
@@ -995,12 +1042,26 @@ def _config_for_command(args: argparse.Namespace, *, stage: str | None = None) -
     # production defaults.  The explicit CLI capability remains in the
     # StageOptions receipt below and can never authorize MAIN publication.
     hydration_checkpoint = getattr(args, "checkpoint", None)
+    hydration_resume = (
+        getattr(args, "resume_checkpoint", None)
+        if getattr(args, "command", None) == "resume" and hydration_checkpoint is None
+        else None
+    )
+    if hydration_resume is not None:
+        hydration_checkpoint = hydration_resume
     engineering_hydration = bool(getattr(args, "engineering_only", False) and hydration_checkpoint is not None)
     if engineering_hydration:
-        from smagm.features.point_guided.pfgr_lite.checkpoint import load_inference_bundle
+        from smagm.features.point_guided.pfgr_lite.checkpoint import load_inference_bundle, load_resume
 
         try:
-            hydration_bundle = load_inference_bundle(hydration_checkpoint)
+            # A resume envelope carries the same frozen inference identity.
+            # Execution-only engineering capability must not change its PFGR
+            # recipe before the strict cached-fit/runtime equality checks.
+            hydration_bundle = (
+                load_resume(hydration_checkpoint).inference
+                if hydration_resume is not None
+                else load_inference_bundle(hydration_checkpoint)
+            )
             hydration_pfgr = hydration_bundle.config.get("pfgr_config")
             if not isinstance(hydration_pfgr, Mapping):
                 raise TypeError("checkpoint config missing pfgr_config mapping")
@@ -1232,6 +1293,7 @@ def _receipt_base(args: argparse.Namespace, command: str, *, status: str, run_di
         "metrics": {},
         "runtime_model": _runtime_model_receipt(getattr(args, "_runtime_model", None)),
         "seed_resolution": getattr(args, "_seed_resolution", None),
+        "execution_request": getattr(args, "_execution_authorization", None),
     }
 
 
@@ -2596,10 +2658,10 @@ def _value_evaluate_command(args: argparse.Namespace) -> dict[str, Any]:
 def _calibrate_command(args: argparse.Namespace) -> dict[str, Any]:
     run_dir = _reserve_run(args, "calibrate")
     if args.dry_manifest:
-        return _dry_manifest(args, "calibrate", run_dir, planned={"requires_review_receipt": True, "requires_sealed_evidence": True, "checkpoint": str(args.checkpoint), "value_checkpoint": str(args.value_checkpoint)})
-    if args.review_receipt is None:
+        return _dry_manifest(args, "calibrate", run_dir, planned={"requires_review_receipt": not bool(getattr(args, "exploratory_run", False)), "requires_sealed_evidence": True, "checkpoint": str(args.checkpoint), "value_checkpoint": str(args.value_checkpoint)})
+    if args.review_receipt is None and not getattr(args, "exploratory_run", False):
         raise CLIError("calibration requires an explicit --review-receipt; manifests cannot self-approve an adaptive fit")
-    if not args.review_receipt.is_file():
+    if args.review_receipt is not None and not args.review_receipt.is_file():
         raise FileNotFoundError(f"review receipt does not exist: {args.review_receipt}")
     if args.evidence is not None and not args.synthetic:
         raise CLIError("external calibration evidence JSON is diagnostic-only; production calibrate must collect sealed S5 traces")
@@ -2651,13 +2713,12 @@ def _calibrate_command(args: argparse.Namespace) -> dict[str, Any]:
         value_identity_hash=value_artifact.value_fit_identity.digest,
         split_role="calibration",
     )
-    review_receipt = _validate_review_receipt(
-        args.review_receipt,
-        synthetic=bool(args.synthetic),
+    review_receipt = _authorize_execution(
+        args, run_dir=run_dir,
         config_hash=resolved_config_hash,
-        expected_context=review_context,
-        expected_scope="R7-calibration-cohort",
-        expected_artifacts={
+        context=review_context,
+        scope="R7-calibration-cohort",
+        artifacts={
             "checkpoint_sha256": _sha256(args.checkpoint),
             "value_checkpoint_sha256": _sha256(args.value_checkpoint),
             "role_manifest_digest": getattr(getattr(inputs, "role_manifest", None) or bundle.role_manifest, "digest", None),
@@ -2687,6 +2748,14 @@ def _calibrate_command(args: argparse.Namespace) -> dict[str, Any]:
     collected = run_calibration(inputs, options, run_dir / "calibration")
     calibration = collected["calibration"]
     evidence = collected["calibration_evidence"]
+    publish_adaptive = bool(
+        calibration is not None and calibration.capability == "adaptive"
+        and not getattr(args, "exploratory_run", False)
+    )
+    adaptive_blocked_reason = (
+        "exploratory execution collects diagnostics without publishing an adaptive release"
+        if getattr(args, "exploratory_run", False) else None
+    )
     artifacts: dict[str, str] = dict(collected["artifacts"])
     _write_json(
         run_dir / "calibration.json",
@@ -2696,10 +2765,12 @@ def _calibrate_command(args: argparse.Namespace) -> dict[str, Any]:
             "value_fit_identity_hash": value_artifact.value_fit_identity.digest,
             "insufficient_data": bool(collected.get("metrics", {}).get("insufficient_data", False)),
             "status": "INCONCLUSIVE" if calibration is None else "SOFTWARE_PASS",
+            "adaptive_available": publish_adaptive,
+            "adaptive_blocked_reason": adaptive_blocked_reason,
         },
     )
     artifacts["calibration"] = str(run_dir / "calibration.json")
-    if calibration is not None and calibration.capability == "adaptive":
+    if publish_adaptive:
         if evidence is None:
             raise CLIError("adaptive calibration must carry a sealed CalibrationEvidence envelope")
         if bundle.role_manifest is not None and bundle.role_manifest.digest != evidence.role_manifest.digest:
@@ -2751,8 +2822,12 @@ def _calibrate_command(args: argparse.Namespace) -> dict[str, Any]:
         # value/calibration identities agree with the checkpoint envelope.
         load_inference_bundle(checkpoint_out, required_capability="adaptive")
         artifacts["adaptive_checkpoint"] = str(checkpoint_out)
-    status = "SOFTWARE_PASS" if calibration is not None and calibration.capability == "adaptive" else "INCONCLUSIVE"
+    status = "SOFTWARE_PASS" if publish_adaptive else "INCONCLUSIVE"
     metrics = dict(collected["metrics"])
+    metrics["adaptive_available"] = publish_adaptive
+    metrics["adaptive_blocked_reason"] = adaptive_blocked_reason or metrics.get("adaptive_blocked_reason")
+    metrics["input_loader_kind"] = "synthetic_fixture" if args.synthetic else "brats_adapter"
+    metrics["legacy_evidence_synthetic_flag_scope"] = "nonrelease_engineering_capability; does_not_identify_real_vs_synthetic_input_data"
     # S5's runner owns one aggregate OperationCounters sink across collection,
     # replay and target-after-trace measurement.  Do not overwrite that
     # measured envelope with the fixture/factory metadata sink (which is a
@@ -2762,7 +2837,8 @@ def _calibrate_command(args: argparse.Namespace) -> dict[str, Any]:
     input_counts.pop("operation_counter_schema_version", None)
     metrics.update(input_counts)
     counts = metrics | input_counts
-    metrics["review_receipt"] = {"schema_version": review_receipt["schema_version"], "scope": review_receipt["scope"], "decision": review_receipt["decision"], "cohort_hash": review_receipt["cohort_hash"]}
+    request_key = "execution_request" if getattr(args, "exploratory_run", False) else "review_receipt"
+    metrics[request_key] = {"schema_version": review_receipt["schema_version"], "scope": review_receipt["scope"], "decision": review_receipt["decision"], "cohort_hash": review_receipt["cohort_hash"]}
     return _publish_receipt(args, "calibrate", run_dir, status=status, scientific_status="NOT_EVALUATED", counts=counts, metrics=metrics, artifacts=artifacts, config_hash=resolved_config_hash)
 
 
@@ -3607,7 +3683,7 @@ def _service_command(args: argparse.Namespace, command: str) -> dict[str, Any]:
                 seed=args.seed,
                 chunk_size=args.decode_chunk_size,
                 candidate_chunk_size=args.candidate_chunk_size,
-                engineering_only=args.synthetic,
+                engineering_only=bool(args.synthetic or getattr(args, "engineering_only", False)),
             ),
             run_dir,
         )
@@ -3656,7 +3732,7 @@ def _service_command(args: argparse.Namespace, command: str) -> dict[str, Any]:
         resolved_config = getattr(getattr(inputs, "execution", None), "config", config)
         config = resolved_config
         if str(args.split_role) == "test":
-            if args.review_receipt is None:
+            if args.review_receipt is None and not getattr(args, "exploratory_run", False):
                 raise CLIError("held-out test evaluation requires an explicit --review-receipt")
             review_config_hash = hashlib.sha256(json.dumps(_jsonable(config.as_dict()), sort_keys=True).encode()).hexdigest()
             review_context = _review_context(
@@ -3673,13 +3749,12 @@ def _service_command(args: argparse.Namespace, command: str) -> dict[str, Any]:
             expected_artifacts = {"checkpoint_sha256": _sha256(args.checkpoint)}
             if args.value_checkpoint is not None:
                 expected_artifacts["value_checkpoint_sha256"] = _sha256(args.value_checkpoint)
-            _validate_review_receipt(
-                args.review_receipt,
-                synthetic=bool(args.synthetic),
+            _authorize_execution(
+                args, run_dir=run_dir,
                 config_hash=review_config_hash,
-                expected_context=review_context,
-                expected_scope="R9-final-evaluation",
-                expected_artifacts=expected_artifacts,
+                context=review_context,
+                scope="R9-final-evaluation",
+                artifacts=expected_artifacts,
             )
         result = run_evaluation(
             inputs,
@@ -3694,7 +3769,7 @@ def _service_command(args: argparse.Namespace, command: str) -> dict[str, Any]:
                 teacher_mode=args.teacher_mode,
                 query_count=args.query_count,
                 local_footprint_audit=bool(args.local_footprint_audit),
-                engineering_only=args.synthetic,
+                engineering_only=bool(args.synthetic or getattr(args, "engineering_only", False)),
             ),
             run_dir,
         )
@@ -3717,7 +3792,7 @@ def _service_command(args: argparse.Namespace, command: str) -> dict[str, Any]:
                 teacher_mode=args.teacher_mode,
                 confirmation_mode=args.confirmation_mode,
                 confirmation_query_count=args.confirmation_query_count,
-                engineering_only=args.synthetic,
+                engineering_only=bool(args.synthetic or getattr(args, "engineering_only", False)),
             ),
             run_dir,
         )

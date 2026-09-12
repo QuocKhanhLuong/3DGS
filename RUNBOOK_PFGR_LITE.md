@@ -1,5 +1,16 @@
 # PFGR-Lite R0--R10: runbook tiếng Việt, có thể chạy và có điểm dừng
 
+**Chạy toàn bộ để lấy log nghiên cứu:** dùng
+[`scripts/run_pfgr_full_pipeline.py`](scripts/run_pfgr_full_pipeline.py) và
+[hướng dẫn một lệnh R0–R10](RUN_PFGR_FULL_PIPELINE.md). Entrypoint này bổ sung
+chuỗi exploratory mà người dùng yêu cầu: R5–R10 chạy với capability nghiên cứu
+tường minh; calibration/held-out ghi execution request thật bằng
+`--engineering-only --exploratory-run`, không tự tạo human review hay
+`HEADROOM_CONFIRMED`. R7 diagnostic không xuất adaptive release; các đối chứng
+R8/R9 và kiểm chứng resume R10 tiếp tục, phần adaptive thiếu được ghi rõ.
+Luồng MAIN có review receipt trong các mục dưới vẫn là đường riêng để nâng
+cấp bằng chứng, không phải điều kiện để chạy chuỗi exploratory đầy đủ này.
+
 Runbook này là lối vào vận hành phần mềm PFGR-Lite. Nó không phải bằng chứng
 BraTS21, GPU/CUDA, checkpoint đã huấn luyện, chất lượng tái tạo hay tuyên bố
 lâm sàng. Tất cả lệnh dưới đây gọi đúng `python -m smagm.cli.pfgr_lite`; các

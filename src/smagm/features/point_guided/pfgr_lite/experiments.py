@@ -1607,7 +1607,8 @@ def _run_evaluation_impl(inputs: Any, options: ExperimentOptions, output_dir: Pa
     payload = {
         "schema_version": METRICS_SCHEMA,
         "software_status": "SOFTWARE_PASS",
-        "scientific_status": scientific["decision"],
+        "scientific_status": "INCONCLUSIVE" if options.engineering_only else scientific["decision"],
+        "scientific_decision_scope": "statistical_rule_only; engineering execution cannot establish scientific acceptance" if options.engineering_only else "predeclared_statistical_rule",
         "scientific_decision": scientific,
         "options": options.as_dict(),
         "source_receipt": source_receipt,
