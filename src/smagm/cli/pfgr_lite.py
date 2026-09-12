@@ -693,6 +693,35 @@ def _environment_receipt(
             resolved = resolution or resolve_device(requested, configured)
             values["device_resolution"] = resolved.as_dict()
             values["device_effective"] = resolved.effective
+            # Hardware identity follows the resolved execution device.  A
+            # requested CUDA device or visible device count is not placement
+            # evidence, and unavailable properties must remain unavailable.
+            hardware: dict[str, Any] = {
+                "effective_device": resolved.effective,
+                "identity_source": "resolved_device_properties; not_tensor_placement_observation",
+                "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+            }
+            if torch.device(resolved.effective).type == "cuda":
+                try:
+                    index = torch.device(resolved.effective).index
+                    if index is None:
+                        index = int(torch.cuda.current_device())
+                    properties = torch.cuda.get_device_properties(index)
+                    hardware.update({
+                        "status": "observed",
+                        "index": index,
+                        "name": str(properties.name),
+                        "total_memory_bytes": int(properties.total_memory),
+                        "compute_capability_major": int(properties.major),
+                        "compute_capability_minor": int(properties.minor),
+                        "uuid": str(properties.uuid) if getattr(properties, "uuid", None) is not None else None,
+                    })
+                except (RuntimeError, AssertionError, ValueError, IndexError, AttributeError) as error:
+                    hardware.update({"status": "unavailable", "error": f"{type(error).__name__}: {error}"})
+            else:
+                hardware["status"] = "not_applicable"
+            values["cuda_hardware"] = hardware
+            values["torch_cuda_version"] = torch.version.cuda
         except Exception as error:
             # Keep the failure receipt writeable while preserving the clear
             # resolver error for the command boundary/traceback.
@@ -700,6 +729,14 @@ def _environment_receipt(
     except Exception as error:  # pragma: no cover - import diagnostics only
         values["torch_error"] = f"{type(error).__name__}: {error}"
     return values
+
+
+class _ExplicitSeed(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        if not 0 <= values < 2**32:
+            raise argparse.ArgumentError(self, "seed must be an integer in [0, 2**32)")
+        namespace.seed = values
+        namespace._seed_override = values
 
 
 def _add_common(parser: argparse.ArgumentParser, *, config_required: bool = False) -> None:
@@ -732,7 +769,7 @@ def _add_common(parser: argparse.ArgumentParser, *, config_required: bool = Fals
     parser.add_argument("--max-subjects", type=int)
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--epochs", type=int)
-    parser.add_argument("--seed", type=int, default=20260907)
+    parser.add_argument("--seed", type=int, default=20260907, action=_ExplicitSeed, help="override execution seed for model initialization and stage/service options")
     parser.add_argument("--query-count", type=int, default=1024)
     parser.add_argument("--candidate-count", type=int, default=32)
     parser.add_argument("--teacher-mode", choices=("exact_footprint", "iid_fixed_q"), default="iid_fixed_q")
@@ -760,6 +797,7 @@ def _parser() -> argparse.ArgumentParser:
     _add_common(headroom)
     headroom.add_argument("--checkpoint", type=Path, help="updater checkpoint whose full bytes/lineage are sealed in the R4B receipt")
     headroom.add_argument("--practical-margin", type=float, default=0.0)
+    headroom.add_argument("--exact-pool-audit", action="store_true", help="add privileged exact scoring of the sealed 32-action pool; does not change NEXT-1 winner or admission")
 
     benchmark = subparsers.add_parser("benchmark", help="benchmark same-work full/sparse teacher parity")
     _add_common(benchmark, config_required=False)
@@ -837,6 +875,8 @@ def _parser() -> argparse.ArgumentParser:
     package.add_argument("--run-dir", type=Path, action="append", required=True)
     package.add_argument("--output-root", type=Path, default=Path("runs/pfgr-lite"))
     package.add_argument("--run-name")
+    package.add_argument("--max-file-size-mib", type=int, default=8)
+    package.add_argument("--max-archive-size-mib", type=int, default=64)
     package.add_argument("--dry-manifest", action="store_true", default=False)
 
     check = subparsers.add_parser("runbook-check", help="validate executable Vietnamese runbook blocks")
@@ -1002,9 +1042,22 @@ def _config_for_command(args: argparse.Namespace, *, stage: str | None = None) -
     # stage/service sidecar to the single resolved effective placement.  Raw
     # requested spelling is retained only in the receipt metadata.
     if isinstance(execution.get("stage_options"), Mapping):
+        requested_seed = getattr(args, "_seed_override", None)
+        effective_seed = (
+            requested_seed if requested_seed is not None
+            else execution["stage_options"].get("seed", args.seed)
+        )
+        if type(effective_seed) is not int or not 0 <= effective_seed < 2**32:
+            raise CLIError("effective seed must be an integer in [0, 2**32)")
+        args.seed = effective_seed
+        args._seed_resolution = {
+            "requested": requested_seed, "effective": effective_seed,
+            "source": "cli" if requested_seed is not None else "execution_config",
+        }
         execution["stage_options"] = {
             **dict(execution["stage_options"]),
             "device": resolution.effective,
+            "seed": effective_seed,
         }
     if stage == "S0" and getattr(args, "base", None) is not None:
         if engineering_hydration:
@@ -1177,6 +1230,50 @@ def _receipt_base(args: argparse.Namespace, command: str, *, status: str, run_di
         "capability": "engineering_only" if (getattr(args, "synthetic", False) or getattr(args, "engineering_only", False)) else "production_pending",
         "counts": {},
         "metrics": {},
+        "runtime_model": _runtime_model_receipt(getattr(args, "_runtime_model", None)),
+        "seed_resolution": getattr(args, "_seed_resolution", None),
+    }
+
+
+def _runtime_model_receipt(model: Any | None) -> dict[str, Any]:
+    """Count the live module; accelerator peaks are process-lifetime values."""
+
+    if model is None:
+        return {"status": "unavailable_no_live_model", "parameter_count": None,
+                "flops": None, "flops_status": "not_profiled"}
+    import torch
+
+    if not isinstance(model, torch.nn.Module):
+        return {"status": "unavailable_no_live_model", "parameter_count": None,
+                "flops": None, "flops_status": "not_profiled"}
+    parameters = tuple(model.parameters())
+    buffers = tuple(model.buffers())
+    devices = sorted({str(value.device) for value in (*parameters, *buffers)})
+    memory: dict[str, Any] = {}
+    for name in devices:
+        if torch.device(name).type != "cuda":
+            continue
+        try:
+            memory[name] = {
+                "status": "observed",
+                "peak_allocated_bytes": int(torch.cuda.max_memory_allocated(name)),
+                "peak_reserved_bytes": int(torch.cuda.max_memory_reserved(name)),
+            }
+        except (RuntimeError, AssertionError, ValueError) as error:
+            memory[name] = {"status": "unavailable", "error": f"{type(error).__name__}: {error}"}
+    return {
+        "status": "observed_live_module",
+        "parameter_count": sum(value.numel() for value in parameters),
+        "requires_grad_parameter_count": sum(value.numel() for value in parameters if value.requires_grad),
+        "parameter_bytes": sum(value.numel() * value.element_size() for value in parameters),
+        "buffer_bytes": sum(value.numel() * value.element_size() for value in buffers),
+        "actual_devices": devices,
+        "count_scope": "deduplicated_registered_module_parameters_at_receipt; requires_grad_is_not_optimizer_membership_or_active_inference_FLOPs",
+        "cuda_memory": memory,
+        "cuda_memory_scope": "process_lifetime_allocator_peaks_on_live_module_devices; includes_loading_training_evaluation_and_export; not_stage_or_inference_only",
+        "cuda_memory_status": "observed_or_unavailable_per_device" if memory else "not_applicable_no_cuda_model",
+        "flops": None,
+        "flops_status": "not_profiled",
     }
 
 
@@ -1456,7 +1553,7 @@ def _synthetic_inputs(args: argparse.Namespace, config: Any, *, stage: str | Non
     decision_path = getattr(args, "headroom_decision", None)
     if decision_path is not None:
         metadata["headroom_decision"] = _load_json(decision_path)
-    options = StageOptions(stage=stage or "S0", device=getattr(args, "device", "cpu"), epochs=max(1, int(getattr(args, "epochs", None) or 1)), max_updates=getattr(args, "max_steps", None), engineering_only=True, query_chunk_size=min(config.decode_chunk_size, 128), candidate_chunk_size=max(1, int(getattr(args, "candidate_chunk_size", 1))))
+    options = StageOptions(stage=stage or "S0", device=getattr(args, "device", "cpu"), seed=seed, epochs=max(1, int(getattr(args, "epochs", None) or 1)), max_updates=getattr(args, "max_steps", None), engineering_only=True, query_chunk_size=min(config.decode_chunk_size, 128), candidate_chunk_size=max(1, int(getattr(args, "candidate_chunk_size", 1))))
     return StageInputs(
         samples=tuple(samples),
         model=model,
@@ -1590,8 +1687,11 @@ def _production_inputs(args: argparse.Namespace, config: Any, *, stage: str | No
 
 def _inputs(args: argparse.Namespace, config: Any, *, stage: str | None = None) -> Any:
     if getattr(args, "synthetic", False):
-        return _synthetic_inputs(args, config, stage=stage)
-    return _production_inputs(args, config, stage=stage)
+        inputs = _synthetic_inputs(args, config, stage=stage)
+    else:
+        inputs = _production_inputs(args, config, stage=stage)
+    args._runtime_model = getattr(inputs, "model", None)
+    return inputs
 
 
 def _nested_module(model: Any, path: str) -> Any | None:
@@ -3172,7 +3272,8 @@ def _headroom_command(args: argparse.Namespace) -> dict[str, Any]:
                 "candidate_count": 32,
                 "query_count": 1024,
                 "confirmation": "independent_exact_footprint_same_winner",
-                "target_reads": "post-proposal-seal only",
+                "target_access_phase": "post-proposal-seal only",
+                "exact_pool_audit": bool(args.exact_pool_audit),
             },
         )
     from smagm.features.point_guided.pfgr_lite.headroom import HeadroomOptions, run_headroom_evaluation
@@ -3247,8 +3348,18 @@ def _headroom_command(args: argparse.Namespace) -> dict[str, Any]:
         practical_margin=float(args.practical_margin),
         split_role="validation",
         engineering_only=bool(args.synthetic or args.engineering_only),
+        exact_pool_audit=bool(args.exact_pool_audit),
     )
+    counters_before = _counter_receipt(inputs)
     result = run_headroom_evaluation(inputs, options, run_dir / "next1")
+    counters_after = _counter_receipt(inputs)
+    target_reads_before = counters_before.get("target_reads")
+    target_reads_after = counters_after.get("target_reads")
+    target_reads = (
+        target_reads_after - target_reads_before
+        if isinstance(target_reads_before, int) and isinstance(target_reads_after, int)
+        and target_reads_after >= target_reads_before else None
+    )
     _write_json(run_dir / "resolved_config.json", details["execution"])
     service_result = dict(result)
     service_result.update({"privileged": True, "target_dependent": True})
@@ -3258,10 +3369,12 @@ def _headroom_command(args: argparse.Namespace) -> dict[str, Any]:
         "headroom-evaluate",
         run_dir,
         metrics=_jsonable(dict(result)),
-        counts={"subjects": int(result.get("subject_count", 0)), "target_reads": "post-proposal-seal"},
+        counts={"subjects": int(result.get("subject_count", 0)), "target_reads": target_reads,
+                "target_access_phase": "post-proposal-seal", "target_join_calls": result.get("target_join_calls")},
         config_hash=hashlib.sha256(json.dumps(_jsonable(config.as_dict()), sort_keys=True).encode()).hexdigest(),
         scientific_status="INCONCLUSIVE",
-        artifacts={"metrics": str(result.get("metrics_path")), "decision": str(result.get("decision_path"))},
+        artifacts={"metrics": str(result.get("metrics_path")), "decision": str(result.get("decision_path")),
+                   "evidence": str(result.get("evidence_path"))},
     )
 
 
@@ -3291,7 +3404,7 @@ def _preflight(args: argparse.Namespace) -> dict[str, Any]:
         _write_json(run_dir / "roles.json", roles.as_dict())
         _write_json(run_dir / "split.json", {"schema_version": "synthetic-split-v1", "split_hash": "synthetic", "engineering_only": True})
         _write_json(run_dir / "source.json", _source_receipt())
-        _write_json(run_dir / "weights.json", {"status": "synthetic_untrained", "source_input_channels": 3, "adapted_input_channels": 3, "input_conv_adapted": False, "official_pretrained_verified": False, "integrity_verified": False, "synthetic_untrained": True})
+        _write_json(run_dir / "weights.json", {"status": "synthetic_untrained", "source_input_channels": 3, "adapted_input_channels": 3, "input_conv_adapted": False, "official_pretrained_verified": False, "integrity_verified": False, "synthetic_untrained": True, "checkpoint_origin_status": "synthetic_fixture"})
     else:
         from smagm.data.brats21_point_guided import load_point_guided_split
 
@@ -3329,6 +3442,11 @@ def _preflight(args: argparse.Namespace) -> dict[str, Any]:
             "source_state_dict_key_count": provenance.source_state_dict_key_count,
             "loaded_backbone_key_count": provenance.loaded_backbone_key_count,
             "synthetic_untrained": not provenance.official_pretrained_verified,
+            "checkpoint_origin_status": (
+                "verified_official" if provenance.official_pretrained_verified
+                else "loaded_checkpoint_origin_unverified"
+            ),
+            "synthetic_untrained_flag_semantics": "legacy fail-closed flag; true does not establish that loaded checkpoint weights are random",
         })
     _write_json(
         run_dir / "environment.json",
@@ -3628,7 +3746,13 @@ def _package_command(args: argparse.Namespace) -> dict[str, Any]:
     from smagm.features.point_guided.pfgr_lite.artifacts import package_evidence
 
     package_dir = run_dir / "evidence"
-    manifest = package_evidence(args.run_dir, package_dir)
+    if args.max_file_size_mib <= 0 or args.max_archive_size_mib <= 0:
+        raise CLIError("package size limits must be positive MiB values")
+    manifest = package_evidence(
+        args.run_dir, package_dir,
+        max_file_size=args.max_file_size_mib * 1024 * 1024,
+        max_archive_size=args.max_archive_size_mib * 1024 * 1024,
+    )
     _write_json(run_dir / "manifest.json", manifest)
     return _publish_receipt(args, "package", run_dir, counts=manifest.get("counts", {}), scientific_status="NOT_EVALUATED", evidence_status=manifest.get("evidence_status"), archive=manifest.get("archive"))
 

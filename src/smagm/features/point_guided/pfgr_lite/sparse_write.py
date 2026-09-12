@@ -257,83 +257,100 @@ def _record_scan(
     counters["scan_seconds"] += float(elapsed)
 
 
-def _scan_plane_response(
+def _scan_plane_responses(
     lattice: PFGRQueryLattice,
-    plane: str,
-    node_ids: Tensor,
-    node_weights: Tensor,
+    node_ids: tuple[Tensor, ...],
+    node_weights: tuple[Tensor, ...],
     *,
     chunk_size: int,
-) -> tuple[Tensor, Tensor, int, int, int]:
-    """Exact fallback response by scanning all output rows in bounded chunks."""
+) -> tuple[list[Tensor], list[Tensor], int, int, int]:
+    """Exact fallback: share each bounded canonical stencil across planes.
 
-    if node_ids.numel() == 0:
-        return (
-            torch.empty((0,), dtype=torch.long),
-            torch.empty((0,), dtype=lattice.query_dtype),
-            0,
-            0,
-            0,
-        )
-    order = torch.argsort(node_ids)
-    sorted_nodes = node_ids[order]
-    sorted_weights = node_weights[order]
+    Every active plane still tests every output row and uses the original
+    four-slot multiplication/reduction order. Only loop scheduling changes:
+    the affine and three stencils are computed once per chunk, rather than
+    once per plane per chunk. No envelope or support threshold is used.
+    """
+
+    active = [index for index, nodes in enumerate(node_ids) if nodes.numel()]
+    outputs: list[list[Tensor]] = [[] for _ in PLANE_NAMES]
+    coefficients_out: list[list[Tensor]] = [[] for _ in PLANE_NAMES]
+    sorted_nodes: dict[int, Tensor] = {}
+    sorted_weights: dict[int, Tensor] = {}
+    for index in active:
+        order = torch.argsort(node_ids[index])
+        sorted_nodes[index] = node_ids[index][order]
+        sorted_weights[index] = node_weights[index][order]
     volume = math.prod(lattice.output_shape_dhw)
-    output_chunks: list[Tensor] = []
-    coefficient_chunks: list[Tensor] = []
     scanned_bytes = 0
     peak_bytes = 0
-    for start in range(0, volume, chunk_size):
+    for start in range(0, volume if active else 0, chunk_size):
         stop = min(start + chunk_size, volume)
         ids = torch.arange(start, stop, dtype=torch.long)
-        # ``_chunk_stencils`` accepts integer DHW rows.  Construct those rows
-        # locally so fallback behavior remains compatible with every lattice
-        # snapshot without retaining a full output-volume index.
-        _, height, width = lattice.output_shape_dhw
-        area = height * width
-        d = torch.div(ids, area, rounding_mode="floor")
-        rem = ids - d * area
-        h = torch.div(rem, width, rounding_mode="floor")
-        w = rem - h * width
-        stencils = lattice._chunk_stencils(torch.stack((d, h, w), dim=-1))  # type: ignore[attr-defined]
-        stencil = stencils[plane]
-        node_count = sorted_nodes.numel()
-        positions = torch.searchsorted(sorted_nodes, stencil.neighbour_indices)
-        safe = positions.clamp(max=node_count - 1)
-        valid = (
-            stencil.valid
-            & (positions < node_count)
-            & (sorted_nodes[safe] == stencil.neighbour_indices)
+        # This remains the canonical full-affine, fixed-addition-order path;
+        # chunk length and plane iteration cannot perturb floor near a node.
+        stencils = lattice._chunk_stencils(  # type: ignore[attr-defined]
+            _linear_to_dhw(ids, lattice.output_shape_dhw)
         )
-        scalar = torch.zeros((stop - start, 4), dtype=lattice.query_dtype)
-        if bool(valid.any()):
-            scalar[valid] = sorted_weights[safe[valid]]
-        scalar = scalar * stencil.weights.to(dtype=lattice.query_dtype) * stencil.valid
-        coefficients = scalar.sum(dim=-1)
-        positive = coefficients > 0.0
-        if bool(positive.any()):
-            output_chunks.append(ids[positive])
-            coefficient_chunks.append(coefficients[positive])
-        chunk_bytes = sum(
-            item.numel() * item.element_size()
-            for item in (
-                ids,
-                stencil.neighbour_indices,
-                stencil.weights,
-                stencil.valid,
-                coefficients,
+        for index in active:
+            stencil = stencils[PLANE_NAMES[index]]
+            nodes, weights = sorted_nodes[index], sorted_weights[index]
+            node_count = nodes.numel()
+            positions = torch.searchsorted(nodes, stencil.neighbour_indices)
+            safe = positions.clamp(max=node_count - 1)
+            valid = (
+                stencil.valid
+                & (positions < node_count)
+                & (nodes[safe] == stencil.neighbour_indices)
             )
+            scalar = torch.zeros((stop - start, 4), dtype=lattice.query_dtype)
+            if bool(valid.any()):
+                scalar[valid] = weights[safe[valid]]
+            scalar = (
+                scalar * stencil.weights.to(dtype=lattice.query_dtype) * stencil.valid
+            )
+            coefficients = scalar.sum(dim=-1)
+            positive = coefficients > 0.0
+            if bool(positive.any()):
+                outputs[index].append(ids[positive])
+                coefficients_out[index].append(coefficients[positive])
+            # Keep the established scanned-byte/plane-row accounting scope:
+            # logical response payload visited, not allocator/process peak.
+            chunk_bytes = sum(
+                item.numel() * item.element_size()
+                for item in (
+                    ids,
+                    stencil.neighbour_indices,
+                    stencil.weights,
+                    stencil.valid,
+                    coefficients,
+                )
+            )
+            scanned_bytes += int(chunk_bytes)
+            peak_bytes = max(peak_bytes, int(chunk_bytes))
+        # Do not retain a previous chunk's stencils while constructing the next.
+        del stencils, stencil
+    plane_voxels: list[Tensor] = []
+    plane_coefficients: list[Tensor] = []
+    for rows, values in zip(outputs, coefficients_out):
+        # Chunks visit disjoint increasing linear IDs and each has at most one
+        # coefficient per row. Concatenation already gives unique sorted rows;
+        # the previous global unique/index_add was therefore an identity.
+        plane_voxels.append(
+            torch.cat(rows) if rows else torch.empty((0,), dtype=torch.long)
         )
-        scanned_bytes += int(chunk_bytes)
-        peak_bytes = max(peak_bytes, int(chunk_bytes))
-    if not output_chunks:
-        output = torch.empty((0,), dtype=torch.long)
-        coefficient = torch.empty((0,), dtype=lattice.query_dtype)
-    else:
-        output, coefficient = _accumulate_edges(
-            torch.cat(output_chunks), torch.cat(coefficient_chunks)
+        plane_coefficients.append(
+            torch.cat(values)
+            if values
+            else torch.empty((0,), dtype=lattice.query_dtype)
         )
-    return output, coefficient, volume, scanned_bytes, peak_bytes
+    return (
+        plane_voxels,
+        plane_coefficients,
+        len(active) * volume,
+        scanned_bytes,
+        peak_bytes,
+    )
 
 
 def _linear_to_dhw(linear: Tensor, shape_dhw: Sequence[int]) -> Tensor:
@@ -419,6 +436,7 @@ def _footprint_accounting_digest(footprint: SparseFootprint) -> str:
         return "missing"
     payload = (
         str(getattr(footprint, "_pfgr_build_elapsed_seconds", None)),
+        str(getattr(footprint, "_pfgr_validation_elapsed_seconds", None)),
         str(getattr(footprint, "_pfgr_scanned_bytes", None)),
         str(getattr(footprint, "_pfgr_scan_peak_bytes", None)),
         _tensor_digest(union),
@@ -489,6 +507,8 @@ def build_footprint(
     _positive_int("chunk_size", chunk_size)
     _validate_action(lattice, action)
     started = time.perf_counter()
+    lattice.validate_integrity()
+    validation_elapsed = time.perf_counter() - started
     node_ids, node_weights = _positive_writer_nodes(lattice, action)
     plane_voxels: list[Tensor] = []
     plane_coefficients: list[Tensor] = []
@@ -504,19 +524,15 @@ def build_footprint(
             plane_coefficients.append(coefficients)
     else:
         scan_started = time.perf_counter()
-        for plane, nodes, weights in zip(PLANE_NAMES, node_ids, node_weights):
-            voxels, coefficients, visited, bytes_used, peak = _scan_plane_response(
-                lattice,
-                plane,
-                nodes,
-                weights,
-                chunk_size=chunk_size,
-            )
-            plane_voxels.append(voxels)
-            plane_coefficients.append(coefficients)
-            scanned_voxels += visited
-            scanned_bytes += bytes_used
-            scan_peak = max(scan_peak, peak)
+        (
+            plane_voxels,
+            plane_coefficients,
+            scanned_voxels,
+            scanned_bytes,
+            scan_peak,
+        ) = _scan_plane_responses(
+            lattice, node_ids, node_weights, chunk_size=chunk_size
+        )
         _record_scan(
             lattice,
             scanned_voxels=scanned_voxels,
@@ -577,6 +593,7 @@ def build_footprint(
     object.__setattr__(
         footprint, "_pfgr_build_elapsed_seconds", time.perf_counter() - started
     )
+    object.__setattr__(footprint, "_pfgr_validation_elapsed_seconds", validation_elapsed)
     object.__setattr__(footprint, "_pfgr_scanned_bytes", int(scanned_bytes))
     object.__setattr__(footprint, "_pfgr_scan_peak_bytes", int(scan_peak))
     object.__setattr__(footprint, "_pfgr_union_linear", union_linear.clone())

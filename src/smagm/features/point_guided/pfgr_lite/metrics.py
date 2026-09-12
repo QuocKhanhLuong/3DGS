@@ -131,6 +131,25 @@ def _masked_mean(value: Tensor, mask: Tensor) -> float:
     return float(selected.to(dtype=torch.float64).mean().item())
 
 
+def _ssim_box_mean(value: Tensor, window: int) -> Tensor:
+    """Average each valid 3-D box without padding or changing the input dtype.
+
+    Three axis passes have the same box weights as one cubic reduction in
+    real arithmetic, with a different FP64 accumulation order.
+    """
+
+    if window == 1:
+        return value
+    for kernel in ((1, 1, window), (1, window, 1), (window, 1, 1)):
+        value = F.avg_pool3d(value, kernel, stride=1, padding=0)
+    return value
+
+
+# PROVISIONAL numerical guard, calibrated on explicit synthetic DC/variance
+# stress cases. It is a conditioning ratio, not an SSIM error guarantee.
+SSIM_CANCELLATION_RATIO_LIMIT = 1e-4
+
+
 def _global_ssim(
     prediction: Tensor,
     target: Tensor,
@@ -138,6 +157,7 @@ def _global_ssim(
     mask: Tensor,
     data_range: float,
     window: int,
+    diagnostics: dict[str, Any] | None = None,
 ) -> tuple[float | None, str | None, int]:
     """Compute valid-window 3-D SSIM, returning an explicit unavailable reason."""
 
@@ -148,30 +168,7 @@ def _global_ssim(
     # Valid windows avoid implicit padding.  The mask does not alter local
     # statistics (which would change SSIM's definition); it selects windows
     # whose centre voxel is observed and supplies an explicit denominator.
-    pad = 0
     shape = tuple(int(size) for size in prediction.shape)
-    pred5 = prediction.to(dtype=torch.float64).reshape(1, 1, *shape)
-    target5 = target.to(dtype=torch.float64).reshape(1, 1, *shape)
-    kernel = (window, window, window)
-    mu_pred = F.avg_pool3d(pred5, kernel, stride=1, padding=pad)
-    mu_target = F.avg_pool3d(target5, kernel, stride=1, padding=pad)
-    mu_pred_sq = mu_pred.square()
-    mu_target_sq = mu_target.square()
-    mu_cross = mu_pred * mu_target
-    sigma_pred = F.avg_pool3d(pred5.square(), kernel, stride=1, padding=pad) - mu_pred_sq
-    sigma_target = F.avg_pool3d(target5.square(), kernel, stride=1, padding=pad) - mu_target_sq
-    sigma_cross = F.avg_pool3d(pred5 * target5, kernel, stride=1, padding=pad) - mu_cross
-    # Numerical round-off can make a variance tiny negative in FP64; this is
-    # a non-semantic guard and is not an epsilon support/pruning rule.
-    sigma_pred = sigma_pred.clamp_min(0.0)
-    sigma_target = sigma_target.clamp_min(0.0)
-    c1 = (0.01 * data_range) ** 2
-    c2 = (0.03 * data_range) ** 2
-    score = ((2.0 * mu_cross + c1) * (2.0 * sigma_cross + c2)) / (
-        (mu_pred_sq + mu_target_sq + c1) * (sigma_pred + sigma_target + c2)
-    )
-    # Centre mask for valid windows.  A window is valid only if its centre is
-    # observed, preserving the fixed global mask denominator for point metrics.
     centre_offset = window // 2
     centre_mask = mask[
         centre_offset : shape[0] - centre_offset,
@@ -180,7 +177,52 @@ def _global_ssim(
     ]
     if int(centre_mask.sum().item()) == 0:
         return None, "ssim_mask_has_no_valid_window_centres", 0
+    pred5 = prediction.to(dtype=torch.float64).reshape(1, 1, *shape)
+    target5 = target.to(dtype=torch.float64).reshape(1, 1, *shape)
+    c1 = (0.01 * data_range) ** 2
+    c2 = (0.03 * data_range) ** 2
+    mu_pred = _ssim_box_mean(pred5, window)
+    mu_target = _ssim_box_mean(target5, window)
+    mu_pred_sq = mu_pred.square()
+    mu_target_sq = mu_target.square()
+    mu_cross = mu_pred * mu_target
+    second_pred = _ssim_box_mean(pred5.square(), window)
+    second_target = _ssim_box_mean(target5.square(), window)
+    sigma_pred = second_pred - mu_pred_sq
+    sigma_target = second_target - mu_target_sq
+    sigma_cross = _ssim_box_mean(pred5 * target5, window) - mu_cross
+    if window > 1:
+        # Raw moments can catastrophically cancel at large DC offsets and
+        # tiny variance. Estimate accumulation error on the cubic window's
+        # scale, with headroom for moment products/subtractions, and retain
+        # no score if the declared conditioning limit is exceeded. The old
+        # cubic raw moments can be equally unstable, even yielding SSIM > 1.
+        # This conservative guard is not a proven error bound. data_range
+        # sets SSIM constants; it does not constrain the unclipped prediction.
+        eps = torch.finfo(torch.float64).eps
+        roundoff_scale = (second_pred + second_target) * (8.0 * window**3 * eps)
+        contrast_scale = sigma_pred.clamp_min(0.0) + sigma_target.clamp_min(0.0) + c2
+        # Test exactly the scored window population; masking changes neither
+        # local moments nor their neighbours. Never silently discard only bad
+        # windows, which would change the subject metric's denominator.
+        ratios = roundoff_scale[0, 0][centre_mask] / contrast_scale[0, 0][centre_mask]
+        maximum_ratio = float(ratios.max().item())
+        if diagnostics is not None:
+            diagnostics["ssim_max_roundoff_contrast_ratio"] = maximum_ratio if math.isfinite(maximum_ratio) else None
+        if not math.isfinite(maximum_ratio) or maximum_ratio > SSIM_CANCELLATION_RATIO_LIMIT:
+            return None, "ssim_numerical_cancellation", 0
+    # Numerical round-off can make a variance tiny negative in FP64; this is
+    # a non-semantic guard and is not an epsilon support/pruning rule.
+    sigma_pred = sigma_pred.clamp_min(0.0)
+    sigma_target = sigma_target.clamp_min(0.0)
+    score = ((2.0 * mu_cross + c1) * (2.0 * sigma_cross + c2)) / (
+        (mu_pred_sq + mu_target_sq + c1) * (sigma_pred + sigma_target + c2)
+    )
+    # Centre mask for valid windows.  A window is valid only if its centre is
+    # observed, preserving the fixed global mask denominator for point metrics.
     selected = score[0, 0][centre_mask]
+    if not bool(torch.isfinite(selected).all()):
+        return None, "ssim_nonfinite_moments", 0
     return float(selected.mean().item()), None, int(selected.numel())
 
 
@@ -197,7 +239,8 @@ def dense_metrics(
 
     ``data_range`` is required to be a fixed pipeline/configuration value; it
     is never inferred from the target or predictions.  SSIM is marked
-    unavailable when its valid window cannot fit the volume or mask.
+    unavailable when its valid window cannot fit the volume/mask or its
+    raw second moments are numerically ill-conditioned.
     """
 
     data_range = _finite_float("data_range", data_range, positive=True)
@@ -218,12 +261,14 @@ def dense_metrics(
     else:
         psnr = float(10.0 * math.log10(data_range * data_range / mse))
         psnr_reason = None
+    ssim_diagnostics: dict[str, Any] = {"ssim_max_roundoff_contrast_ratio": None}
     ssim, ssim_reason, ssim_count = _global_ssim(
         pred,
         truth,
         mask=valid,
         data_range=data_range,
         window=ssim_window,
+        diagnostics=ssim_diagnostics,
     )
     return {
         "schema_version": METRICS_SCHEMA,
@@ -236,6 +281,11 @@ def dense_metrics(
         "ssim_unavailable_reason": ssim_reason,
         "ssim_valid_window_count": ssim_count,
         "ssim_mask_definition": SSIM_MASK_VERSION,
+        "ssim_reduction": "fp64_separable_axis_box_v1",
+        "ssim_numerical_policy": "raw_moment_cancellation_unavailable_v1",
+        "ssim_cancellation_ratio_limit": SSIM_CANCELLATION_RATIO_LIMIT,
+        "ssim_cancellation_ratio_limit_status": "PROVISIONAL_synthetic_conditioning_calibration_not_error_bound",
+        **ssim_diagnostics,
         "masked_charbonnier": charbonnier,
         "mask_count": int(valid.sum().item()),
         "data_range": data_range,

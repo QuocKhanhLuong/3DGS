@@ -66,6 +66,103 @@ def test_valid_package_has_hashes_and_exclusions(tmp_path: Path) -> None:
     assert any(item["path"] == "unknown.json" for item in manifest["exclusions"])
 
 
+@pytest.mark.parametrize("payload", [
+    {"prediction_available": [0.1]},
+    {"prediction_available": {"pixels": [0.1]}},
+    {"dense_metrics": {"oracle": [[0.1, 0.2]]}},
+    {"candidate_pool": [{"point_ras_mm": [0, 1, 2, 3]}]},
+    {"random_controls": [{"prediction_available": True}] * 4},
+    {"exact_pool_audit": {"exact_best_action_ids": ["id"] * 33}},
+    {"renamed_prediction": [[[0.1]]]},
+])
+def test_next1_metadata_rejects_payloads_and_oversized_vectors(tmp_path: Path, payload: dict) -> None:
+    run = _basic_run(tmp_path)
+    _write_json(run / "next1" / "next1_evidence.json", {
+        "schema_version": "pfgr-lite-headroom-evidence-v1", **payload,
+    })
+    with pytest.raises(UnsafeEvidenceError):
+        package_evidence([run], tmp_path / "unsafe-next1")
+
+
+def test_next1_schema_and_boolean_exception_are_explicit(tmp_path: Path) -> None:
+    run = _basic_run(tmp_path)
+    _write_json(run / "next1_evidence.json", {"schema_version": "unknown"})
+    with pytest.raises(EvidenceValidationError, match="NEXT-1 evidence schema"):
+        package_evidence([run], tmp_path / "unknown-schema")
+    _write_json(run / "next1_evidence.json", {"schema_version": "pfgr-lite-headroom-evidence-v1"})
+    _write_json(run / "metrics.json", {"prediction_available": True})
+    with pytest.raises(UnsafeEvidenceError, match="raw target/image"):
+        package_evidence([run], tmp_path / "generic-boolean")
+
+
+def test_next1_case_insensitive_filename_has_typed_schema_validation(tmp_path: Path) -> None:
+    run = _basic_run(tmp_path)
+    path = run / "Headroom_Metrics.json"
+    _write_json(path, {"schema_version": "pfgr-lite-headroom-result-v2"})
+    manifest = package_evidence([run], tmp_path / "mixed-case")
+    assert any(row["archive_path"].endswith("Headroom_Metrics.json") for row in manifest["included"])
+    _write_json(path, {"schema_version": "wrong"})
+    with pytest.raises(EvidenceValidationError, match="NEXT-1 evidence schema"):
+        package_evidence([run], tmp_path / "bad-mixed-case")
+
+
+def test_pipeline_metadata_and_nested_logs_are_packaged_with_strict_schemas(tmp_path: Path) -> None:
+    run = _basic_run(tmp_path)
+    _write_json(run / "pipeline_manifest.json", {
+        "schema_version": "pfgr-lite-pipeline-manifest-v1",
+        "stages": [{"name": "static", "argv": ["python", "path with spaces", "--epochs", "8"]}],
+    })
+    _write_json(run / "pipeline_summary.json", {
+        "schema_version": "pfgr-lite-pipeline-summary-v1",
+        "rows": [{"metric_scope": "heldout_final_checkpoint", "mae": None}],
+    })
+    (run / "pipeline_events.jsonl").write_text(json.dumps({
+        "schema_version": "pfgr-lite-pipeline-event-v1", "stage": "static", "event": "failed", "exit_code": 2,
+    }) + "\n")
+    (run / "pipeline_metrics.csv").write_text("stage,subject_id,metric_scope,mae\nstatic,synthetic-0,heldout_final_checkpoint,\n")
+    logs = run / "stage_logs" / "static"
+    logs.mkdir(parents=True)
+    (logs / "stderr.txt").write_text("synthetic stage failure\n")
+    manifest = package_evidence([run], tmp_path / "pipeline-package")
+    included = [row["archive_path"] for row in manifest["included"]]
+    for name in ("pipeline_manifest.json", "pipeline_summary.json", "pipeline_events.jsonl", "pipeline_metrics.csv", "stage_logs/static/stderr.txt"):
+        assert any(path.endswith(name) for path in included)
+    (run / "pipeline_events.jsonl").write_text('{"schema_version":"wrong"}\n')
+    with pytest.raises(EvidenceValidationError, match="pipeline event schema"):
+        package_evidence([run], tmp_path / "bad-pipeline-event")
+
+
+def test_stage_history_and_receipt_keep_bounded_k_and_paired_metrics(tmp_path: Path) -> None:
+    run = _basic_run(tmp_path)
+    stage = run / "s1"
+    stage.mkdir()
+    row = {"k": [1], "subject_ids": ["synthetic-0"], "objective": 0.1}
+    (stage / "stage_history.jsonl").write_text(json.dumps({"record": row}) + "\n")
+    _write_json(stage / "stage_receipt.json", {"metrics": {
+        "history": [row], "paired_dense_metrics": [{"before": {"mae": 0.1}, "after": {"mae": 0.09}}],
+        "paired_dense_metrics_unmeasured": [],
+    }})
+    manifest = package_evidence([run], tmp_path / "stage-history-package")
+    assert any(item["archive_path"].endswith("s1/stage_history.jsonl") for item in manifest["included"])
+    row["k"] = [5]
+    (stage / "stage_history.jsonl").write_text(json.dumps({"record": row}) + "\n")
+    with pytest.raises(UnsafeEvidenceError, match="bounded stage K"):
+        package_evidence([run], tmp_path / "bad-stage-k")
+
+
+@pytest.mark.parametrize("row", [
+    {"path": "src/model.py", "sha256": "a" * 64, "size": 1, "pixels": [1]},
+    {"path": "src/model.py", "sha256": "invalid", "size": 1},
+    {"path": "src/model.py", "sha256": "a" * 64, "size": -1},
+    {"path": "src/model.py", "sha256": "a" * 64, "size": True},
+])
+def test_executable_manifest_rejects_payload_or_invalid_digest_size(tmp_path: Path, row: dict) -> None:
+    run = _basic_run(tmp_path)
+    _write_json(run / "source.json", {"executable_manifest": [row]})
+    with pytest.raises(UnsafeEvidenceError, match="invalid executable manifest row"):
+        package_evidence([run], tmp_path / "unsafe-manifest")
+
+
 def test_json_secret_patterns_are_scanned_in_nested_values(tmp_path: Path) -> None:
     run = _basic_run(tmp_path)
     _write_json(
@@ -315,7 +412,24 @@ def test_declared_cli_metadata_handoff_fixtures_are_packaged_without_payloads(
     assert "patient.nii.gz" in excluded_paths
     assert "raw_bank.json" in excluded_paths
     assert "checkpoints/model.pt" in excluded_paths
-    assert all(not path.endswith("stage_runtime.json") for path in included_names)
+
+
+def test_typed_stage_runtime_is_packaged_but_raw_rng_state_is_rejected(tmp_path: Path) -> None:
+    run = _basic_run(tmp_path)
+    runtime = {
+        "schema_version": "pfgr-lite-stage-runtime-v1",
+        "cursor": {"epoch": 1, "update": 2, "sample_order": ["subject-a"], "route_rng_state": "present"},
+        "rng_streams": ["numpy", "python", "torch_cpu"],
+        "optimizer_state_present": True,
+        "parameter_names": ["static_head.weight"],
+    }
+    _write_json(run / "stage_runtime.json", runtime)
+    manifest = package_evidence([run], tmp_path / "with-runtime")
+    assert "stage_runtime.json" in {Path(row["source_path"]).name for row in manifest["included"]}
+    runtime["cursor"]["route_rng_state"] = [1, 2, 3]
+    _write_json(run / "stage_runtime.json", runtime)
+    with pytest.raises(UnsafeEvidenceError, match="unrecognised array"):
+        package_evidence([run], tmp_path / "reject-raw-rng")
 
 
 def test_scalar_counter_exceptions_preserve_raw_payload_guard(tmp_path: Path) -> None:
@@ -417,6 +531,8 @@ def test_oracle_r4_and_benchmark_rows_use_exact_bounded_schemas(tmp_path: Path) 
                 "cache_reset": True,
                 "cache_reset_scope": "lattice_query_cache_only",
                 "footprint_build_elapsed_seconds": 0.0,
+                "footprint_validation_elapsed_seconds": 0.0,
+                "footprint_build_excluding_validation_seconds": 0.0,
                 "elapsed_seconds": 0.0,
                 "allocated_memory_bytes": None,
                 "reserved_memory_bytes": None,

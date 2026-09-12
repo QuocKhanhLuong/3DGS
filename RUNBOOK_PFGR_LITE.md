@@ -465,6 +465,13 @@ Run NEXT-1 only after PFGR_BASE_CHECKPOINT exists; this fixes four development
 subjects, seeds 17/29/41, 32 candidates, Q1024 screening, and independent
 EXACT FOOTPRINT confirmation of the same winner.
 
+After the 2026-09-12 log audit, add `--exact-pool-audit` to a **new**
+`headroom-evaluate` run when checking screening reliability. It exact-scores
+every retained action from the same sealed 32-action pool and initial state;
+the original sampled winner, independent confirmation and admission decision
+remain unchanged. This is privileged diagnostic work and may be expensive.
+It is neither all-N search nor a learned router evaluation.
+
 ```bash
 require_artifact "$PFGR_BASE_CHECKPOINT"
 require_artifact "$PFGR_STATIC_CHECKPOINT"
@@ -485,6 +492,43 @@ The four-subject run uses a zero practical margin as a descriptive early
 screening threshold; it remains **INCONCLUSIVE**. A later human-reviewed
 conditional R5 permit must freeze a positive practical margin and CI rule in
 the review receipt before any MAIN bank entry.
+
+For the first diagnostic rerun, use the command above with
+`--exact-pool-audit` and run-name `R4B-exact-pool-$PFGR_RUN_ID`.
+Read each subject's `exact_pool_audit`: `pool_coverage`, all exact/sample gain
+pairs, tie-aware ranks, `top1_regret`, pairwise order agreement and sign
+confusion counts. An incomplete pool has null certified best gain/regret;
+observed best among finite rows is labelled separately. Even a complete
+pool32 audit cannot rule out useful candidates among the other legal points.
+
+`diagnostic_timing.phases` separates context/lattice, initial/random/winner
+decode, proposal construction, target join, screening, confirmation, exact
+pool audit and dense metrics. These are disjoint host-wall phases with live
+tensor-device synchronization where available; null means unavailable or
+not run. Do not add their sum to the enclosing subject/end-to-end time, and
+do not interpret teacher time as inference latency. `environment.json`
+records the resolved CUDA device name/memory/capability when observable.
+`counts.target_reads` is an observed loader-counter delta or null;
+`target_join_calls` counts callback invocations, not storage reads.
+
+The standard `package` command now includes all three exact NEXT-1
+JSON filenames and their nested CLI receipts. Keep the original ZIP immutable
+and package the new run separately. Metadata validation still rejects raw
+predictions, targets, checkpoints and undeclared arrays.
+
+Dense SSIM records the separable FP64 reduction, numerical policy, observed
+roundoff/contrast ratio and its PROVISIONAL `1e-4` conditioning limit. Scored
+windows that exceed the limit make subject SSIM unavailable with an explicit
+reason; they are not silently omitted from its denominator. MAE, PSNR and
+Charbonnier remain separately reported. R2 rows retain complete footprint
+build time and additionally separate full-integrity validation time; do not
+add the component times to the enclosing build time.
+
+For MedicalNet, `checkpoint_origin_status=loaded_checkpoint_origin_unverified`
+means strict checkpoint loading/integrity evidence exists without verified
+official origin. The legacy `synthetic_untrained=true` flag is fail-closed;
+it does not prove the loaded weights are random. Do not change that flag or
+approve a checkpoint digest based on a filename alone.
 
 R4B retains candidate IDs/positions/delta hashes, dense screening rows,
 within-subject random averages, separate no-op, exact confirmation, M/Q/

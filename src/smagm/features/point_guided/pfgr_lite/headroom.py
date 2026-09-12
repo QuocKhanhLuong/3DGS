@@ -8,19 +8,20 @@ fixtures can record the same schema but can never mint a production permit.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
 import copy
 import hashlib
 import json
 import math
-from pathlib import Path
 import random
 import statistics
 import time
-from typing import Any, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, fields, replace
+from pathlib import Path
+from typing import Any
 
 from torch import Tensor
-
 
 HEADROOM_SCHEMA = "pfgr-lite-headroom-decision-v1"
 HEADROOM_STATUS = "INCONCLUSIVE"
@@ -686,6 +687,7 @@ class HeadroomOptions:
     split_role: str = "validation"
     engineering_only: bool = False
     schema_version: str = "pfgr-lite-headroom-options-v1"
+    exact_pool_audit: bool = False
 
     def __post_init__(self) -> None:
         if self.schema_version != "pfgr-lite-headroom-options-v1":
@@ -702,9 +704,11 @@ class HeadroomOptions:
             raise ValueError("split_role must be nonempty")
         if not isinstance(self.engineering_only, bool):
             raise TypeError("engineering_only must be bool")
+        if not isinstance(self.exact_pool_audit, bool):
+            raise TypeError("exact_pool_audit must be bool")
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "schema_version": self.schema_version,
             "max_subjects": self.max_subjects,
             "random_seeds": list(self.random_seeds),
@@ -714,6 +718,10 @@ class HeadroomOptions:
             "split_role": self.split_role,
             "engineering_only": self.engineering_only,
         }
+        # Preserve the canonical bytes/hash of pre-audit default options.
+        if self.exact_pool_audit:
+            result["exact_pool_audit"] = True
+        return result
 
 
 def _metric_rows(path: Path | str | None) -> list[dict[str, Any]]:
@@ -990,6 +998,10 @@ def _bind_measured_rows(
             raise TypeError(f"{scope} measurement row must be a mapping")
         candidate_id = _action_id(candidate, index)
         declared = record.get("action_id")
+        record["action_identity_source"] = (
+            "teacher_declared" if declared is not None or record.get("action_digest") is not None
+            else "positional_binding"
+        )
         if declared is not None and str(declared) != candidate_id:
             raise ValueError(f"{scope} measurement action identity does not match the frozen candidate pool")
         record["action_id"] = candidate_id
@@ -1094,6 +1106,295 @@ def _write_norms(before_state: object, after_state: object, action: object | Non
     return rows
 
 
+class _DiagnosticTiming:
+    """Disjoint host-wall phases, synchronized on observed live tensor devices."""
+
+    _names = (
+        "context_lattice",
+        "initial_decode",
+        "proposal_construction",
+        "random_decode",
+        "target_join",
+        "screening",
+        "winner_decode",
+        "exact_confirmation",
+        "exact_pool_audit",
+        "dense_metrics",
+    )
+
+    def __init__(self, *values: object) -> None:
+        self.devices: set[str] = set()
+        self.phases = {
+            name: {
+                "seconds": None,
+                "wall_seconds": None,
+                "calls": 0,
+                "status": "not_run",
+                "synchronization": "not_run",
+            }
+            for name in self._names
+        }
+        self.observe(*values)
+
+    def observe(self, *values: object) -> None:
+        from torch import nn
+
+        def visit(value: object, depth: int = 0) -> None:
+            if isinstance(value, Tensor):
+                self.devices.add(str(value.device))
+            elif isinstance(value, nn.Module):
+                for tensor in (*value.parameters(), *value.buffers()):
+                    self.devices.add(str(tensor.device))
+            elif depth < 3:
+                # Only inspect existing observation/state tensor holders, never
+                # call a loader or trust a requested/configured device string.
+                for name in (
+                    "observations",
+                    "initial_planes",
+                    "planes",
+                    "xy",
+                    "xz",
+                    "yz",
+                    "initial_prediction",
+                ):
+                    child = (
+                        value.get(name)
+                        if isinstance(value, Mapping)
+                        else getattr(value, name, None)
+                    )
+                    if child is not None:
+                        visit(child, depth + 1)
+
+        for value in values:
+            visit(value)
+
+    def _synchronize(self) -> str:
+        import torch
+
+        if not self.devices:
+            return "unavailable_no_live_tensor_device"
+        methods: set[str] = set()
+        try:
+            for device_name in sorted(self.devices):
+                device = torch.device(device_name)
+                if device.type == "cpu":
+                    methods.add("cpu_synchronous")
+                elif device.type == "cuda":
+                    torch.cuda.synchronize(device)
+                    methods.add("cuda_synchronize")
+                elif device.type == "mps":
+                    torch.mps.synchronize()
+                    methods.add("mps_synchronize")
+                else:
+                    return "unavailable_unsupported_device"
+        except (RuntimeError, AssertionError, NotImplementedError):
+            return "unavailable_synchronization_failed"
+        return "+".join(sorted(methods))
+
+    @contextmanager
+    def measure(self, name: str, **counts: int):
+        before_devices = set(self.devices)
+        before = self._synchronize()
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            after = self._synchronize()
+            wall = float(time.perf_counter() - started)
+            sync = after if before == after else "unavailable_synchronization_changed"
+            if before_devices != self.devices:
+                sync = "unavailable_device_changed_during_phase"
+            row = self.phases[name]
+            valid = not sync.startswith("unavailable")
+            previously_valid = row["calls"] == 0 or row["seconds"] is not None
+            row["wall_seconds"] = float(row["wall_seconds"] or 0.0) + wall
+            row["seconds"] = (
+                float(row["seconds"] or 0.0) + wall
+                if valid and previously_valid
+                else None
+            )
+            row["calls"] += 1
+            row["status"] = "measured" if row["seconds"] is not None else "unavailable"
+            row["synchronization"] = sync
+            for key, count in counts.items():
+                row[key] = int(row.get(key, 0)) + count
+
+    def teacher_counts(
+        self, name: str, rows: Sequence[Mapping[str, Any]], *, exact: bool
+    ) -> None:
+        key = "footprint_voxels" if exact else "q_draws"
+        counts = [row.get(key) for row in rows]
+        self.phases[name]["query_voxels"] = (
+            sum(counts)
+            if counts and all(type(value) is int and value >= 0 for value in counts)
+            else None
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "methodology": "perf_counter_host_wall_with_device_sync_at_phase_boundaries",
+            "device": ",".join(sorted(self.devices)) or None,
+            "device_source": "live_model_observation_state_prediction_tensors",
+            "phases": self.phases,
+            "counter_scope": "calls_and_requests_count_service_invocations; proposal_rows_count_returned_proposals; teacher_query_voxels_sum_reported_sample_draws_or_exact_footprint_positions_not_before_plus_after_decoder_evaluations",
+            "overlap": "phases_are_disjoint; legacy_subject_total_and_end_to_end_include_phases_do_not_sum_together",
+            "exclusions": "pre_boundary_sync_wait_excluded; post_boundary_sync_included; model_hashes_pool_binding_norms_serialization_and_other_uninstrumented_work_excluded; no_kernel_or_hardware_attribution",
+            "phase_scope": "context_lattice_includes_context_lattice_policy_and_K0_route; decode_phases_include_apply_for_random_and_winner; teacher_phases_include_footprint_sampling_query_decoder_loss_and_validation; dense_metrics_includes_paired_baseline_recomputation",
+            "null_semantics": "seconds_null_when_not_run_or_device_sync_unavailable; wall_seconds_is_unspecialized_host_wall; zero_calls_means_not_run; query_voxels_null_means_not_reported_by_teacher",
+        }
+
+
+def _exact_pool_audit_record(
+    rows: list[dict[str, Any]],
+    screening_rows: Sequence[Mapping[str, Any]],
+    candidate_records: Sequence[Mapping[str, Any]],
+    *,
+    winner_index: int | None,
+    proposal_count: int,
+    legal_count: int,
+    state_digest: str | None,
+) -> dict[str, Any]:
+    """Describe the retained pool only; never choose or apply another action."""
+
+    gains = [_numeric_gain(row) for row in rows]
+    sampled = [_numeric_gain(row) for row in screening_rows]
+    finite = [gain for gain in gains if gain is not None]
+    complete = len(finite) == len(candidate_records) and bool(finite)
+    observed_best = max(finite) if finite else None
+    best_indices = [
+        index
+        for index, gain in enumerate(gains)
+        if gain is not None and gain == observed_best
+    ]
+    paired = [
+        (left, right)
+        for left, right in zip(sampled, gains)
+        if left is not None and right is not None
+    ]
+    pair_counts = {
+        "concordant_pairs": 0,
+        "discordant_pairs": 0,
+        "sampled_tie_only_pairs": 0,
+        "exact_tie_only_pairs": 0,
+        "both_tied_pairs": 0,
+    }
+    for index, (left, right) in enumerate(paired):
+        for other_left, other_right in paired[index + 1 :]:
+            a, b = left - other_left, right - other_right
+            key = (
+                "both_tied_pairs"
+                if a == b == 0
+                else "sampled_tie_only_pairs"
+                if a == 0
+                else "exact_tie_only_pairs"
+                if b == 0
+                else "concordant_pairs"
+                if (a > 0) == (b > 0)
+                else "discordant_pairs"
+            )
+            pair_counts[key] += 1
+    comparable = pair_counts["concordant_pairs"] + pair_counts["discordant_pairs"]
+
+    def sign(value: float) -> str:
+        return "positive" if value > 0 else "negative" if value < 0 else "zero"
+
+    sign_counts = {
+        name: {other: 0 for other in ("negative", "zero", "positive")}
+        for name in ("negative", "zero", "positive")
+    }
+    for left, right in paired:
+        sign_counts[sign(left)][sign(right)] += 1
+    for index, row in enumerate(rows):
+        gain = gains[index]
+        row.update(
+            {
+                "sampled_gain": sampled[index],
+                "exact_gain": gain,
+                "exact_rank_min": 1 + sum(value > gain for value in finite)
+                if complete and gain is not None
+                else None,
+                "exact_rank_max": sum(value >= gain for value in finite)
+                if complete and gain is not None
+                else None,
+            }
+        )
+        # The teacher owns target/state/action identities. Retain its values
+        # without inventing provenance for callback fixtures that omit them.
+        for name in ("action_id", "delta_hash", "action_digest", "point_ras_mm"):
+            expected = candidate_records[index].get(name)
+            if expected is not None and row.get(name) != expected:
+                raise ValueError(
+                    f"exact pool audit {name} differs from the sealed action"
+                )
+        if (
+            row.get("state_digest") is not None
+            and state_digest is not None
+            and row["state_digest"] != state_digest
+        ):
+            raise ValueError(
+                "exact pool audit teacher did not measure the frozen initial state"
+            )
+    selected_gain = gains[winner_index] if winner_index is not None else None
+    return {
+        "enabled": True,
+        "status": "complete" if complete else "incomplete",
+        "teacher_mode": "exact_footprint",
+        "privileged": True,
+        "target_dependent": True,
+        "scope": "sealed_retained32_same_initial_state; diagnostic_only; no_R5_authorization",
+        "pool_coverage": {
+            "proposal_count": proposal_count,
+            "legal_candidate_count": legal_count,
+            "retained_candidate_count": len(candidate_records),
+            "measured_candidate_count": len(rows),
+            "finite_exact_candidate_count": len(finite),
+            "retained_fraction_of_legal": len(candidate_records) / legal_count,
+            "finite_exact_fraction_of_legal": len(finite) / legal_count,
+            "all_legal_candidates_measured": complete
+            and len(candidate_records) == legal_count,
+        },
+        "exact_best_gain": observed_best if complete else None,
+        "exact_best_action_ids": [
+            candidate_records[index]["action_id"] for index in best_indices
+        ]
+        if complete
+        else [],
+        "observed_best_gain": observed_best,
+        "observed_best_action_ids": [
+            candidate_records[index]["action_id"] for index in best_indices
+        ],
+        "sampled_selected_action_id": candidate_records[winner_index]["action_id"]
+        if winner_index is not None
+        else None,
+        "sampled_selected_exact_gain": selected_gain,
+        "top1_regret": observed_best - selected_gain
+        if complete and selected_gain is not None
+        else None,
+        "sampled_selected_is_exact_best": winner_index in best_indices
+        if complete and winner_index is not None
+        else None,
+        "ranking": {
+            **pair_counts,
+            "paired_candidate_count": len(paired),
+            "pairwise_order_agreement": pair_counts["concordant_pairs"] / comparable
+            if comparable
+            else None,
+            "tie_method": "exact_float_equality; rank_min_max_include_all_ties; no_arbitrary_exact_winner",
+            "scope": "finite_paired_rows_only; no_population_or_all_N_claim",
+        },
+        "sign_agreement": {
+            "paired_candidate_count": len(paired),
+            "counts_sampled_then_exact": sign_counts,
+            "fraction": sum(sign_counts[name][name] for name in sign_counts)
+            / len(paired)
+            if paired
+            else None,
+            "zero_definition": "exact_zero_no_posthoc_tolerance",
+        },
+        "rows": rows,
+    }
+
+
 def _run_headroom_evaluation_impl(inputs: Any, options: HeadroomOptions, output_dir: str | Path) -> Mapping[str, Any]:
     """Run one frozen-context, target-late NEXT-1 diagnostic.
 
@@ -1186,16 +1487,18 @@ def _run_headroom_evaluation_impl(inputs: Any, options: HeadroomOptions, output_
         if final is None:
             return None
         target, mask = _target_parts(target_context)
-        return paired_subject_metrics(
-            initial,
-            final,
-            target,
-            mask,
-            subject_id=subject_id,
-            context_id=getattr(target_context, "context_id", None),
-            scenario=scenario,
-            budget=budget,
-        )
+        timing.observe(initial, final, target)
+        with timing.measure("dense_metrics", paired_metric_calls=1, dense_metric_evaluations=2):
+            return paired_subject_metrics(
+                initial,
+                final,
+                target,
+                mask,
+                subject_id=subject_id,
+                context_id=getattr(target_context, "context_id", None),
+                scenario=scenario,
+                budget=budget,
+            )
 
     subject_records: list[dict[str, Any]] = []
     all_candidate_pool: list[dict[str, Any]] = []
@@ -1205,35 +1508,43 @@ def _run_headroom_evaluation_impl(inputs: Any, options: HeadroomOptions, output_
     for subject_index, sample in enumerate(samples[: options.max_subjects]):
         subject_started = time.perf_counter()
         subject_id = str(getattr(sample, "subject_id", f"sample-{subject_index:04d}"))
-        counters = metadata.get("data_counters", metadata.get("counters")) if isinstance(metadata, Mapping) else None
-        context = _context_for_sample(inputs, sample)
-        config = getattr(getattr(inputs, "execution", None), "config", getattr(inputs, "config", None))
-        lattice = _build_lattice(inputs, context, model, config)
-        policy = _load_policy(inputs, context, static_options, config)
-        route, query, writer = _route_for_sample(inputs, sample, context, static_options, config, lattice, policy)
+        timing = _DiagnosticTiming(model, sample)
+        with timing.measure("context_lattice", context_calls=1, lattice_calls=1):
+            context = _context_for_sample(inputs, sample)
+            config = getattr(getattr(inputs, "execution", None), "config", getattr(inputs, "config", None))
+            lattice = _build_lattice(inputs, context, model, config)
+            policy = _load_policy(inputs, context, static_options, config)
+            route, query, writer = _route_for_sample(inputs, sample, context, static_options, config, lattice, policy)
+            timing.observe(context, route)
         initial_state = _initial_state(route)
         if initial_state is None:
             raise ValueError(f"headroom subject {subject_id} has no frozen initial PFGR state")
-        try:
-            initial_prediction = _prediction_for(model, route, context, final=False, options=static_options)
-        except ValueError:
-            if not options.engineering_only or not isinstance(_route_attr(route, "final_prediction"), Tensor):
-                raise
-            initial_prediction = _route_attr(route, "final_prediction")
+        timing.observe(initial_state)
+        with timing.measure("initial_decode", decode_requests=1):
+            try:
+                initial_prediction = _prediction_for(model, route, context, final=False, options=static_options)
+            except ValueError:
+                if not options.engineering_only or not isinstance(_route_attr(route, "final_prediction"), Tensor):
+                    raise
+                initial_prediction = _route_attr(route, "final_prediction")
 
-        proposal = _oracle_proposals(
-            inputs,
-            context,
-            initial_state,
-            route,
-            query,
-            writer,
-            lattice,
-            screening_options,
-            state_index=0,
-            policy=policy,
-        )
+            timing.observe(initial_prediction)
+
+        with timing.measure("proposal_construction", proposal_batches=1):
+            proposal = _oracle_proposals(
+                inputs,
+                context,
+                initial_state,
+                route,
+                query,
+                writer,
+                lattice,
+                screening_options,
+                state_index=0,
+                policy=policy,
+            )
         all_rows = _proposal_rows(proposal)
+        timing.phases["proposal_construction"]["proposal_rows"] = len(all_rows)
         legal_rows: list[tuple[int, object]] = []
         for position, action in enumerate(all_rows):
             legal = getattr(action, "legal", True)
@@ -1265,6 +1576,10 @@ def _run_headroom_evaluation_impl(inputs: Any, options: HeadroomOptions, output_
             }
             candidate_records.append(candidate_record)
             all_candidate_pool.append({"subject_id": subject_id, **candidate_record})
+
+        sealed_state_digest = _state_digest(initial_state)
+        sealed_action_hashes = tuple(_action_delta_hash(action) for action in candidates)
+        sealed_prediction_digest = tensor_digest(initial_prediction.detach(), name="headroom_z0") if options.exact_pool_audit else None
 
         # Target-free state, route and proposal identities are sealed before
         # the deferred target callback.  Random choices are also frozen now.
@@ -1304,36 +1619,43 @@ def _run_headroom_evaluation_impl(inputs: Any, options: HeadroomOptions, output_
             )
 
         random_pending: list[dict[str, Any]] = []
-        for choice in random_choices:
-            index = int(choice["candidate_index"])
-            action = candidates[index]
-            applied = _apply(action, _clone_state(initial_state))
-            prediction = (
-                _decode_applied(
-                    model,
-                    applied,
-                    context,
-                    route,
-                    chunk_size=getattr(config, "decode_chunk_size", 1024),
+        with timing.measure("random_decode", apply_requests=len(random_choices)):
+            for choice in random_choices:
+                index = int(choice["candidate_index"])
+                action = candidates[index]
+                applied = _apply(action, _clone_state(initial_state))
+                if applied is not None:
+                    phase = timing.phases["random_decode"]
+                    phase["decode_requests"] = int(phase.get("decode_requests", 0)) + 1
+                prediction = (
+                    _decode_applied(
+                        model,
+                        applied,
+                        context,
+                        route,
+                        chunk_size=getattr(config, "decode_chunk_size", 1024),
+                    )
+                    if applied is not None
+                    else None
                 )
-                if applied is not None
-                else None
-            )
-            random_pending.append(
-                {
-                    **choice,
-                    "action_id": _action_id(action, index),
-                    "state": applied,
-                    "prediction": prediction,
-                }
-            )
+                random_pending.append(
+                    {
+                        **choice,
+                        "action_id": _action_id(action, index),
+                        "state": applied,
+                        "prediction": prediction,
+                    }
+                )
+                timing.observe(prediction, applied)
 
         # Dense fixed-Q screening over the sealed 32-candidate pool happens
         # only after all target-free proposal/apply/decode work is complete.
-        target_context = _target_join(
-            inputs, sample, context, route, initial_prediction, static_options
-        )
-        target, target_mask = _target_parts(target_context)
+        with timing.measure("target_join", target_join_calls=1):
+            target_context = _target_join(
+                inputs, sample, context, route, initial_prediction, static_options
+            )
+            target, target_mask = _target_parts(target_context)
+            timing.observe(target)
         noop_metric = _prediction_metric(
             initial_prediction,
             initial_prediction,
@@ -1342,23 +1664,25 @@ def _run_headroom_evaluation_impl(inputs: Any, options: HeadroomOptions, output_
             "noop",
             0,
         )
-        screened = _measure_candidates(
-            inputs,
-            route,
-            candidates,
-            target_context,
-            context,
-            lattice,
-            screening_options,
-            seed=screening_options.seed + subject_index,
-            diagnostic_state=initial_state,
-        )
+        with timing.measure("screening", candidate_evaluations=len(candidates)):
+            screened = _measure_candidates(
+                inputs,
+                route,
+                candidates,
+                target_context,
+                context,
+                lattice,
+                screening_options,
+                seed=screening_options.seed + subject_index,
+                diagnostic_state=initial_state,
+            )
         screening_rows = _bind_measured_rows(
             screened,
             candidates,
             scope="screening_iid_fixed_q",
             seed=screening_options.seed + subject_index,
         )
+        timing.teacher_counts("screening", screening_rows, exact=False)
         finite_screened = [
             (gain, index, row)
             for index, row in enumerate(screening_rows)
@@ -1386,22 +1710,25 @@ def _run_headroom_evaluation_impl(inputs: Any, options: HeadroomOptions, output_
             if winner_action is not None
             else "none"
         )
-        winner_state = (
-            _apply(winner_action, _clone_state(initial_state))
-            if winner_action is not None
-            else None
-        )
-        winner_prediction = (
-            _decode_applied(
-                model,
-                winner_state,
-                context,
-                route,
-                chunk_size=getattr(config, "decode_chunk_size", 1024),
+        with timing.measure("winner_decode", apply_requests=int(winner_action is not None)):
+            winner_state = (
+                _apply(winner_action, _clone_state(initial_state))
+                if winner_action is not None
+                else None
             )
-            if winner_state is not None
-            else None
-        )
+            timing.phases["winner_decode"]["decode_requests"] = int(winner_state is not None)
+            winner_prediction = (
+                _decode_applied(
+                    model,
+                    winner_state,
+                    context,
+                    route,
+                    chunk_size=getattr(config, "decode_chunk_size", 1024),
+                )
+                if winner_state is not None
+                else None
+            )
+            timing.observe(winner_prediction, winner_state)
 
         # The exact confirmation is measured against the same sealed winner;
         # it is intentionally run even when the sampled screen gain is
@@ -1410,17 +1737,18 @@ def _run_headroom_evaluation_impl(inputs: Any, options: HeadroomOptions, output_
         confirmation_gain: float | None = None
         confirmation_action_id = "none"
         if winner_action is not None:
-            confirmed = _measure_candidates(
-                inputs,
-                route,
-                [winner_action],
-                target_context,
-                context,
-                lattice,
-                confirmation_options,
-                seed=confirmation_options.seed + subject_index,
-                diagnostic_state=initial_state,
-            )
+            with timing.measure("exact_confirmation", candidate_evaluations=1):
+                confirmed = _measure_candidates(
+                    inputs,
+                    route,
+                    [winner_action],
+                    target_context,
+                    context,
+                    lattice,
+                    confirmation_options,
+                    seed=confirmation_options.seed + subject_index,
+                    diagnostic_state=initial_state,
+                )
             confirmation_rows = _bind_measured_rows(
                 confirmed,
                 [winner_action],
@@ -1431,6 +1759,7 @@ def _run_headroom_evaluation_impl(inputs: Any, options: HeadroomOptions, output_
             if confirmation_rows:
                 confirmation_action_id = str(confirmation_rows[0]["action_id"])
                 confirmation_gain = _numeric_gain(confirmation_rows[0])
+        timing.teacher_counts("exact_confirmation", confirmation_rows, exact=True)
         match = winner_action is not None and confirmation_action_id == winner_action_id
 
         random_records: list[dict[str, Any]] = []
@@ -1487,6 +1816,64 @@ def _run_headroom_evaluation_impl(inputs: Any, options: HeadroomOptions, output_
             if winner_state is not None
             else {"available": False, "reason": "winner_not_applied"}
         )
+        audit: dict[str, Any] = {"enabled": False, "status": "disabled"}
+        if options.exact_pool_audit:
+            # Sibling target-dependent evidence runs only after the original
+            # selected winner, confirmation and dense metrics are complete.
+            # Every candidate is measured from the same Z0, never sequentially.
+            audit_options = replace(confirmation_options, candidate_count=len(candidates))
+            with timing.measure("exact_pool_audit", candidate_evaluations=len(candidates)):
+                measured = _measure_candidates(
+                    inputs, route, candidates, target_context, context, lattice,
+                    audit_options, seed=confirmation_options.seed + subject_index,
+                    diagnostic_state=initial_state,
+                )
+            audit_rows = _bind_measured_rows(
+                measured, candidates, scope="audit_exact_retained_pool",
+                seed=confirmation_options.seed + subject_index,
+            )
+            timing.teacher_counts("exact_pool_audit", audit_rows, exact=True)
+            audit = _exact_pool_audit_record(
+                audit_rows, screening_rows, candidate_records, winner_index=winner_index,
+                proposal_count=len(all_rows), legal_count=len(legal_rows),
+                state_digest=sealed_state_digest,
+            )
+            # Separate exact evaluations can have different floating-point
+            # batching. Retain their actual difference and the existing
+            # confirmation tolerance instead of requiring bitwise identity.
+            audited_gain = audit["sampled_selected_exact_gain"]
+            comparison_delta = (
+                audited_gain - confirmation_gain
+                if audited_gain is not None and confirmation_gain is not None else None
+            )
+            audit["confirmation_audit_gain_delta"] = comparison_delta
+            audit["confirmation_audit_gain_tolerance"] = _CONFIRMATION_GAIN_TOLERANCE
+            audit["confirmation_audit_gain_consistent"] = (
+                abs(comparison_delta) <= _CONFIRMATION_GAIN_TOLERANCE
+                if comparison_delta is not None else None
+            )
+            if audit["confirmation_audit_gain_consistent"] is False:
+                raise ValueError("exact pool audit disagrees with the retained winner confirmation")
+            target_digests = {
+                str(row["target_context_digest"])
+                for row in [*screening_rows, *confirmation_rows, *audit_rows]
+                if row.get("target_context_digest") is not None
+            }
+            if len(target_digests) > 1:
+                raise ValueError("exact pool audit target identity differs from original measurements")
+            if (
+                _state_digest(initial_state) != sealed_state_digest
+                or tuple(_action_delta_hash(action) for action in candidates) != sealed_action_hashes
+                or tensor_digest(initial_prediction.detach(), name="headroom_z0") != sealed_prediction_digest
+            ):
+                raise ValueError("exact pool audit mutated the target-free sealed state, action or prediction")
+            audit["freeze"] = {
+                "before_target": True, "z0_state_digest": sealed_state_digest,
+                "z0_digest": sealed_prediction_digest,
+                "state_digest_available": sealed_state_digest is not None,
+                "sealed_values_unchanged": True,
+                "target_context_digest": next(iter(target_digests), None),
+            }
         subject_records.append(
             {
                 "subject_id": subject_id,
@@ -1507,6 +1894,8 @@ def _run_headroom_evaluation_impl(inputs: Any, options: HeadroomOptions, output_
                 "write_norms": write_norms,
                 "proposal_freeze": {"before_target": True, "proposal_digest": getattr(proposal, "proposal_digest", None)},
                 "timing_seconds": {"subject_total": float(time.perf_counter() - subject_started)},
+                "diagnostic_timing": timing.as_dict(),
+                "exact_pool_audit": audit,
             }
         )
         winner_ids.append(winner_action_id)
@@ -1574,6 +1963,14 @@ def _run_headroom_evaluation_impl(inputs: Any, options: HeadroomOptions, output_
         "candidate_pool_hash": candidate_pool_hash,
         "candidate_pool": all_candidate_pool,
         "subjects": subject_records,
+        "target_join_calls": sum(record["diagnostic_timing"]["phases"]["target_join"]["calls"] for record in subject_records),
+        "exact_pool_audit": {
+            "enabled": options.exact_pool_audit,
+            "status": "disabled" if not options.exact_pool_audit else "complete" if all(record["exact_pool_audit"]["status"] == "complete" for record in subject_records) else "incomplete",
+            "subject_count": len(subject_records) if options.exact_pool_audit else 0,
+            "rows": sum(len(record["exact_pool_audit"].get("rows", ())) for record in subject_records),
+            "scope": "per_subject_sibling_diagnostic_only; original_oracle_and_decision_unchanged",
+        },
         "confirmation_gain_tolerance": _CONFIRMATION_GAIN_TOLERANCE,
         "winner_action_id": canonical_digest(tuple(winner_ids), prefix="pfgr-lite-headroom-winners-v1|"),
         "confirmation_action_id": canonical_digest(tuple(confirmation_ids), prefix="pfgr-lite-headroom-confirmations-v1|"),
@@ -1655,6 +2052,8 @@ def _run_headroom_evaluation_impl(inputs: Any, options: HeadroomOptions, output_
         "subject_ids": list(subject_ids),
         "candidate_pool_hash": candidate_pool_hash,
         "subjects": subject_records,
+        "exact_pool_audit": evidence["exact_pool_audit"],
+        "target_join_calls": evidence["target_join_calls"],
         "dense_metrics": evidence["dense_metrics"],
         "screening": {"candidate_count": options.candidate_count, "query_count": options.query_count, "teacher_mode": "iid_fixed_q", "rows": sum(len(record["screening"]["rows"]) for record in subject_records)},
         "confirmation": {"mode": "exact_footprint", "configured_query_count": options.query_count, "q_draws": 0, "query_count": confirmation_query_total, "actual_query_count": confirmation_query_total, "per_subject_query_count": confirmation_query_counts, "same_winner": match_all, "winner_action_id": evidence["winner_action_id"], "confirmation_action_id": evidence["confirmation_action_id"]},
@@ -1677,6 +2076,7 @@ def _run_headroom_evaluation_impl(inputs: Any, options: HeadroomOptions, output_
         "target_dependent": True,
         "subject_count": len(subject_records),
         "metrics_path": destination / "headroom_metrics.json",
+        "target_join_calls": evidence["target_join_calls"],
         "evidence_path": evidence_path,
         "decision_path": destination / "headroom_decision.json",
         "headroom_decision": decision_payload.as_dict(),

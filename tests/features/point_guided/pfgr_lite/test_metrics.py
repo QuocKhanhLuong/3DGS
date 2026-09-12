@@ -4,7 +4,9 @@ import json
 
 import pytest
 import torch
+from torch.nn import functional as F
 
+from smagm.features.point_guided.pfgr_lite import metrics as metrics_module
 from smagm.features.point_guided.pfgr_lite.metrics import (
     ComparisonOptions,
     action_metric_row,
@@ -16,6 +18,192 @@ from smagm.features.point_guided.pfgr_lite.metrics import (
     scientific_decision,
     telescoping_residual,
 )
+
+
+def _dense_box_ssim_reference(prediction, target, *, mask, data_range, window, diagnostics=None):
+    """Independent reference: the original five dense cubic FP64 reductions."""
+
+    if min(prediction.shape) < window:
+        return None, "ssim_window_larger_than_volume", 0
+    prediction = prediction.to(torch.float64)[None, None]
+    target = target.to(torch.float64)[None, None]
+    mean_prediction = F.avg_pool3d(prediction, window, stride=1, padding=0)
+    mean_target = F.avg_pool3d(target, window, stride=1, padding=0)
+    variance_prediction = (
+        F.avg_pool3d(prediction.square(), window, stride=1, padding=0)
+        - mean_prediction.square()
+    ).clamp_min(0)
+    variance_target = (
+        F.avg_pool3d(target.square(), window, stride=1, padding=0)
+        - mean_target.square()
+    ).clamp_min(0)
+    covariance = (
+        F.avg_pool3d(prediction * target, window, stride=1, padding=0)
+        - mean_prediction * mean_target
+    )
+    c1, c2 = (0.01 * data_range) ** 2, (0.03 * data_range) ** 2
+    scores = (
+        (2 * mean_prediction * mean_target + c1) * (2 * covariance + c2)
+        / (
+            (mean_prediction.square() + mean_target.square() + c1)
+            * (variance_prediction + variance_target + c2)
+        )
+    )[0, 0]
+    offset = window // 2
+    centres = mask[tuple(slice(offset, size - offset) for size in mask.shape)]
+    count = int(centres.sum().item())
+    if count == 0:
+        return None, "ssim_mask_has_no_valid_window_centres", 0
+    return float(scores[centres].mean().item()), None, count
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("layout", ["contiguous", "transposed", "strided"])
+@pytest.mark.parametrize("window,shape", [(1, (1, 3, 5)), (3, (7, 9, 11)), (11, (13, 14, 15))])
+def test_ssim_matches_independent_dense_3d_reference(dtype, layout, window, shape, monkeypatch):
+    generator = torch.Generator().manual_seed(20260912)
+    storage_shape = (*shape[:2], shape[2] * 2) if layout == "strided" else shape
+    prediction = torch.randn(storage_shape, generator=generator, dtype=dtype) * 0.3
+    target = torch.rand(storage_shape, generator=generator, dtype=dtype)
+    mask = torch.rand(storage_shape, generator=generator) > 0.35
+    if layout == "transposed":
+        prediction, target, mask = (value.transpose(1, 2) for value in (prediction, target, mask))
+    elif layout == "strided":
+        prediction, target, mask = (value[..., ::2] for value in (prediction, target, mask))
+    if layout != "contiguous":
+        assert not prediction.is_contiguous()
+    actual = dense_metrics(prediction, target, mask, ssim_window=window)
+    # Swap only SSIM for the independent reference: every other output field
+    # must remain unchanged, including original-dtype error/MAE/PSNR/Charbonnier.
+    with monkeypatch.context() as patch:
+        patch.setattr(metrics_module, "_global_ssim", _dense_box_ssim_reference)
+        reference = dense_metrics(prediction, target, mask, ssim_window=window)
+    assert actual.pop("ssim") == pytest.approx(reference.pop("ssim"), rel=0, abs=5e-11)
+    actual.pop("ssim_max_roundoff_contrast_ratio")
+    reference.pop("ssim_max_roundoff_contrast_ratio")
+    assert actual == reference
+
+
+@pytest.mark.parametrize(
+    "offset,variation,data_range",
+    [
+        (0.0, 0.0, 1.0),
+        (0.1, 0.0, 1.0),
+        (0.7, 0.0, 1.0),
+        (-0.3, 0.1, 1.0),
+        (0.8, 1e-8, 1.0),
+        (1e6, 1e-3, 1.0),
+        (-1e6, 1e-3, 1.0),
+        (1e6, 1e-3, 1e6),
+        (0.0, 1e6, 1.0),
+        (0.0, 1e6, 1e6),
+    ],
+)
+def test_ssim_cancellation_and_dynamic_range_reference(offset, variation, data_range):
+    generator = torch.Generator().manual_seed(42)
+    signal = torch.randn((13, 14, 15), generator=generator, dtype=torch.float64)
+    noise = torch.randn(signal.shape, generator=generator, dtype=torch.float64)
+    prediction = offset + variation * signal
+    target = offset + variation * (0.9 * signal + 0.1 * noise)
+    mask = torch.ones_like(signal, dtype=torch.bool)
+    actual = dense_metrics(prediction, target, mask, data_range=data_range)
+    if abs(offset) == 1e6 and data_range == 1.0:
+        assert actual["ssim"] is None
+        assert actual["ssim_unavailable_reason"] == "ssim_numerical_cancellation"
+        assert actual["ssim_valid_window_count"] == 0
+        return
+    expected, reason, count = _dense_box_ssim_reference(
+        prediction, target, mask=mask, data_range=data_range, window=11
+    )
+    assert actual["ssim"] == pytest.approx(expected, rel=0, abs=5e-11)
+    assert actual["ssim_unavailable_reason"] == reason
+    assert actual["ssim_valid_window_count"] == count == 60
+
+
+@pytest.mark.parametrize("offset,variation,sensitive", [(0.8, 1e-8, False), (1e6, 1e-3, True)])
+def test_ssim_rejects_sensitive_moments_without_unstable_cubic_fallback(offset, variation, sensitive, monkeypatch):
+    generator = torch.Generator().manual_seed(42)
+    prediction = offset + variation * torch.randn((13, 14, 15), generator=generator, dtype=torch.float64)
+    target = offset + variation * torch.randn(prediction.shape, generator=generator, dtype=torch.float64)
+    calls = []
+    original = metrics_module._ssim_box_mean
+
+    def traced_box_mean(value, window):
+        calls.append(window)
+        assert value.dtype == torch.float64
+        return original(value, window)
+
+    monkeypatch.setattr(metrics_module, "_ssim_box_mean", traced_box_mean)
+    result = dense_metrics(prediction, target)
+    assert calls == [11] * 5
+    assert (result["ssim"] is None) is sensitive
+    assert result["ssim_reduction"] == "fp64_separable_axis_box_v1"
+    assert result["ssim_numerical_policy"] == "raw_moment_cancellation_unavailable_v1"
+
+
+def test_extreme_dc_ssim_is_unavailable_in_paired_metrics_without_affecting_point_losses():
+    generator = torch.Generator().manual_seed(52)
+    target = 1e8 + 1e-4 * torch.rand((20, 20, 20), generator=generator, dtype=torch.float64)
+    prediction = target + 1e-4 * torch.rand(target.shape, generator=generator, dtype=torch.float64)
+    result = paired_subject_metrics(prediction, prediction, target)
+    assert result["before"]["ssim"] is None
+    assert result["after"]["ssim"] is None
+    assert result["improvement"]["ssim"] is None
+    assert result["improvement"]["masked_charbonnier"] == 0.0
+    assert result["before"]["ssim_unavailable_reason"] == "ssim_numerical_cancellation"
+
+
+@pytest.mark.parametrize("offset", [1.69, 2.0, 2.5, 10.0])
+def test_benign_out_of_range_constant_ssim_remains_available(offset):
+    value = torch.full((13, 14, 15), offset, dtype=torch.float64)
+    result = dense_metrics(value, value)
+    assert result["ssim"] == pytest.approx(1.0, abs=5e-9)
+    assert result["ssim_max_roundoff_contrast_ratio"] < result["ssim_cancellation_ratio_limit"]
+
+
+def test_ssim_conditioning_guard_uses_only_scored_centres_without_dropping_windows():
+    value = torch.ones((13, 14, 40), dtype=torch.float64)
+    value[:, :, 25:] = 1e8
+    mask = torch.zeros_like(value, dtype=torch.bool)
+    mask[6, 7, 6] = True
+    result = dense_metrics(value, value, mask)
+    assert result["ssim"] == pytest.approx(1.0)
+    assert result["ssim_valid_window_count"] == 1
+    mask[6, 7, 32] = True
+    result = dense_metrics(value, value, mask)
+    assert result["ssim"] is None
+    assert result["ssim_unavailable_reason"] == "ssim_numerical_cancellation"
+
+
+def test_ssim_centre_mask_keeps_unobserved_neighbours_in_3d_statistics():
+    target = torch.zeros((3, 3, 3), dtype=torch.float64)
+    prediction = torch.ones_like(target)
+    prediction[1, 1, 1] = 0
+    mask = torch.zeros_like(target, dtype=torch.bool)
+    mask[1, 1, 1] = True
+    result = dense_metrics(prediction, target, mask, ssim_window=3)
+    expected, _, count = _dense_box_ssim_reference(prediction, target, mask=mask, data_range=1, window=3)
+    assert result["mae"] == 0.0
+    assert result["ssim"] == pytest.approx(expected, rel=0, abs=5e-11)
+    assert result["ssim"] < 0.01
+    assert result["ssim_valid_window_count"] == count == 1
+
+
+def test_ssim_nonempty_mask_with_no_valid_centres():
+    value = torch.ones((5, 5, 5), dtype=torch.float64)
+    mask = torch.zeros_like(value, dtype=torch.bool)
+    mask[0, 0, 0] = True
+    result = dense_metrics(value, value, mask, ssim_window=3)
+    assert result["ssim"] is None
+    assert result["ssim_unavailable_reason"] == "ssim_mask_has_no_valid_window_centres"
+    assert result["ssim_valid_window_count"] == 0
+
+
+@pytest.mark.parametrize("window", [0, -1, 2, True, 3.0])
+def test_ssim_invalid_windows_still_fail_closed(window):
+    value = torch.zeros((3, 3, 3), dtype=torch.float64)
+    with pytest.raises(ValueError, match="positive odd integer"):
+        dense_metrics(value, value, ssim_window=window)
 
 
 def test_direct_dense_reference_and_signed_improvement() -> None:

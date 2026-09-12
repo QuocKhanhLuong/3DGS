@@ -590,6 +590,7 @@ def _run_teacher_benchmark_impl(inputs: Any, options: BenchmarkOptions, output_d
             build_started = time.perf_counter()
             footprint = _build_footprint(lattice, action, options.chunk_size)
             footprint_build_elapsed = time.perf_counter() - build_started
+            validation_elapsed = getattr(footprint, "_pfgr_validation_elapsed_seconds", None)
             benchmark_ids = ids
             benchmark_probabilities: Tensor | None = None
             benchmark_sampling_law = "exact_union_v1"
@@ -675,6 +676,11 @@ def _run_teacher_benchmark_impl(inputs: Any, options: BenchmarkOptions, output_d
                         "cache_reset": cache_reset,
                         "cache_reset_scope": "lattice_query_cache_only",
                         "footprint_build_elapsed_seconds": float(footprint_build_elapsed),
+                        "footprint_validation_elapsed_seconds": validation_elapsed,
+                        "footprint_build_excluding_validation_seconds": (
+                            max(0.0, footprint_build_elapsed - validation_elapsed)
+                            if validation_elapsed is not None else None
+                        ),
                         "elapsed_seconds": float(elapsed),
                         "allocated_memory_bytes": allocated,
                         "reserved_memory_bytes": reserved,

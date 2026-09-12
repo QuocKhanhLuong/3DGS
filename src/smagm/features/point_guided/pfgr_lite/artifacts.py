@@ -98,8 +98,8 @@ _EXACT_JSON_CATEGORIES: dict[str, str] = {
     "role_manifest.json": "role_manifest",
     "receipt.json": "receipt",
     # Exact scalar/metadata handoffs emitted by the PFGR CLI services.
-    # Keep these names explicit; stage_runtime and all tensor/checkpoint
-    # payloads remain intentionally outside the package boundary.
+    # Keep these names explicit; stage_runtime permits its typed metadata
+    # receipt only, never tensor/checkpoint or raw RNG state payloads.
     "service_receipt.json": "receipt",
     "bank_verify.json": "bank_index_metadata",
     "value_fit.json": "metrics_summary",
@@ -112,8 +112,15 @@ _EXACT_JSON_CATEGORIES: dict[str, str] = {
     "allowance_winners.json": "paired_action_rows",
     "review_context.json": "provenance",
     "stage_state.json": "receipt",
+    "stage_receipt.json": "receipt",
+    "stage_runtime.json": "stage_runtime_metadata",
     "resume_summary.json": "receipt",
     "r4-paired.json": "paired_comparison",
+    "headroom_decision.json": "headroom_evidence",
+    "headroom_metrics.json": "headroom_evidence",
+    "next1_evidence.json": "headroom_evidence",
+    "pipeline_manifest.json": "pipeline_metadata",
+    "pipeline_summary.json": "pipeline_metadata",
     "changes.json": "config_changes",
     "provenance.json": "provenance",
     "metrics.json": "metrics_summary",
@@ -142,8 +149,10 @@ _EXACT_JSON_CATEGORIES: dict[str, str] = {
 }
 
 _EXACT_JSONL_CATEGORIES: dict[str, str] = {
+    "pipeline_events.jsonl": "pipeline_events",
     "metrics.jsonl": "metrics_history",
     "metrics_history.jsonl": "metrics_history",
+    "stage_history.jsonl": "metrics_history",
     "paired_subjects.jsonl": "paired_subject_rows",
     "paired_subject_rows.jsonl": "paired_subject_rows",
     "paired_actions.jsonl": "paired_action_rows",
@@ -158,6 +167,7 @@ _EXACT_JSONL_CATEGORIES: dict[str, str] = {
 }
 
 _EXACT_CSV_CATEGORIES: dict[str, str] = {
+    "pipeline_metrics.csv": "pipeline_metrics",
     "metrics.csv": "metrics_summary",
     "metrics_history.csv": "metrics_history",
     "paired_subjects.csv": "paired_subject_rows",
@@ -421,6 +431,8 @@ _MAPPING_LIST_KEYS = {
     "actions",
     "paired_subjects",
     "paired_actions",
+    "paired_dense_metrics",
+    "paired_dense_metrics_unmeasured",
     "included",
     "exclusions",
     "runs",
@@ -485,6 +497,9 @@ _STRING_LIST_KEYS = {
     "shard_hashes",
     "selected_replay_refs",
     "source_scope_roots",
+    "source_scope_ignored_paths",
+    "source_scope_symlink_paths",
+    "source_scope_untracked_paths",
     "authorized_modules",
     "subject_ids",
     "baseline_test_subject_ids",
@@ -533,6 +548,9 @@ _STRING_PAIR_LIST_LIMITS = {
     "details": 64,
 }
 _STRING_LIST_LIMITS = {
+    "source_scope_ignored_paths": 4096,
+    "source_scope_symlink_paths": 4096,
+    "source_scope_untracked_paths": 4096,
     "baseline_train_subject_ids": 16384,
     "baseline_validation_subject_ids": 16384,
     "baseline_test_subject_ids": 16384,
@@ -589,6 +607,35 @@ _COMPARISON_NUMERIC_VECTOR_LIMITS = {
     "top1_regret_values": 16384,
 }
 
+# NEXT-1 emits only scalar diagnostic rows, never predictions.  Recognise
+# these schemas inside CLI receipts too, where the service result is nested.
+# Do not relax the generic JSON array or raw-payload boundary.
+_HEADROOM_FILE_SCHEMAS = {
+    "headroom_decision.json": "pfgr-lite-headroom-decision-v1",
+    "headroom_metrics.json": "pfgr-lite-headroom-result-v2",
+    "next1_evidence.json": "pfgr-lite-headroom-evidence-v1",
+}
+_PIPELINE_FILE_SCHEMAS = {
+    "pipeline_manifest.json": "pfgr-lite-pipeline-manifest-v1",
+    "pipeline_summary.json": "pfgr-lite-pipeline-summary-v1",
+}
+_PIPELINE_KNOWN_SCHEMAS = set(_PIPELINE_FILE_SCHEMAS.values()) | {
+    "pfgr-lite-pipeline-event-v1", "pfgr-lite-pipeline-command-v1", "pfgr-lite-pipeline-exit-v1",
+}
+_HEADROOM_NUMERIC_VECTOR_LIMITS = {
+    "oracle": 16384, "random": 16384, "z0": 16384,
+    "oracle_minus_random": 16384, "oracle_minus_z0": 16384,
+    "per_subject_query_count": 16384, "point_ras_mm": 3,
+    "random_seeds": 3,
+}
+_HEADROOM_MAPPING_LIST_LIMITS = {
+    "candidate_pool": 16384, "random_controls": 3,
+    "correction_write_norms": 16384,
+}
+_HEADROOM_STRING_LIST_LIMITS = {
+    "delta_hashes": 16384, "exact_best_action_ids": 32, "observed_best_action_ids": 32,
+}
+
 # A benchmark row is a scalar parity record, not a feature/action payload.
 # Keep this schema in sync with benchmark._one_parity_case/run_teacher_benchmark
 # and reject descriptors/proposals/planes rather than relying on a generic
@@ -627,6 +674,8 @@ _BENCHMARK_ROW_KEYS = {
     "cache_reset",
     "cache_reset_scope",
     "footprint_build_elapsed_seconds",
+    "footprint_validation_elapsed_seconds",
+    "footprint_build_excluding_validation_seconds",
     "elapsed_seconds",
     "allocated_memory_bytes",
     "reserved_memory_bytes",
@@ -1027,6 +1076,18 @@ def _validate_json_value(
     parent_key: str | None = None,
     category: str | None = None,
 ) -> None:
+    if (
+        category in {"pipeline_metadata", "pipeline_events", "command", "exit"}
+        and isinstance(value, Mapping)
+        and value.get("schema_version") in _PIPELINE_KNOWN_SCHEMAS
+    ):
+        category = "pipeline_metadata"
+    if (
+        category in {"receipt", "headroom_evidence", "pipeline_metadata"}
+        and isinstance(value, Mapping)
+        and value.get("schema_version") in _HEADROOM_FILE_SCHEMAS.values()
+    ):
+        category = "headroom_evidence"
     if isinstance(value, float) and not math.isfinite(value):
         raise EvidenceValidationError(
             f"non-finite JSON value in allow-listed evidence {source}: {key_path}"
@@ -1073,7 +1134,9 @@ def _validate_json_value(
                     category=category,
                 )
                 continue
-            if normalised in _SAFE_BOOLEAN_METADATA_KEYS:
+            if normalised in _SAFE_BOOLEAN_METADATA_KEYS or (
+                category == "headroom_evidence" and normalised == "prediction_available"
+            ):
                 _validate_safe_boolean_metadata(
                     child,
                     source=source,
@@ -1117,6 +1180,63 @@ def _validate_json_value(
             )
     elif isinstance(value, (list, tuple)):
         list_key = parent_key or ""
+        if category == "stage_runtime_metadata" and list_key in {"sample_order", "rng_streams"}:
+            limit = 16384 if list_key == "sample_order" else 64
+            if len(value) > limit or not all(isinstance(item, str) for item in value):
+                raise UnsafeEvidenceError(f"invalid bounded runtime metadata vector in {source}: {key_path}")
+            for index, child in enumerate(value):
+                _validate_json_value(child, source=source, key_path=f"{key_path}[{index}]", category=category)
+            return
+        if list_key == "k":
+            if len(value) > 64 or not all(type(item) is int and 0 <= item <= 4 for item in value):
+                raise UnsafeEvidenceError(f"invalid bounded stage K vector in {source}: {key_path}")
+            return
+        if category == "pipeline_metadata" and list_key in {"requires", "produces", "random_control_seeds", "artifacts"}:
+            limit = 3 if list_key == "random_control_seeds" else 512
+            valid = (
+                all(type(item) is int and item >= 0 for item in value) if list_key == "random_control_seeds"
+                else all(isinstance(item, Mapping) for item in value) if list_key == "artifacts"
+                else all(isinstance(item, str) for item in value)
+            )
+            if len(value) > limit or not valid:
+                raise UnsafeEvidenceError(f"invalid or oversized pipeline metadata list in {source}: {key_path}")
+            for index, child in enumerate(value):
+                _validate_json_value(child, source=source, key_path=f"{key_path}[{index}]", category=category)
+            return
+        if list_key == "executable_manifest":
+            if len(value) > 4096:
+                raise UnsafeEvidenceError(f"oversized executable manifest in {source}: {key_path}")
+            for index, child in enumerate(value):
+                if (
+                    not isinstance(child, Mapping) or set(child) != {"path", "sha256", "size"}
+                    or not isinstance(child["path"], str)
+                    or not isinstance(child["sha256"], str)
+                    or re.fullmatch(r"[0-9a-f]{64}", child["sha256"]) is None
+                    or type(child["size"]) is not int or child["size"] < 0
+                ):
+                    raise UnsafeEvidenceError(f"invalid executable manifest row in {source}: {key_path}[{index}]")
+                _validate_json_value(child, source=source, key_path=f"{key_path}[{index}]", category=category)
+            return
+        if category == "headroom_evidence":
+            numeric_limit = _HEADROOM_NUMERIC_VECTOR_LIMITS.get(list_key)
+            mapping_limit = _HEADROOM_MAPPING_LIST_LIMITS.get(list_key)
+            string_limit = _HEADROOM_STRING_LIST_LIMITS.get(list_key)
+            if numeric_limit is not None:
+                if len(value) > numeric_limit or not all(
+                    isinstance(item, (int, float)) and not isinstance(item, bool) for item in value
+                ):
+                    raise UnsafeEvidenceError(f"invalid or oversized headroom numeric vector in {source}: {key_path}")
+                for index, child in enumerate(value):
+                    _validate_json_value(child, source=source, key_path=f"{key_path}[{index}]", category=category)
+                return
+            if mapping_limit is not None or string_limit is not None:
+                limit = mapping_limit if mapping_limit is not None else string_limit
+                expected_type = Mapping if mapping_limit is not None else str
+                if len(value) > limit or not all(isinstance(item, expected_type) for item in value):
+                    raise UnsafeEvidenceError(f"invalid or oversized headroom metadata list in {source}: {key_path}")
+                for index, child in enumerate(value):
+                    _validate_json_value(child, source=source, key_path=f"{key_path}[{index}]", category=category)
+                return
         if category == "value_evaluation_pairs" and list_key == "rows":
             if len(value) > 16384 or not all(isinstance(item, Mapping) for item in value):
                 raise UnsafeEvidenceError(
@@ -1324,10 +1444,19 @@ def _load_json(path: Path, *, category: str) -> object:
         "calibration_manifest_metadata",
         "calibration_metadata",
         "paired_comparison",
+        "headroom_evidence",
+        "pipeline_metadata",
+        "stage_runtime_metadata",
     } and not isinstance(value, Mapping):
         raise EvidenceValidationError(
             f"allow-listed metadata evidence must be a JSON object: {path}"
         )
+    if category == "headroom_evidence" and value.get("schema_version") != _HEADROOM_FILE_SCHEMAS.get(path.name.lower()):
+        raise EvidenceValidationError(f"unexpected NEXT-1 evidence schema: {path}")
+    if category == "pipeline_metadata" and value.get("schema_version") != _PIPELINE_FILE_SCHEMAS.get(path.name.lower()):
+        raise EvidenceValidationError(f"unexpected pipeline metadata schema: {path}")
+    if category == "stage_runtime_metadata" and value.get("schema_version") != "pfgr-lite-stage-runtime-v1":
+        raise EvidenceValidationError(f"unexpected stage runtime metadata schema: {path}")
     if category in {
         "metrics_summary",
         "metrics_history",
@@ -1376,6 +1505,8 @@ def _validate_jsonl(path: Path, *, category: str) -> None:
                 f"allow-listed JSONL rows must be objects: {path} line {line_number}"
             )
         key_path = f"line[{line_number}]"
+        if category == "pipeline_events" and value.get("schema_version") != "pfgr-lite-pipeline-event-v1":
+            raise EvidenceValidationError(f"unexpected pipeline event schema: {path} line {line_number}")
         if category == "benchmark_rows":
             _validate_benchmark_row(value, source=path, key_path=key_path)
         _validate_json_value(

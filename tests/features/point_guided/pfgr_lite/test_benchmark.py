@@ -78,6 +78,10 @@ def test_same_work_reference_sparse_parity_and_actual_rows(tmp_path) -> None:
     assert all(row["sampling_law"] == "iid_fixed_q_plane_mixture_c_over_S_v1" for row in rows)
     assert all(row["query_draws"] == 64 for row in rows)
     assert all(row["gain_error_max"] is not None and row["parity_failure"] is None for row in rows)
+    for row in rows:
+        validation = row["footprint_validation_elapsed_seconds"]
+        assert 0 <= validation <= row["footprint_build_elapsed_seconds"]
+        assert row["footprint_build_excluding_validation_seconds"] + validation == pytest.approx(row["footprint_build_elapsed_seconds"])
     benchmark = json.loads((tmp_path / "benchmark" / "benchmark.json").read_text())
     timing = benchmark["timing"]
     assert timing["optimized_p50_seconds"] is not None

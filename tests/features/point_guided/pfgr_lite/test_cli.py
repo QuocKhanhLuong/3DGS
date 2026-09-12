@@ -68,6 +68,52 @@ def test_static_base_flag_is_bound_into_strict_execution_config() -> None:
     assert details["execution"]["pfgr_config"]["static"]["variant"] == "b1_multiscale_v1"
 
 
+@pytest.mark.parametrize("explicit_seed, expected_seed", [(17, 17), (None, 41)])
+def test_training_seed_reaches_production_factory_and_receipt_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit_seed: int | None, expected_seed: int,
+) -> None:
+    from smagm.cli import pfgr_lite as cli
+    from smagm.features.point_guided.pfgr_lite import stages
+
+    document = json.loads(Path("configs/pfgr_lite/synthetic.json").read_text())
+    document["stage_options"]["seed"] = 41
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(document))
+    roles_path = tmp_path / "roles.json"
+    roles_path.write_text("{}")
+    argv = ["static-train", "--config", str(config_path), "--roles-file", str(roles_path)]
+    if explicit_seed is not None:
+        argv += ["--seed", str(explicit_seed)]
+    args = _parser().parse_args(argv)
+    config, details = _config_for_command(args, stage="S0")
+    assert args.seed == expected_seed
+    assert details["execution"]["stage_options"]["seed"] == expected_seed
+    assert args._seed_resolution == {
+        "requested": explicit_seed, "effective": expected_seed,
+        "source": "cli" if explicit_seed is not None else "execution_config",
+    }
+    captured = []
+
+    class FactoryReached(Exception):
+        pass
+
+    def capture_factory(_config, **kwargs):
+        captured.append(kwargs["stage_options"].seed)
+        raise FactoryReached
+
+    monkeypatch.setattr(cli, "_input_missing", lambda _args: [])
+    monkeypatch.setattr(stages, "build_stage_inputs", capture_factory)
+    with pytest.raises(FactoryReached):
+        cli._production_inputs(args, config, stage="S0")
+    assert captured == [expected_seed]
+
+
+@pytest.mark.parametrize("invalid_seed", [-1, 2**32])
+def test_cli_rejects_seed_outside_numpy_rng_domain(invalid_seed: int) -> None:
+    with pytest.raises(SystemExit):
+        _parser().parse_args(["static-train", "--seed", str(invalid_seed)])
+
+
 def test_cached_value_config_binds_only_unresolved_normalization() -> None:
     requested = PFGRLiteConfig(engineering_only=True)
     cached = replace(requested, observation_normalization="measured-recipe-hash")
@@ -302,7 +348,8 @@ def test_wandb_receipt_logs_finite_metrics_and_counts(monkeypatch: pytest.Monkey
     assert run.summary
 
 
-def test_typed_next1_headroom_evaluate_runs_four_subjects_and_retains_dense_receipt(tmp_path: Path) -> None:
+@pytest.mark.parametrize("exact_pool_audit", [False, True])
+def test_typed_next1_headroom_evaluate_runs_four_subjects_and_retains_dense_receipt(tmp_path: Path, exact_pool_audit: bool) -> None:
     """Exercise the real PFGR model/query/writer R4B seam on CPU.
 
     This intentionally uses the explicit engineering fixture; the result is
@@ -320,7 +367,7 @@ def test_typed_next1_headroom_evaluate_runs_four_subjects_and_retains_dense_rece
             str(output),
             "--run-name",
             "typed-next1",
-        ]
+        ] + (["--exact-pool-audit"] if exact_pool_audit else [])
     ) == 0
     run = output / "typed-next1"
     receipt = json.loads((run / "receipt.json").read_text(encoding="utf-8"))
@@ -334,6 +381,10 @@ def test_typed_next1_headroom_evaluate_runs_four_subjects_and_retains_dense_rece
     assert evidence["query_count"] == 1024
     assert evidence["privileged"] is True
     assert evidence["target_dependent"] is True
+    assert evidence["exact_pool_audit"]["enabled"] is exact_pool_audit
+    assert receipt["counts"]["target_reads"] is None or isinstance(receipt["counts"]["target_reads"], int)
+    assert receipt["counts"]["target_access_phase"] == "post-proposal-seal"
+    assert receipt["artifacts"]["evidence"].endswith("next1_evidence.json")
     assert all(
         len(subject["screening"]["rows"]) == 32
         and subject["oracle"]["metric"] is not None
@@ -351,6 +402,67 @@ def test_typed_next1_headroom_evaluate_runs_four_subjects_and_retains_dense_rece
         and all(item["prediction_available"] is True for item in subject["random_controls"])
         for subject in evidence["subjects"]
     )
+    # Exercise the complete generated receipt, not a permissive hand-written
+    # subset: the original packager silently omitted every NEXT-1 artifact.
+    from smagm.features.point_guided.pfgr_lite.artifacts import package_evidence
+
+    manifest = package_evidence([run], tmp_path / "packaged")
+    included = {row["archive_path"].split("/typed-next1/", 1)[-1] for row in manifest["included"]}
+    assert {"next1/headroom_metrics.json", "next1/headroom_decision.json", "next1/next1_evidence.json"} <= included
+
+
+def test_environment_hardware_uses_effective_cuda_device_and_reports_missing_properties(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    import torch
+
+    from smagm.cli.pfgr_lite import _environment_receipt
+
+    resolution = SimpleNamespace(effective="cuda:1", as_dict=lambda: {"effective": "cuda:1"})
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    seen = []
+    def properties(index):
+        seen.append(index)
+        return SimpleNamespace(name="synthetic CUDA properties", total_memory=123456, major=9, minor=1)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", properties)
+    result = _environment_receipt("cuda:1", configured="cpu", resolution=resolution)
+    assert seen == [1]
+    assert result["cuda_hardware"] == {
+        "status": "observed", "effective_device": "cuda:1", "index": 1,
+        "name": "synthetic CUDA properties", "total_memory_bytes": 123456,
+        "compute_capability_major": 9, "compute_capability_minor": 1,
+        "identity_source": "resolved_device_properties; not_tensor_placement_observation",
+        "cuda_visible_devices": None,
+        "uuid": None,
+    }
+    def unavailable(index):
+        raise RuntimeError("synthetic unavailable properties")
+    monkeypatch.setattr(torch.cuda, "get_device_properties", unavailable)
+    result = _environment_receipt("cuda:1", resolution=resolution)
+    assert result["device_effective"] == "cuda:1"
+    assert result["cuda_hardware"]["status"] == "unavailable"
+    assert "name" not in result["cuda_hardware"]
+    result = _environment_receipt("cpu")
+    assert result["cuda_hardware"]["effective_device"] == "cpu"
+    assert result["cuda_hardware"]["status"] == "not_applicable"
+
+
+def test_runtime_model_counts_shared_parameters_without_claiming_flops_or_cpu_cuda_peaks():
+    import torch
+
+    from smagm.cli.pfgr_lite import _runtime_model_receipt
+
+    layer = torch.nn.Linear(2, 3)
+    layer.bias.requires_grad_(False)
+    model = torch.nn.ModuleDict({"first": layer, "shared": layer})
+    result = _runtime_model_receipt(model)
+    assert result["parameter_count"] == 9
+    assert result["requires_grad_parameter_count"] == 6
+    assert result["parameter_bytes"] == 36
+    assert result["actual_devices"] == ["cpu"]
+    assert result["cuda_memory"] == {}
+    assert result["flops"] is None
+    assert _runtime_model_receipt(None)["parameter_count"] is None
 
 
 def test_headroom_checkpoint_lineage_compares_frozen_component_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
